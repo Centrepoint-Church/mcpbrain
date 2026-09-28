@@ -16,6 +16,7 @@ import pytest
 from mcpbrain.store import Store
 from mcpbrain.sync.gmail import backfill_gmail
 from mcpbrain.sync.drive import backfill_drive
+from tests.helpers.drive_export import as_export
 
 
 # ---------------------------------------------------------------------------
@@ -181,7 +182,7 @@ class _FilesFull:
         return self._list_fake.list(**kw)
 
     def export(self, fileId, mimeType, **_kw):
-        return _DriveReq(self._exports.get(fileId, b""))
+        return _DriveReq(as_export(self._exports.get(fileId, b""), mimeType))
 
     def get_media(self, fileId, **_kw):
         return _DriveReq(self._media.get(fileId, b""))

@@ -762,7 +762,7 @@ def test_cadences_from_config_absent_keys_map_to_defaults(tmp_path):
 
 
 def test_apply_config_rewires_cadences(tmp_path):
-    from mcpbrain.daemon import Daemon
+    from mcpbrain.daemon import _CADENCE_KEYS, Daemon
 
     store = _make_store(tmp_path, name="t7.db")
     emb = _FakeEmbedder()
@@ -777,33 +777,10 @@ def test_apply_config_rewires_cadences(tmp_path):
          patch("mcpbrain.daemon.config.write_config"), \
          patch("mcpbrain.daemon.config.enrich_mode", return_value="static"), \
          patch("mcpbrain.daemon._cadences_from_config", return_value={
+             # Every cadence key (so a newly added one can never KeyError
+             # this fake again), all disabled except the one under test.
+             **{k: None for k in _CADENCE_KEYS},
              "communities_interval_s": 500.0,
-             "lint_interval_s": None,
-             "synthesise_interval_s": None,
-             "proactive_interval_s": None,
-             "waiting_on_interval_s": None,
-             "blocks_interval_s": None,
-             "audit_interval_s": None,
-             "clickup_interval_s": None,
-             "stale_reextract_interval_s": None,
-             "auto_update_interval_s": None,
-             "verify_interval_s": None,
-             "feedback_aggregate_interval_s": None,
-             "org_backfill_interval_s": None,
-             "resolve_entities_interval_s": None,
-             "review_interval_s": None,
-             "action_hygiene_interval_s": None,
-             "mcp_heartbeat_sweep_interval_s": None,
-             "salience_score_interval_s": None,
-             "decay_pass_interval_s": None,
-             "consolidation_interval_s": None,
-             "voice_analyse_interval_s": None,
-             "self_improve_interval_s": None,
-             "auto_enable_interval_s": None,
-             "org_contrib_upload_interval_s": None,
-             "org_import_interval_s": None,
-             "org_curate_interval_s": None,
-             "ocr_setup_interval_s": None,
          }):
         daemon.apply_config(new_config)
 

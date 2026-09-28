@@ -6,6 +6,7 @@ import pytest
 
 from mcpbrain import config, orgs
 from mcpbrain.store import Store
+from tests.helpers.drive_export import as_export
 
 FIXTURES = Path(__file__).parent / "fixtures"
 
@@ -67,7 +68,7 @@ class _DriveFiles:
         return _Req({"files": self._page2})
 
     def export(self, fileId, mimeType):          # real export takes no supportsAllDrives
-        return _Req(self._content[fileId])
+        return _Req(as_export(self._content[fileId], mimeType))
 
     def get_media(self, fileId, **_kw):          # get_media DOES accept supportsAllDrives
         return _Req(self._content[fileId])
