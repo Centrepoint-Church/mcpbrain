@@ -15,7 +15,9 @@ Then reports outcomes per class and per MIME, carried vs re-enrich chunk
 counts, per-item extraction / embed / apply_reflow seconds (p50/p95/max), the
 Gmail/Calendar "source changed" rate, and the store checks: every
 _REFLOW_REF_COLUMNS reference with no chunk row (before AND after),
-PRAGMA foreign_key_check and PRAGMA integrity_check.
+PRAGMA foreign_key_check and PRAGMA integrity_check. Invalidated relations
+(invalidated_at IS NOT NULL) are history, not orphans, and are excluded from
+the orphan sets; the summary's `orphans_excluded` says so.
 
 Safety, by construction:
   * refuses the live store (config.store_path() AND the platform default
@@ -155,10 +157,18 @@ def _select(store, limit: int, sources, per_mime: bool) -> list[tuple[str, str, 
     return out
 
 
+# Rows the orphan sets leave out, and why (reported in the summary).
+ORPHANS_EXCLUDED = ("entity_relations rows with invalidated_at IS NOT NULL: an "
+                    "invalidated relation is history, and keeps the source_doc_id of "
+                    "the chunk a changed source no longer yields -- the same state "
+                    "today's Drive remove path leaves")
+
+
 def _orphan_refs(store) -> dict[str, set[str]]:
     """{"table.column": the set of referenced values with no chunk row}. A
     SET, not a count: the new-orphan gate is a set difference, so a run that
-    resolves one pre-existing orphan and creates a different one still fails."""
+    resolves one pre-existing orphan and creates a different one still fails.
+    Invalidated relations are excluded (ORPHANS_EXCLUDED)."""
     from mcpbrain.store import _REFLOW_REF_COLUMNS
     out: dict[str, set[str]] = {}
     with store._connect() as db:
@@ -166,9 +176,10 @@ def _orphan_refs(store) -> dict[str, set[str]]:
         for table, col in _REFLOW_REF_COLUMNS:
             if table not in tables:
                 continue
+            live = " AND t.invalidated_at IS NULL" if table == "entity_relations" else ""
             out[f"{table}.{col}"] = {r[0] for r in db.execute(
                 f"SELECT DISTINCT t.{col} FROM {table} t WHERE t.{col} IS NOT NULL "
-                f"AND t.{col} != '' "
+                f"AND t.{col} != ''{live} "
                 f"AND NOT EXISTS (SELECT 1 FROM chunks c WHERE c.doc_id = t.{col})")}
     return out
 
@@ -316,6 +327,7 @@ def run(store, *, home, services: dict, embedder, limit: int, per_mime: bool,
         # Counts are DISTINCT dangling values per column; orphans_new is the
         # size of the set difference after - before (orphans_new_values the
         # first 50 of it), never a difference of counts.
+        "orphans_excluded": ORPHANS_EXCLUDED,
         "orphans_before": {k: len(v) for k, v in orphans_before.items()},
         "orphans_after": {k: len(v) for k, v in orphans_after.items()},
         "orphans_new": {k: len(v) for k, v in new_values.items()},
@@ -342,7 +354,8 @@ def verdict(summary: dict, *, strict_orphans: bool = False) -> list[str]:
     problems = []
     if summary["orphans_new"]:
         sample = {k: v[:5] for k, v in (summary.get("orphans_new_values") or {}).items()}
-        problems.append(f"new orphan references: {summary['orphans_new']} (e.g. {sample})")
+        problems.append(f"new orphan references: {summary['orphans_new']} (e.g. {sample}; "
+                        "invalidated relations excluded)")
     if strict_orphans and any(summary["orphans_after"].values()):
         problems.append(f"orphan references: {summary['orphans_after']}")
     if summary["rebuilt_store"] and summary["foreign_key_check"]:

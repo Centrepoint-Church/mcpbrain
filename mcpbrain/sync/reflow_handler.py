@@ -166,24 +166,29 @@ class ReflowContext:
         return None
 
     def _drop_stale_tail(self, kind: str, old, new) -> None:
-        """The ordinary Gmail/Calendar handlers only UPSERT, so a changed
-        source that now yields fewer chunks leaves its old positional tail
-        (e.g. body-1, body-2 at the old split_version), which the selector
-        re-queues forever. Delete a lineage's old ids missing from the new set
-        -- invalidating their local relations first, as the ordinary change
-        path does -- but ONLY for a lineage the ordinary handler demonstrably
-        wrote: every new id of it is now in the store with the new chunk's
-        content_hash AND metadata. The handler does its own fetch, which can
-        differ from this reflow's (attachments setting off, a swallowed
-        transient attachment failure, a message changed or gone in between);
-        any lineage it did not write is left exactly as it was. (anarlog's
-        handler sweeps its own stale ids; Drive's upsert_file_chunks does.)"""
-        if kind not in ("gmail", "calendar"):
+        """The ordinary Calendar handler only UPSERTS, so a changed event that
+        now yields fewer (or differently-keyed) chunks leaves its old ids
+        behind (e.g. cal-E-2 at the old split_version), which the selector
+        re-queues forever. Sweep a lineage's old ids missing from the new set
+        through Store.sweep_changed_chunks: their local relations are
+        invalidated, as the ordinary change path does, and every OTHER
+        reference (observations, actions, recall feedback, chunk_quality) is
+        remapped to the lineage's first new chunk and logged in reflow_map
+        ('source_changed') -- so nothing is left naming a deleted id.
+
+        ONLY for a lineage the ordinary handler demonstrably wrote: every new
+        id of it is now in the store with the new chunk's content_hash AND
+        metadata. The handler does its own fetch, which can differ from this
+        reflow's (the event changed again or went away in between); any
+        lineage it did not write is left exactly as it was. (Gmail never takes
+        the ordinary path; anarlog's handler sweeps its own stale ids;
+        Drive's upsert_file_chunks does.)"""
+        if kind != "calendar":
             return
         by_key: dict[str, list] = {}
         for c in new:
             by_key.setdefault(reflow.lineage_key(c.doc_id, c.metadata or {}), []).append(c)
-        written = set()
+        first: dict[str, str] = {}
         for key, chunks in by_key.items():
             ok = True
             for c in chunks:
@@ -193,17 +198,20 @@ class ReflowContext:
                     ok = False
                     break
             if ok:
-                written.add(key)
+                first[key] = chunks[0].doc_id
         new_ids = {c.doc_id for c in new}
-        stale = [r["doc_id"] for r in old
-                 if r["doc_id"] not in new_ids
-                 and reflow.lineage_key(r["doc_id"], r["metadata"] or {}) in written]
-        if not stale:
+        remap = {}
+        for r in old:
+            key = reflow.lineage_key(r["doc_id"], r["metadata"] or {})
+            if r["doc_id"] not in new_ids and key in first:
+                remap[r["doc_id"]] = first[key]
+        if not remap:
             return
+        owner = getattr(self, "_cur", (None, None))[0] or ""
         with self.bulk_section():
-            self.store.invalidate_local_relations_for_docs(
-                stale, reason="reflow_source_changed")
-            self.store.delete_chunks(stale)
+            self.store.sweep_changed_chunks(owner, remap,
+                                            invalidate_reason="reflow_source_changed",
+                                            map_reason="source_changed")
 
     # ---- helpers ----------------------------------------------------------
     @staticmethod

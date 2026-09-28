@@ -2436,31 +2436,102 @@ class Store:
         if not doc_ids:
             return 0
         with self._connect(write=True) as db:
-            qs = ",".join("?" * len(doc_ids))
-            rowids = [r["rowid"] for r in db.execute(
-                f"SELECT rowid FROM chunks WHERE doc_id IN ({qs})", doc_ids).fetchall()]
-            # Which Drive files these doc_ids belong to, resolved BEFORE the
-            # delete so the payload cleanup below can ask whether anything is
-            # left. Derived from the doc_id rather than metadata so an orphaned
-            # payload (no chunk row at all) is still cleaned up.
-            file_ids = {k for k in (_file_key_from_doc_id(d) for d in doc_ids) if k}
-            if rowids:
-                ph = ",".join("?" * len(rowids))
-                db.execute(f"DELETE FROM vec_chunks WHERE rowid IN ({ph})", rowids)
-                db.execute(f"DELETE FROM fts_chunks WHERE rowid IN ({ph})", rowids)
-                db.execute(f"DELETE FROM chunks WHERE rowid IN ({ph})", rowids)
-            # A file's cached payload dies only with its LAST chunk. Before the
-            # re-key each chunk had its own row and the file's others survived a
-            # partial delete, so dropping it on any delete would be a behaviour
-            # change — and ingest_cache's shrink path deletes stale chunks of a
-            # file that is still very much present.
-            for fid in file_ids:
-                remaining = db.execute(
-                    f"SELECT 1 FROM chunks WHERE {_meta_extract('$.file_id')}=? "
-                    "LIMIT 1", (fid,)).fetchone()
-                if remaining is None:
-                    db.execute("DELETE FROM enrich_payloads WHERE file_id=?", (fid,))
-            return len(rowids)
+            return self._delete_chunk_rows(db, doc_ids)
+
+    @staticmethod
+    def _delete_chunk_rows(db, doc_ids: list[str]) -> int:
+        """delete_chunks' body, on an open write connection (so a caller can
+        make the delete part of a larger transaction)."""
+        qs = ",".join("?" * len(doc_ids))
+        rowids = [r["rowid"] for r in db.execute(
+            f"SELECT rowid FROM chunks WHERE doc_id IN ({qs})", doc_ids).fetchall()]
+        # Which Drive files these doc_ids belong to, resolved BEFORE the
+        # delete so the payload cleanup below can ask whether anything is
+        # left. Derived from the doc_id rather than metadata so an orphaned
+        # payload (no chunk row at all) is still cleaned up.
+        file_ids = {k for k in (_file_key_from_doc_id(d) for d in doc_ids) if k}
+        if rowids:
+            ph = ",".join("?" * len(rowids))
+            db.execute(f"DELETE FROM vec_chunks WHERE rowid IN ({ph})", rowids)
+            db.execute(f"DELETE FROM fts_chunks WHERE rowid IN ({ph})", rowids)
+            db.execute(f"DELETE FROM chunks WHERE rowid IN ({ph})", rowids)
+        # A file's cached payload dies only with its LAST chunk. Before the
+        # re-key each chunk had its own row and the file's others survived a
+        # partial delete, so dropping it on any delete would be a behaviour
+        # change — and ingest_cache's shrink path deletes stale chunks of a
+        # file that is still very much present.
+        for fid in file_ids:
+            remaining = db.execute(
+                f"SELECT 1 FROM chunks WHERE {_meta_extract('$.file_id')}=? "
+                "LIMIT 1", (fid,)).fetchone()
+            if remaining is None:
+                db.execute("DELETE FROM enrich_payloads WHERE file_id=?", (fid,))
+        return len(rowids)
+
+    def sweep_changed_chunks(self, owner: str, remap: dict[str, str], *,
+                             invalidate_reason: str = "reflow_source_changed",
+                             map_reason: str = "source_changed") -> dict:
+        """Remove chunks a CHANGED source no longer yields (the reflow's
+        ordinary-path stale-tail sweep, dry run #2 D3), in ONE transaction:
+
+          * origin='local' relations sourced from them are invalidated (as the
+            ordinary change path does -- the old text no longer evidences
+            them), and keep their source_doc_id: invalidated rows are history;
+          * every OTHER reference (_REFLOW_REF_COLUMNS minus entity_relations)
+            is repointed to remap[old] by simultaneous substitution through a
+            temp table, and chunk_quality is merged -- exactly as apply_reflow
+            does -- so no observation / action / feedback row is left naming
+            a deleted id;
+          * the chunk rows (+ vec/fts mirrors) are deleted;
+          * the mapping is appended to reflow_map with reason `map_reason`.
+
+        `remap` maps each swept id to a chunk that exists (the lineage's first
+        new chunk); a target with no chunk row raises ValueError and nothing
+        is written. Returns {deleted, invalidated, remapped}."""
+        remap = {o: n for o, n in (remap or {}).items() if o != n}
+        if not remap:
+            return {"deleted": 0, "invalidated": 0, "remapped": 0}
+        olds = list(remap)
+        now = datetime.now(timezone.utc).isoformat()
+        with self._connect(write=True) as db:
+            targets = sorted(set(remap.values()))
+            tp = ",".join("?" * len(targets))
+            present = {r[0] for r in db.execute(
+                f"SELECT doc_id FROM chunks WHERE doc_id IN ({tp})", targets)}
+            if set(targets) - present:
+                raise ValueError(f"sweep_changed_chunks {owner}: remap target(s) with no "
+                                 f"chunk {sorted(set(targets) - present)[:5]}")
+            tables = {r[0] for r in db.execute(
+                "SELECT name FROM sqlite_master WHERE type='table'")}
+            op = ",".join("?" * len(olds))
+            invalidated = db.execute(
+                f"UPDATE entity_relations SET invalidated_at=?, superseded_reason=? "
+                f"WHERE source_doc_id IN ({op}) AND invalidated_at IS NULL "
+                f"AND COALESCE(origin,'local')='local'",
+                (now, invalidate_reason, *olds)).rowcount
+            db.execute("CREATE TEMP TABLE IF NOT EXISTS reflow_tmp("
+                       "old TEXT PRIMARY KEY, new TEXT NOT NULL)")
+            db.execute("DELETE FROM reflow_tmp")
+            db.executemany("INSERT INTO reflow_tmp(old, new) VALUES(?,?)", list(remap.items()))
+            remapped = 0
+            for table, col in _REFLOW_REF_COLUMNS:
+                if table == "entity_relations" or table not in tables:
+                    continue
+                remapped += db.execute(
+                    f"UPDATE {table} SET {col}=(SELECT new FROM reflow_tmp "
+                    f"WHERE old={table}.{col}) WHERE {col} IN (SELECT old FROM reflow_tmp)"
+                ).rowcount
+            if "chunk_quality" in tables:
+                # Merge the targets' own rows in as well: a target is a live
+                # chunk whose quality must be summed with, never replaced by,
+                # the swept id's.
+                self._merge_chunk_quality(db, {**{t: t for t in targets}, **remap})
+            deleted = self._delete_chunk_rows(db, olds)
+            db.executemany(
+                "INSERT INTO reflow_map(owner, old_doc_id, new_doc_id, reason, at) "
+                "VALUES(?,?,?,?,?)", [(owner, o, n, map_reason, now) for o, n in remap.items()])
+            db.execute("DROP TABLE reflow_tmp")
+        return {"deleted": deleted, "invalidated": invalidated, "remapped": remapped}
 
     def invalidate_local_relations_for_docs(self, doc_ids, *,
                                             reason: str = "drive_revoked",

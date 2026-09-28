@@ -277,3 +277,34 @@ def test_refuses_the_platform_default_store_despite_a_home_override(
     _fakes(monkeypatch)
     assert dryrun.main(["--store", str(default), "--yes"]) == 2
     assert default.read_bytes() == before
+
+
+# -- dry run #2 D3: invalidated relations are history, not orphans ------------
+
+def test_an_invalidated_relation_on_a_gone_id_is_not_an_orphan(tmp_path, home, monkeypatch):
+    """The ordinary change path invalidates a swept chunk's relations and
+    leaves their source_doc_id (as today's Drive remove path does): the gate
+    excludes them, and the summary says so. A LIVE relation on a gone id still
+    fails."""
+    path = _copy(tmp_path)
+
+    def dangle(invalidated):
+        def f():
+            with sqlite3.connect(path) as db:
+                db.execute("INSERT INTO entity_relations(entity_a, relation, entity_b,"
+                           " source_doc_id, invalidated_at) VALUES('e1','member_of','e2',"
+                           "'cal-GONE',?)", ("2026-09-28T00:00:00" if invalidated else None,))
+        return f
+
+    _fakes(monkeypatch, emb=_Emb(on_embed=dangle(True)))
+    out = tmp_path / "summary.json"
+    assert dryrun.main(["--store", str(path), "--out", str(out), "--yes"]) == 0
+    summary = json.loads(out.read_text())
+    assert summary["orphans_new"] == {}
+    assert "invalidated_at IS NOT NULL" in summary["orphans_excluded"]
+
+    path2 = _copy(tmp_path, "copy2.sqlite3")
+    path = path2
+    _fakes(monkeypatch, emb=_Emb(on_embed=dangle(False)))
+    assert dryrun.main(["--store", str(path2), "--out", str(out), "--yes"]) == 1
+    assert json.loads(out.read_text())["orphans_new"] == {"entity_relations.source_doc_id": 1}

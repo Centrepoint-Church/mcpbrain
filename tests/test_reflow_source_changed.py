@@ -297,3 +297,64 @@ def test_anarlog_duplicate_legacy_row_is_carried(tmp_path, monkeypatch):
         {"source": "reflow:anarlog", "ref_id": "S1", "attempts": 0}) is None
     assert _outcome(s, "S1") == "carried"
     assert [r["doc_id"] for r in s.owner_chunks(["anarlog-S1-"])] == ["anarlog-S1-notes-0"]
+
+
+# ---- D3: the ordinary-path stale-tail sweep leaves nothing dangling --------
+
+def test_changed_event_sweep_remaps_non_relation_refs_and_invalidates_relations(
+        tmp_path, monkeypatch):
+    """A genuinely edited event whose new split is shorter: the ordinary
+    handler upserts cal-E-0/-1, the sweep removes cal-E-2. Its relations are
+    invalidated (spec: the old text's claims are no longer evidenced); every
+    OTHER reference -- observations, actions, recall feedback, chunk_quality
+    -- moves to the lineage's first new chunk, logged in reflow_map as
+    'source_changed'. Nothing is left pointing at a deleted id."""
+    from mcpbrain.store import _REFLOW_REF_COLUMNS
+    s = _store(tmp_path)
+    for i in range(3):
+        s.upsert_chunk(f"cal-E-{i}", f"old agenda part {i}", f"c{i}",
+                       {**_CMD, "chunk_index": i, "chunk_total": 3})
+    _enrich(s, "cal-E-0", "cal-E-1", "cal-E-2")
+    _relation(s, "cal-E-2"); _refs(s, "cal-E-2")
+    with s._connect(write=True) as db:
+        db.execute("INSERT INTO chunk_quality(doc_id, exposures, uses) VALUES('cal-E-0', 1, 1)")
+        db.execute("INSERT INTO chunk_quality(doc_id, exposures, uses) VALUES('cal-E-2', 2, 3)")
+    new = _cal_new(["moved to Friday, new agenda", "second half of the new agenda"])
+
+    def _ordinary(item):              # what handle_calendar_item does: upsert only
+        for c in new:
+            s.upsert_chunk(c.doc_id, c.text, c.content_hash, c.metadata)
+    ctx = _cal_ctx(s, tmp_path, monkeypatch, new, _ordinary)
+    assert ctx.handle({"source": "reflow:calendar", "ref_id": "E", "attempts": 0}) is None
+
+    assert _outcome(s, "E") == "ordinary"
+    assert [r["doc_id"] for r in s.owner_chunks(["cal-E"])] == ["cal-E-0", "cal-E-1"]
+    rel = _relations(s)[0]
+    assert rel["invalidated_at"] is not None
+    assert rel["superseded_reason"] == "reflow_source_changed"
+    with s._connect() as db:
+        for table, col in _REFLOW_REF_COLUMNS:
+            if table == "entity_relations":
+                continue
+            vals = {r[0] for r in db.execute(f"SELECT {col} FROM {table}") if r[0]}
+            assert "cal-E-2" not in vals, (table, col)
+        assert db.execute("SELECT source FROM entity_observations").fetchone()[0] == "cal-E-0"
+        assert db.execute("SELECT source_doc_id, waiting_on_cleared_by_doc_id FROM actions"
+                          ).fetchone()[:] == ("cal-E-0", "cal-E-0")
+        assert db.execute("SELECT doc_id FROM recall_feedback").fetchone()[0] == "cal-E-0"
+        q = [tuple(r) for r in db.execute(
+            "SELECT doc_id, exposures, uses FROM chunk_quality ORDER BY doc_id")]
+    assert q == [("cal-E-0", 3, 4)]
+    assert _map(s, "E") == {"cal-E-2": ("cal-E-0", "source_changed")}
+
+
+def test_sweep_changed_chunks_refuses_a_missing_target_and_writes_nothing(tmp_path):
+    s = _store(tmp_path)
+    s.upsert_chunk("cal-E-2", "old tail", "c2", {**_CMD, "chunk_index": 2, "chunk_total": 3})
+    _refs(s, "cal-E-2")
+    with pytest.raises(ValueError, match="no chunk"):
+        s.sweep_changed_chunks("E", {"cal-E-2": "cal-E-0"})
+    assert s.get_chunk("cal-E-2") is not None
+    with s._connect() as db:
+        assert db.execute("SELECT source FROM entity_observations").fetchone()[0] == "cal-E-2"
+    assert _map(s, "E") == {}
