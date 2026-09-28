@@ -146,3 +146,19 @@ def test_default_label_keeps_existing_constructions_unchanged():
     from mcpbrain.sync.blocks import Heading, Paragraph
     assert Heading(1, "A") == Heading(1, "A", label="")
     assert Paragraph("x").label == ""
+
+
+def test_heading_does_not_flush_a_chunk_at_most_half_full():
+    """The other side of the heading rule: a heading joins a chunk whose text
+    is at most half the budget instead of starting a new one."""
+    blocks = [Paragraph("x " * 200), Heading(1, "Next"), Paragraph("y " * 50)]
+    out = render(blocks)
+    assert len(out) == 1
+    assert "\n\nNext\n\n" in out[0].text
+
+
+def test_to_text_tolerates_a_none_cell():
+    """No shipped extractor emits a None cell (PDF maps None -> "", DOCX/PPTX
+    read .text), but to_text is the public flat view and must not crash."""
+    t = to_text([TableBlock([["Item", None], [None, "5"]])])
+    assert t == "Item | \n | 5"

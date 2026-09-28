@@ -69,7 +69,7 @@ class Rendered:
 
 
 def _table_line(row: list[str]) -> str:
-    return " | ".join(c for c in row)
+    return " | ".join(c or "" for c in row)
 
 
 def to_text(blocks) -> str:
@@ -83,7 +83,7 @@ def to_text(blocks) -> str:
             if text:
                 parts.append(text)
         elif isinstance(b, TableBlock):
-            lines = [_table_line(r) for r in b.rows if any(c.strip() for c in r)]
+            lines = [_table_line(r) for r in b.rows if any((c or "").strip() for c in r)]
             if lines:
                 parts.append("\n".join(lines))
     text = "\n\n".join(parts)
@@ -282,9 +282,11 @@ def render(blocks, *, max_chars: int | None = None) -> list[Rendered]:
 
     for p in pieces:
         size = sum(len(x.text) + 2 for x in cur) + len(p.text)
+        # (A former third clause, `p.kind == "table" and ... and size >
+        # max_chars`, was subsumed by the first and has been removed: same
+        # output, by boolean absorption.)
         if cur and (size > max_chars
-                    or (p.kind == "heading" and size - len(p.text) > max_chars // 2)
-                    or (p.kind == "table" and cur[-1].kind != "table" and size > max_chars)):
+                    or (p.kind == "heading" and size - len(p.text) > max_chars // 2)):
             flush()
         cur.append(p)
     flush()
