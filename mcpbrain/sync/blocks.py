@@ -6,8 +6,9 @@ headings and tables survive to the chunker (2026-09-24 extraction-fidelity
 spec). `render` is the single place a Block list becomes chunks; `to_text` is
 the flat-string view kept for callers that only want text.
 
-CONTRACT (Stage 0): types and constants are final; `to_text`, `from_text` and
-`render` are implemented by unit 1a.
+`render`'s output is chunk text: any change to it (or to the Block types it
+reads) must bump SPLIT_VERSION / EXTRACTION_VERSIONS, or reflowed owners and
+fresh ingests diverge.
 """
 import re
 from dataclasses import dataclass, field

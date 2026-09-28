@@ -3617,7 +3617,7 @@ class Store:
         return {"queue_rows": queue_rows, "cursors": cursors,
                 "pending_publishes": pending_publishes}
 
-    # --- reflow (extraction-fidelity) -- CONTRACT (Stage 0), unit 1d ---------
+    # --- reflow (extraction-fidelity, 2026-09-24) ------------------------------
 
     def enqueue_items(self, items, *, source: str) -> int:
         """enqueue_and_advance without a cursor: for producers (the reflow

@@ -1,6 +1,8 @@
 """FROZEN copy of chunking.chunk_text as of 0.7.131 — the oracle for the
 byte-identity property in tests/test_chunking_split.py. Never edit."""
-from mcpbrain.chunking import _PREFIX_HEADROOM_CHARS  # noqa: F401  (used by chunk_text)
+# Frozen literal, not imported from the live chunking module (an import let
+# the oracle drift with it). Value as of 0.7.131.
+_PREFIX_HEADROOM_CHARS = 200
 
 
 def _hard_split(word: str, max_chars: int) -> list[str]:

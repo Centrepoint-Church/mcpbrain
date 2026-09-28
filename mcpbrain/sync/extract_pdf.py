@@ -1,6 +1,9 @@
 """PDF -> Blocks: reading order (sort=True), headings by font size, ruled
 tables via find_tables(), scanned pages via the tesseract fallback in
-extractors. CONTRACT (Stage 0); implemented by unit 1b."""
+extractors (imported lazily: extractors re-exports this module).
+
+Any change to the Blocks this returns changes chunk text for every PDF owner,
+so it must come with a bump of EXTRACTION_VERSIONS["application/pdf"]."""
 
 import logging
 
@@ -15,9 +18,9 @@ _HEADING_MAX_CHARS = 200
 def _split_ocr_paragraphs(text: str) -> list:
     """OCR text -> Paragraphs, split on blank lines.
 
-    Deliberately does not use blocks.from_text: that function is still a
-    stub owned by another unit at the time this module was written, and the
-    OCR path only ever needs this trivial blank-line split.
+    Deliberately not blocks.from_text: this blank-line split is what
+    extraction_version 1 shipped for OCR pages, and switching would change
+    OCR chunk text fleet-wide (that needs an EXTRACTION_VERSIONS bump).
     """
     return [Paragraph(p.strip()) for p in text.split("\n\n") if p.strip()]
 

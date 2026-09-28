@@ -52,9 +52,10 @@ def test_content_hash_is_stable():
     assert content_hash("abc") != content_hash("abd")
 
 
-def test_word_split_chunks_overlap_and_lose_nothing():
-    """Ratify that the word-split path seeds each new chunk with the last `overlap`
-    words of the previous chunk, and that no token is dropped across the full output.
+def test_word_split_chunks_lose_nothing_and_stay_in_budget():
+    """Ratify that the word-split path drops no token across the full output and
+    that every chunk is non-empty and within budget. (Under SPLIT_VERSION 1 the
+    per-word overlap seed is no longer guaranteed here -- see below.)
 
     Uses max_tokens=20 (max_chars=80) and overlap=5 against a 2000-token sequence so
     we get many splits without relying on any hard-coded character counts.

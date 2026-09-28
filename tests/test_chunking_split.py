@@ -88,3 +88,12 @@ def test_internal_blank_line_between_short_lines_is_preserved():
     para = "Alpha\n\nBeta\n" + ("Long line word " * 30)   # tail forces a flush after Beta
     pieces = split_long_paragraph(para, 200, overlap=0)
     assert pieces[0] == "Alpha\n\nBeta"
+
+
+def test_oracle_is_frozen_not_linked_to_the_live_chunker():
+    """The v0 oracle must not import constants from mcpbrain.chunking: a change
+    to the live module would silently move the oracle with it and the
+    byte-identity property would compare the new chunker against itself."""
+    from pathlib import Path
+    src = (Path(__file__).parent / "oracles" / "chunking_v0.py").read_text(encoding="utf-8")
+    assert "from mcpbrain" not in src and "import mcpbrain" not in src
