@@ -213,32 +213,40 @@ class ReflowContext:
 
     @staticmethod
     def _source_changed(p, old, new) -> bool:
-        """True when a lineage present on BOTH sides differs and is not a
-        block-extracted one (whose text is EXPECTED to differ), or a lineage
-        appears that is neither block-extracted nor Gmail-attachment-shaped.
+        """Calendar / anarlog: has the SOURCE changed? (Gmail never asks --
+        messages are immutable, see handle.)
 
-        A lineage present only in `old` is never read as a source change: for
-        these immutable/prose sources it is a failed re-extraction (e.g. an
-        attachment whose fetch failed), and apply_reflow's lineage_gone
-        refusal is what must handle it -- routing it to the ordinary path
-        would re-ingest the message without that attachment."""
+        Per lineage present on both sides, the source is unchanged iff the
+        text is contained BOTH ways, on normalised text:
+          (i) every span of every new chunk is found in the stitched old text;
+          (ii) every old chunk's text is found in the stitched new text (or in
+               the plain concatenation of the new texts, tolerating an
+               ambiguous seam overlap).
+        Stitched equality was too strict: calendar sync is upsert-only, so a
+        pre-split `cal-<eid>` row survives beside its `cal-<eid>-0/-1` split
+        and the old text holds the event twice -- (ii) still passes for that
+        duplicate, while an edit (changed text fails (i)) or a removal (the
+        removed text fails (ii)) does not.
+
+        A lineage only in `new` is a change (new content appeared). A lineage
+        only in `old` is never read as one: it is a failed re-extraction, and
+        apply_reflow's lineage_gone refusal is what must handle it."""
         def lk(doc_id, md):
             return reflow.lineage_key(doc_id, md or {})
-        mime = {}
+        old_by: dict[str, list] = {}
         for r in old:
-            md = r["metadata"] or {}
-            mime.setdefault(lk(r["doc_id"], md), md.get("attachment_mime", ""))
+            old_by.setdefault(lk(r["doc_id"], r["metadata"]), []).append(r)
+        new_by: dict[str, list] = {}
         for c in new:
-            md = c.metadata or {}
-            mime[lk(c.doc_id, md)] = md.get("attachment_mime", "")
-        old_keys = {lk(r["doc_id"], r["metadata"]) for r in old}
-        new_keys = {lk(c.doc_id, c.metadata) for c in new}
-        for k in p.unequal:
-            if k in old_keys and k not in new_keys:
+            new_by.setdefault(lk(c.doc_id, c.metadata), []).append(c)
+        for key, chunks in new_by.items():
+            rows = old_by.get(key)
+            if rows is None:
+                return True
+            if key not in p.unequal:
                 continue
-            if extraction_version(mime.get(k, "")):
-                continue
-            return True
+            if not reflow.contained_both_ways(rows, chunks):
+                return True
         return False
 
     def _embed(self, chunks) -> list:

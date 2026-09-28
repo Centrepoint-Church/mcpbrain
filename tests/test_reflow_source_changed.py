@@ -171,3 +171,129 @@ def test_gmail_repetitive_padding_is_carried_not_ordinary(tmp_path, monkeypatch)
     rels = _relations(s)
     assert rels[0]["invalidated_at"] is None
     assert rels[0]["source_doc_id"] == "gmail-M-body-0"
+
+
+# ---- D2: calendar/anarlog "changed" is bidirectional containment ----------
+
+_CMD = {"source_type": "calendar", "event_id": "E", "summary": "Board meeting"}
+_EVENT = ("Board meeting\nWhen: 2026-05-07T10:30:00+08:00 to 2026-05-07T11:30:00+08:00\n"
+          "Agenda: Dana Okafor opens with the Northgate Trust grant update. "
+          "Marcus Reyes presents the budget. Priya Anand reports on the roster. "
+          "Close with prayer and next steps.")
+
+
+def _event_split(text=_EVENT):
+    """Two overlapping pieces, as chunk_text would cut them (3-word overlap)."""
+    w = text.split()
+    return " ".join(w[:20]), " ".join(w[17:])
+
+
+def _cal_new(texts):
+    return [Chunk(f"cal-E-{i}", t, f"n{i}",
+                  {**_CMD, "split_version": 1, "chunk_index": i, "chunk_total": len(texts)})
+            for i, t in enumerate(texts)]
+
+
+def _seed_split_event(s, *, legacy=False):
+    if legacy:        # the pre-split single row, never deleted by upsert-only sync
+        s.upsert_chunk("cal-E", _EVENT, "legacy", dict(_CMD))
+    a, b = _event_split()
+    s.upsert_chunk("cal-E-0", a, "c0", {**_CMD, "chunk_index": 0, "chunk_total": 2})
+    s.upsert_chunk("cal-E-1", b, "c1", {**_CMD, "chunk_index": 1, "chunk_total": 2})
+    _enrich(s, *(["cal-E"] if legacy else []), "cal-E-0", "cal-E-1")
+
+
+def _cal_ctx(s, tmp_path, monkeypatch, new, ordinary):
+    from mcpbrain.sync import calendar
+    monkeypatch.setattr(calendar, "normalise_calendar", lambda ev: list(new))
+
+    class _Cal:
+        def events(self):
+            return self
+        def get(self, **k):
+            class R:
+                def execute(self, num_retries=0):
+                    return {"id": "E"}
+            return R()
+    return _ctx(s, tmp_path, calendar_service=_Cal(), normal_handlers={"calendar": ordinary})
+
+
+def test_calendar_duplicate_legacy_row_is_carried_not_ordinary(tmp_path, monkeypatch):
+    """The live shape: `cal-E` (pre-split, whole event) AND `cal-E-0/-1` for
+    the same event, so the stitched old text holds the event twice. Nothing
+    changed: carry, delete `cal-E` and remap it onto `cal-E-0`."""
+    s = _store(tmp_path); _seed_split_event(s, legacy=True)
+    _relation(s, "cal-E"); _refs(s, "cal-E")
+    ctx = _cal_ctx(s, tmp_path, monkeypatch, _cal_new(_event_split()),
+                   lambda it: pytest.fail("calendar took the ordinary path"))
+    assert ctx.handle({"source": "reflow:calendar", "ref_id": "E", "attempts": 0}) is None
+    assert _outcome(s, "E") == "carried"
+    rows = s.owner_chunks(["cal-E"])
+    assert [r["doc_id"] for r in rows] == ["cal-E-0", "cal-E-1"]
+    assert all(r["enriched"] == 1 for r in rows)
+    assert _map(s, "E")["cal-E"] == ("cal-E-0", "exact")
+    rel = _relations(s)[0]
+    assert rel["invalidated_at"] is None and rel["source_doc_id"] == "cal-E-0"
+    with s._connect() as db:
+        assert db.execute("SELECT source FROM entity_observations").fetchone()[0] == "cal-E-0"
+
+
+def test_calendar_edited_description_is_ordinary(tmp_path, monkeypatch):
+    s = _store(tmp_path); _seed_split_event(s, legacy=True)
+    edited = _EVENT.replace("presents the budget", "presents the revised capital budget")
+    seen = []
+    ctx = _cal_ctx(s, tmp_path, monkeypatch, _cal_new(_event_split(edited)), seen.append)
+    monkeypatch.setattr(s, "apply_reflow", lambda *a, **k: pytest.fail("reached apply_reflow"))
+    assert ctx.handle({"source": "reflow:calendar", "ref_id": "E", "attempts": 0}) is None
+    assert seen and _outcome(s, "E") == "ordinary"
+
+
+def test_calendar_removed_sentence_is_ordinary(tmp_path, monkeypatch):
+    """Every new chunk's text is still found in the old text (a pure removal),
+    so only the old->new direction catches it."""
+    s = _store(tmp_path); _seed_split_event(s)
+    shorter = _EVENT.replace(" Close with prayer and next steps.", "")
+    seen = []
+    ctx = _cal_ctx(s, tmp_path, monkeypatch, _cal_new(_event_split(shorter)), seen.append)
+    monkeypatch.setattr(s, "apply_reflow", lambda *a, **k: pytest.fail("reached apply_reflow"))
+    assert ctx.handle({"source": "reflow:calendar", "ref_id": "E", "attempts": 0}) is None
+    assert seen and _outcome(s, "E") == "ordinary"
+
+
+def test_calendar_unchanged_resplit_is_carried(tmp_path, monkeypatch):
+    """The same event re-split differently (one chunk now) is not a change."""
+    s = _store(tmp_path); _seed_split_event(s)
+    new = [Chunk("cal-E", _EVENT, "n", {**_CMD, "split_version": 1, "chunk_index": 0,
+                                        "chunk_total": 1})]
+    ctx = _cal_ctx(s, tmp_path, monkeypatch, new,
+                   lambda it: pytest.fail("calendar took the ordinary path"))
+    assert ctx.handle({"source": "reflow:calendar", "ref_id": "E", "attempts": 0}) is None
+    assert _outcome(s, "E") == "carried"
+    assert [r["doc_id"] for r in s.owner_chunks(["cal-E"])] == ["cal-E"]
+
+
+def test_anarlog_duplicate_legacy_row_is_carried(tmp_path, monkeypatch):
+    """The same containment rule for anarlog: a duplicate old row whose text
+    the new chunks still hold is not a source change."""
+    from mcpbrain.sync import anarlog
+    s = _store(tmp_path)
+    md = {"source_type": "anarlog", "session_id": "S1", "content_subtype": "notes"}
+    s.upsert_chunk("anarlog-S1-notes-0", "Dana Okafor: we agreed the roster", "t0",
+                   {**md, "chunk_index": 0, "chunk_total": 2})
+    s.upsert_chunk("anarlog-S1-notes-1", "for the Northgate Trust weekend", "t1",
+                   {**md, "chunk_index": 1, "chunk_total": 2})
+    s.upsert_chunk("anarlog-S1-notes-2", "we agreed the roster", "t2",
+                   {**md, "chunk_index": 2})
+    _enrich(s, "anarlog-S1-notes-0", "anarlog-S1-notes-1", "anarlog-S1-notes-2")
+    new = [Chunk("anarlog-S1-notes-0",
+                 "Dana Okafor: we agreed the roster for the Northgate Trust weekend", "n",
+                 {**md, "split_version": 1, "chunk_index": 0, "chunk_total": 1})]
+    db = tmp_path / "anarlog.sqlite"; db.write_bytes(b"")
+    monkeypatch.setattr(anarlog, "read_session", lambda conn, sid: {"id": sid})
+    monkeypatch.setattr(anarlog, "normalise_session", lambda sess: new)
+    monkeypatch.setattr(anarlog, "handle_anarlog_item",
+                        lambda *a, **k: pytest.fail("anarlog took the ordinary path"))
+    assert _ctx(s, tmp_path, anarlog_db=str(db)).handle(
+        {"source": "reflow:anarlog", "ref_id": "S1", "attempts": 0}) is None
+    assert _outcome(s, "S1") == "carried"
+    assert [r["doc_id"] for r in s.owner_chunks(["anarlog-S1-"])] == ["anarlog-S1-notes-0"]

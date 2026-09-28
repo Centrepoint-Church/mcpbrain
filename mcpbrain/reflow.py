@@ -258,6 +258,29 @@ def _plan_lineage(key: str, old: list[dict], new: list[Chunk], plan_: ReflowPlan
         plan_.unequal.append(key)
 
 
+def contained_both_ways(old: list[dict], new: list[Chunk]) -> bool:
+    """One lineage's old rows and new chunks hold the same text, up to
+    duplication and re-splitting: every new chunk's spans (its text when it
+    has none) occur in the stitched old text, and every old chunk's text
+    occurs in the stitched new text or in the plain concatenation of the new
+    texts. Normalised, word-boundary matches (the calendar/anarlog "source
+    unchanged" test, dry run #2 D2)."""
+    old = sorted(old, key=lambda r: int((r["metadata"] or {}).get("chunk_index", 0)))
+    o, _ = stitch([r["text"] for r in old])
+    for c in new:
+        for sp in (c.spans or [c.text]):
+            ns = norm(sp)
+            if ns and _find_word(o, ns, 0) < 0:
+                return False
+    n_text, _ = stitch([c.text for c in new])
+    joined = norm(" ".join(c.text for c in new))
+    for r in old:
+        t = norm(r["text"])
+        if t and _find_word(n_text, t, 0) < 0 and _find_word(joined, t, 0) < 0:
+            return False
+    return True
+
+
 def plan(old: list[dict], new: list[Chunk]) -> ReflowPlan:
     """Plan a reflow of one owner (spec §3). Every old doc_id is remapped to a
     new chunk's doc_id; the caller deletes ``deletes`` (old ids with no new
