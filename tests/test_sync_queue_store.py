@@ -134,6 +134,49 @@ def test_new_version_resets_attempts(tmp_path):
     assert row["next_attempt_at"] is None
 
 
+def test_defer_sync_item_transient_bumps_a_durable_counter(tmp_path):
+    """reflow_handler's bound on consecutive transient outcomes needs this
+    counter to survive across calls/cycles, so it lives on the row itself."""
+    s = _store(tmp_path)
+    s.enqueue_and_advance([_item("f1")], source="drive", cursor="1")
+    for expected in (1, 2, 3):
+        assert s.defer_sync_item_transient(
+            "drive", "f1", "2026-09-04T10:10:00") == expected
+    row = s.due_sync_items(limit=10, now="2026-09-04T10:10:00")[0]
+    assert row["attempts"] == 0, "a transient defer must never spend an attempt"
+    assert row["transient_defers"] == 3
+
+
+def test_defer_sync_item_transient_missing_row_returns_zero(tmp_path):
+    s = _store(tmp_path)
+    assert s.defer_sync_item_transient("drive", "nope", "2026-09-04T10:10:00") == 0
+
+
+def test_fail_sync_item_resets_transient_defers(tmp_path):
+    """A real failure (or reflow_handler's own escalation past its bound) must
+    reset the transient-defer tally, so a later transient run starts fresh
+    rather than inheriting this one's count."""
+    s = _store(tmp_path)
+    s.enqueue_and_advance([_item("f1")], source="drive", cursor="1")
+    s.defer_sync_item_transient("drive", "f1", "2026-09-04T10:10:00")
+    s.defer_sync_item_transient("drive", "f1", "2026-09-04T10:10:00")
+    assert s.fail_sync_item("drive", "f1", "boom", now="2026-09-04T10:00:00") == 1
+    row = s.due_sync_items(limit=10, now="2099-01-01T00:00:00")[0]
+    assert row["attempts"] == 1
+    assert row["transient_defers"] == 0
+
+
+def test_plain_defer_does_not_touch_transient_defers(tmp_path):
+    """The ordinary defer_sync_item (halt / missing service / in-flight unit)
+    is not a transient-error outcome and must not count toward the bound."""
+    s = _store(tmp_path)
+    s.enqueue_and_advance([_item("f1")], source="drive", cursor="1")
+    s.defer_sync_item_transient("drive", "f1", "2026-09-04T10:10:00")
+    assert s.defer_sync_item("drive", "f1", "2026-09-04T10:20:00")
+    row = s.due_sync_items(limit=10, now="2026-09-04T10:20:00")[0]
+    assert row["transient_defers"] == 1
+
+
 def test_stats_surface_pending_age_and_failures(tmp_path):
     s = _store(tmp_path)
     s.enqueue_and_advance([_item("f1"), _item("f2")], source="drive", cursor="1")

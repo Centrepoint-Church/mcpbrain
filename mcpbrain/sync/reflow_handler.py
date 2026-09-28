@@ -46,6 +46,14 @@ HALT_CURSOR = REFLOW_HALT_CURSOR
 DEFER_DELAY_S = 600
 _GIVE_UP_ATTEMPTS = 5
 _EPOCH = "1970-01-01T00:00:00"
+# Bound on a run of consecutive TRANSIENT defers (rate limit / gateway /
+# network) for one row. Without this a permanently-failing item that happens
+# to classify transient would defer forever -- never spending one of
+# _GIVE_UP_ATTEMPTS -- so the backlog would never reach zero and the
+# backlog-end integrity check would never run. Past the bound, the same
+# outcome is treated like any other failure (raised, so work_queue spends a
+# real attempt via Store.fail_sync_item), which also resets the tally.
+_TRANSIENT_DEFER_LIMIT = 12
 
 def _http_status(exc) -> int | None:
     resp = getattr(exc, "resp", None)
@@ -153,9 +161,23 @@ class ReflowContext:
                 raise
             # A rate limit / outage is not this owner's fault: wait, without
             # spending one of its _GIVE_UP_ATTEMPTS (five of them used to
-            # stamp it gave_up for good during a long outage).
-            log.info("reflow: %s %s deferred on a transient error: %s", kind, owner, exc)
-            return self._defer_later(item)
+            # stamp it gave_up for good during a long outage) -- UNLESS this
+            # row has now deferred transiently _TRANSIENT_DEFER_LIMIT times in
+            # a row, at which point it is no longer plausibly "the service,
+            # not the owner" and is treated like any other failure so the
+            # 5-attempt give-up stamp eventually applies.
+            until = (datetime.now(timezone.utc).replace(tzinfo=None)
+                     + timedelta(seconds=self.defer_delay_s)).isoformat()
+            count = self.store.defer_sync_item_transient(
+                item["source"], item["ref_id"], until)
+            if count > _TRANSIENT_DEFER_LIMIT:
+                log.warning("reflow: %s %s hit the transient-defer bound "
+                            "(%d); spending an attempt: %s",
+                            kind, owner, count, exc)
+                raise
+            log.info("reflow: %s %s deferred on a transient error (%d/%d): %s",
+                      kind, owner, count, _TRANSIENT_DEFER_LIMIT, exc)
+            return queue.DEFER
         if new is None:
             return None                   # routed to the ordinary path, or stamped
         if any((c.metadata or {}).get("extraction_partial") for c in new):

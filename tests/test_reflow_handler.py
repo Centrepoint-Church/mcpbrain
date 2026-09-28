@@ -825,3 +825,46 @@ def test_rate_limit_or_outage_defers_without_counting_an_attempt(tmp_path, err):
                          "WHERE ref_id='F'").fetchone()
     assert row["attempts"] == 0 and row["next_attempt_at"]
     assert not any("reflow_skipped" in r["metadata"] for r in s.owner_chunks(["gdrive-F-"]))
+
+
+def test_transient_defers_are_bounded_then_spend_an_attempt(tmp_path):
+    """A permanently-failing item that classifies transient must not retry
+    forever: after `_TRANSIENT_DEFER_LIMIT` consecutive transient outcomes
+    the next one is treated like any other failure (raised, so work_queue's
+    fail_sync_item spends a real attempt) -- so the existing 5-attempt
+    give-up stamp eventually applies."""
+    from mcpbrain.sync import reflow_handler as rh
+    s = _store(tmp_path); _seed_drive(s)
+    s.enqueue_items([{"ref_id": "F", "event": "reflow", "modified_at": "1970-01-01T00:00:00"}],
+                    source="reflow:drive")
+    # A large per-cycle cap: this test exercises the per-ROW transient-defer
+    # bound across many handle() calls on one context, not the unrelated
+    # per-cycle items/seconds cap (default max_items=10 would otherwise DEFER
+    # some of these calls before they ever reach the transient-error path).
+    ctx = _ctx(s, tmp_path, drive_service=_DriveSvc("x", exc=_http_error(429)),
+              max_items=1000, max_seconds=1000.0)
+    for i in range(1, rh._TRANSIENT_DEFER_LIMIT + 1):
+        assert ctx.handle({"source": "reflow:drive", "ref_id": "F",
+                           "attempts": 0}) is queue.DEFER
+        with s._connect() as db:
+            row = db.execute("SELECT attempts, transient_defers FROM sync_queue "
+                             "WHERE ref_id='F'").fetchone()
+        assert row["attempts"] == 0
+        assert row["transient_defers"] == i
+    # The (_TRANSIENT_DEFER_LIMIT + 1)-th consecutive transient outcome
+    # crosses the bound: handle() now raises instead of deferring again.
+    with pytest.raises(Exception):
+        ctx.handle({"source": "reflow:drive", "ref_id": "F", "attempts": 0})
+    with s._connect() as db:
+        row = db.execute("SELECT attempts, transient_defers FROM sync_queue "
+                         "WHERE ref_id='F'").fetchone()
+    assert row["transient_defers"] == rh._TRANSIENT_DEFER_LIMIT + 1, (
+        "handle() itself only raises; spending the attempt is work_queue's job")
+    # Exercise that seam directly, matching production wiring (queue.work_queue
+    # calls Store.fail_sync_item on a raised exception).
+    s.fail_sync_item("reflow:drive", "F", "rate limited", now="2026-01-01T00:00:00")
+    with s._connect() as db:
+        row = db.execute("SELECT attempts, transient_defers FROM sync_queue "
+                         "WHERE ref_id='F'").fetchone()
+    assert row["attempts"] == 1
+    assert row["transient_defers"] == 0, "a spent attempt must reset the tally"

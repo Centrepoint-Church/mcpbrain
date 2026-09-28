@@ -991,6 +991,19 @@ class Store:
                 PRIMARY KEY (source, ref_id)){_S}""")
             db.execute("CREATE INDEX IF NOT EXISTS idx_sync_queue_due "
                        "ON sync_queue(next_attempt_at, modified_at DESC)")
+            # Durable bound on a run of consecutive TRANSIENT outcomes (rate
+            # limit / gateway / network -- see reflow_handler._is_transient).
+            # Those defer without spending an `attempts` give-up slot, which
+            # is correct for a real outage but has no terminal bound on its
+            # own: a permanently-failing item that happens to classify
+            # transient would otherwise retry forever and the backlog never
+            # reaches zero. `fail_sync_item` resets this to 0 on any outcome
+            # it records (a real failure, or the escalation past the bound),
+            # so it only ever counts an unbroken run.
+            sq_cols = {r["name"] for r in db.execute("PRAGMA table_info(sync_queue)")}
+            if "transient_defers" not in sq_cols:
+                db.execute("ALTER TABLE sync_queue ADD COLUMN transient_defers "
+                           "INTEGER NOT NULL DEFAULT 0")
 
             # --- content-preserving reflow (extraction-fidelity §3) -------------
             # reflow_map is an APPEND-ONLY log, not a lookup keyed on old id:
@@ -4268,7 +4281,7 @@ class Store:
         with self._connect() as db:
             return [dict(r) for r in db.execute(
                 "SELECT source, ref_id, version, event, modified_at, discovered_at, "
-                "       attempts, next_attempt_at, last_error "
+                "       attempts, next_attempt_at, last_error, transient_defers "
                 "FROM sync_queue "
                 "WHERE next_attempt_at IS NULL OR next_attempt_at <= ? "
                 "ORDER BY modified_at DESC LIMIT ?", (now, limit)).fetchall()]
@@ -4295,6 +4308,11 @@ class Store:
         The row is never deleted: retry-forever with a capped backoff. Safe only
         because due_sync_items filters on next_attempt_at, so this row cannot
         block the queue behind it.
+
+        Resets `transient_defers` to 0: this call IS a recorded failure (a
+        genuinely non-transient error, or a transient run that just escalated
+        past reflow_handler's bound), so the next transient run -- if any --
+        starts counting fresh rather than inheriting this one's tally.
         """
         with self._connect(write=True) as db:
             row = db.execute("SELECT attempts FROM sync_queue "
@@ -4306,7 +4324,7 @@ class Store:
             delay = _SYNC_BACKOFF_S[min(attempts, len(_SYNC_BACKOFF_S)) - 1]
             nxt = (datetime.fromisoformat(now) + timedelta(seconds=delay)).isoformat()
             db.execute("UPDATE sync_queue SET attempts=?, next_attempt_at=?, "
-                       "last_error=? WHERE source=? AND ref_id=?",
+                       "last_error=?, transient_defers=0 WHERE source=? AND ref_id=?",
                        (attempts, nxt, str(error)[:200], source, ref_id))
         return attempts
 
@@ -4322,6 +4340,26 @@ class Store:
             return db.execute("UPDATE sync_queue SET next_attempt_at=? "
                               "WHERE source=? AND ref_id=?",
                               (until, source, ref_id)).rowcount > 0
+
+    def defer_sync_item_transient(self, source: str, ref_id: str, until: str) -> int:
+        """Like `defer_sync_item`, but also counts this defer toward a durable
+        run of consecutive TRANSIENT outcomes for the row (rate limit / gateway
+        / network -- reflow_handler is the only caller today). Returns the
+        row's `transient_defers` count AFTER this call (0 if the row does not
+        exist), so the caller can compare it against its own give-up bound and
+        escalate to `fail_sync_item` once crossed. `fail_sync_item` is what
+        resets the count back to 0."""
+        with self._connect(write=True) as db:
+            cur = db.execute(
+                "UPDATE sync_queue SET next_attempt_at=?, "
+                "transient_defers=transient_defers+1 WHERE source=? AND ref_id=?",
+                (until, source, ref_id))
+            if cur.rowcount == 0:
+                return 0
+            row = db.execute("SELECT transient_defers FROM sync_queue "
+                             "WHERE source=? AND ref_id=?",
+                             (source, ref_id)).fetchone()
+            return int(row["transient_defers"])
 
     def sync_queue_stats(self) -> dict:
         """Backlog as a fact, for doctor. `failing` is advisory, not terminal --
