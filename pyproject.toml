@@ -18,7 +18,15 @@ dependencies = [
   "nameparser>=1.1",       # HumanName title-stripping in graph_write.strip_title
   "dateparser>=1.4",       # date inference in graph_write._infer_deadline
   # Binary content extractors for Drive sync
-  "pymupdf>=1.23",         # PDF text extraction (fitz)
+  "pymupdf>=1.27,<1.29",   # PDF text extraction (imported as `pymupdf`). Bounded
+                           # to the minors the suite has run: 1.27.2.3 is the lock,
+                           # 1.28.2 is what the fleet resolves. 1.28 deprecates the
+                           # legacy module alias, and PDF block output feeds
+                           # EXTRACTION_VERSIONS: an unreviewed minor that changes
+                           # it would silently diverge chunk text fleet-wide on the
+                           # daily auto-update. Bump deliberately, re-run the suite
+                           # under `uv run --with pymupdf==<new>`, in one commit.
+                           # tests/test_pymupdf_pin.py guards the range.
   "python-docx>=1.1",      # DOCX extraction
   "openpyxl>=3.1",         # XLSX extraction
   "python-pptx>=1.0",      # PPTX extraction (A2 — .pptx was silently dropped)

@@ -84,7 +84,7 @@ def _is_scanned_pages(pages: list[str], chars_per_page_threshold: int = 50) -> b
 
     Split out so the decision is computed ONCE per document (I7): extract_text_from_pdf
     already has every page's text and used to call is_scanned_pdf, which opened a
-    SECOND fitz document and re-extracted all of it — doubling the cost of the
+    SECOND pymupdf document and re-extracted all of it — doubling the cost of the
     corpus's most expensive extractor on every PDF, forever.
     """
     if not pages:
@@ -108,8 +108,8 @@ def is_scanned_pdf(content_bytes: bytes, *, chars_per_page_threshold: int = 50,
     if pages is not None:
         return _is_scanned_pages(pages, chars_per_page_threshold)
     try:
-        import fitz  # pymupdf
-        doc = fitz.open(stream=content_bytes, filetype="pdf")
+        import pymupdf
+        doc = pymupdf.open(stream=content_bytes, filetype="pdf")
     except Exception as exc:
         log.debug("is_scanned_pdf: open failed: %s", exc)
         return False

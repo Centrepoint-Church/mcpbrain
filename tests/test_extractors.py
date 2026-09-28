@@ -33,8 +33,8 @@ def _make_xlsx_bytes() -> bytes:
 
 
 def _make_pdf_with_text_bytes() -> bytes:
-    import fitz
-    doc = fitz.open()
+    import pymupdf
+    doc = pymupdf.open()
     page = doc.new_page()
     page.insert_text((72, 72), "Budget report Q3")
     data = doc.tobytes()
@@ -44,8 +44,8 @@ def _make_pdf_with_text_bytes() -> bytes:
 
 def _make_pdf_no_text_bytes() -> bytes:
     """A PDF with a page that has no text layer."""
-    import fitz
-    doc = fitz.open()
+    import pymupdf
+    doc = pymupdf.open()
     doc.new_page()   # blank page — no text inserted
     data = doc.tobytes()
     doc.close()
@@ -121,8 +121,8 @@ def test_extractors_return_empty_on_garbage():
 # ---------------------------------------------------------------------------
 
 def _make_pdf_long_text_bytes() -> bytes:
-    import fitz
-    doc = fitz.open(); page = doc.new_page()
+    import pymupdf
+    doc = pymupdf.open(); page = doc.new_page()
     page.insert_text((72, 72),
                      "This is a budget report with plenty of real text on the page, "
                      "well above the scanned-PDF character threshold per page.")
@@ -170,7 +170,7 @@ def test_ocr_roundtrip_with_real_tesseract():
     if not shutil.which("tesseract"):
         pytest.skip("tesseract not installed")
     from PIL import Image, ImageDraw, ImageFont
-    import fitz
+    import pymupdf
     from mcpbrain.sync.extractors import extract_text_from_pdf, is_scanned_pdf
 
     img = Image.new("RGB", (900, 240), "white")
@@ -182,8 +182,8 @@ def test_ocr_roundtrip_with_real_tesseract():
     draw.text((30, 60), "NORTHGATE", fill="black", font=font)
     pbuf = io.BytesIO(); img.save(pbuf, format="PNG")
 
-    doc = fitz.open(); page = doc.new_page(width=900, height=240)
-    page.insert_image(fitz.Rect(0, 0, 900, 240), stream=pbuf.getvalue())
+    doc = pymupdf.open(); page = doc.new_page(width=900, height=240)
+    page.insert_image(pymupdf.Rect(0, 0, 900, 240), stream=pbuf.getvalue())
     pdf = doc.tobytes(); doc.close()
 
     assert is_scanned_pdf(pdf) is True
@@ -380,12 +380,12 @@ def test_pptx_extraction_failure_returns_empty_and_logs(caplog):
 def test_a_scanned_pdf_with_no_ocr_available_is_reported_not_silently_empty(monkeypatch, caplog):
     """A5: with tesseract absent a fully-scanned PDF returns '' with no warning
     at all — no chunks, no log line, nothing to explain the absence."""
-    import fitz
+    import pymupdf
 
     from mcpbrain.sync import extractors
 
     monkeypatch.setattr(extractors, "_tesseract_available", lambda: False)
-    doc = fitz.open()
+    doc = pymupdf.open()
     doc.new_page()
     data = doc.tobytes()
 
@@ -402,13 +402,13 @@ def test_a_scanned_pdf_with_no_ocr_available_is_reported_not_silently_empty(monk
 def test_a_failed_ocr_page_is_logged(monkeypatch, caplog):
     """A5: per-page OCR failure/timeout returns '' and falls back to page_text,
     so a timed-out page yields nothing, unlogged."""
-    import fitz
+    import pymupdf
 
     from mcpbrain.sync import extractors
 
     monkeypatch.setattr(extractors, "_tesseract_available", lambda: True)
     monkeypatch.setattr(extractors, "_ocr_page", lambda page: "")
-    doc = fitz.open()
+    doc = pymupdf.open()
     doc.new_page()
 
     with caplog.at_level("WARNING"):
@@ -432,30 +432,30 @@ def test_is_scanned_pdf_is_either_used_or_gone():
 
 def test_a_pdf_is_parsed_once_not_twice():
     """I7: extract_text_from_pdf extracted `pages` itself and then called
-    is_scanned_pdf(content_bytes), which opened a SECOND fitz document and
+    is_scanned_pdf(content_bytes), which opened a SECOND pymupdf document and
     re-extracted every page just to make the scanned/not-scanned decision —
     doubling the cost of the corpus's most expensive extractor on every PDF,
     forever. The decision is unchanged; it is now computed from the pages we
     already have."""
-    import fitz
+    import pymupdf
 
     from mcpbrain.sync.extractors import extract_text_from_pdf
 
-    # Built BEFORE the patch — the fixture helper opens fitz itself to make the
+    # Built BEFORE the patch — the fixture helper opens pymupdf itself to make the
     # PDF, which would otherwise be counted.
     pdf = _make_pdf_long_text_bytes()
     opens = []
-    real_open = fitz.open
+    real_open = pymupdf.open
 
     def counting_open(*a, **kw):
         opens.append(1)
         return real_open(*a, **kw)
 
-    fitz.open = counting_open
+    pymupdf.open = counting_open
     try:
         text = extract_text_from_pdf(pdf)
     finally:
-        fitz.open = real_open
+        pymupdf.open = real_open
 
     assert "Hello" in text or text.strip(), "extraction still has to work"
     assert len(opens) == 1, f"the document was opened {len(opens)} times"
@@ -464,13 +464,13 @@ def test_a_pdf_is_parsed_once_not_twice():
 def test_the_scanned_decision_is_identical_whichever_way_it_is_computed():
     """The refactor must not move the gate: is_scanned_pdf(bytes) and
     is_scanned_pdf(bytes, pages=…) must agree for both a text PDF and a blank one."""
-    import fitz
+    import pymupdf
 
     from mcpbrain.sync.extractors import is_scanned_pdf
 
     for pdf, expected in ((_make_pdf_long_text_bytes(), False),
                           (_make_pdf_no_text_bytes(), True)):
-        doc = fitz.open(stream=pdf, filetype="pdf")
+        doc = pymupdf.open(stream=pdf, filetype="pdf")
         pages = [p.get_text() for p in doc]
         doc.close()
         assert is_scanned_pdf(pdf) is expected

@@ -31,14 +31,14 @@ def _page_blocks(page):
     (the body size is a whole-document statistic, so classification can't
     happen per-page).
     """
-    import fitz  # pymupdf
+    import pymupdf
 
     tables = []
     try:
         for t in page.find_tables().tables:
             rows = [[("" if c is None else str(c)).strip() for c in r] for r in t.extract()]
             if rows:
-                tables.append((fitz.Rect(t.bbox), TableBlock(rows)))
+                tables.append((pymupdf.Rect(t.bbox), TableBlock(rows)))
     except Exception as exc:  # noqa: BLE001 — table detection is best-effort
         log.debug("pdf: find_tables failed on page %s: %s", page.number, exc)
 
@@ -85,8 +85,8 @@ def extract_blocks_from_pdf(content_bytes: bytes) -> list:
     )
 
     try:
-        import fitz  # pymupdf
-        doc = fitz.open(stream=content_bytes, filetype="pdf")
+        import pymupdf
+        doc = pymupdf.open(stream=content_bytes, filetype="pdf")
     except Exception as exc:
         log.warning("pdf: open failed: %s", exc)
         return []

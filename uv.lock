@@ -865,7 +865,7 @@ requires-dist = [
     { name = "openpyxl", specifier = ">=3.1" },
     { name = "packaging", specifier = ">=23" },
     { name = "pillow", specifier = ">=10" },
-    { name = "pymupdf", specifier = ">=1.23" },
+    { name = "pymupdf", specifier = ">=1.27,<1.29" },
     { name = "pyobjc-framework-cocoa", marker = "sys_platform == 'darwin'", specifier = ">=10" },
     { name = "pystray", specifier = ">=0.19" },
     { name = "pytest", marker = "extra == 'dev'", specifier = ">=8" },
