@@ -3001,6 +3001,19 @@ class Store:
         out.sort(key=lambda c: c["idx"])
         return out
 
+    def file_fully_enriched(self, file_id: str) -> bool:
+        """True when the file has chunks and every one that is not cold
+        (salience-gated, never extracted by design) is enriched=1. The gate on
+        attaching a file's enrich payload to its cache artifact: after a reflow
+        (or any re-chunk) the file-keyed payload describes the OLD text, and an
+        importer marks every row enriched from it."""
+        with self._connect() as db:
+            r = db.execute(
+                "SELECT count(*) n, COALESCE(sum(CASE WHEN enriched=1 "
+                "OR COALESCE(enrich_state,'')='cold' THEN 0 ELSE 1 END),0) u "
+                f"FROM chunks WHERE {_meta_extract('$.file_id')}=?", (file_id,)).fetchone()
+        return bool(r["n"]) and not r["u"]
+
     def vec_knn(self, query_vec: list[float], k: int) -> list[tuple[str, float]]:
         with self._connect() as db:
             cur = db.execute(

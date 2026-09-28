@@ -134,7 +134,8 @@ def test_publish_file_includes_enrich_payload_when_present(tmp_path):
     s, fs = _store(tmp_path), LocalDirFleetStorage(tmp_path / "drv")
     s.import_cached_chunk("gdrive-FID-0", "body", "vh1",
                           {"source_type": "gdrive", "file_id": "FID", "chunk_index": 0},
-                          [0.1, 0.2, 0.3, 0.4])
+                          [0.1, 0.2, 0.3, 0.4], enriched=True,
+                          enriched_version=ENRICH_LOGIC_VERSION)
     s.set_enrich_payload("FID",
                          '{"thread_id":"gdrive-FID","org":"Acme","content_type":"reference","summary":"x","entities":[]}',
                          ENRICH_LOGIC_VERSION)  # a payload at CURRENT logic

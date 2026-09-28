@@ -35,7 +35,7 @@ def test_enrichment_payload_round_trips_publisher_to_importer(tmp_path):
     A.import_cached_chunk(
         doc_id, "Ada Lovelace is leading the analytics project.", "ch0",
         {"source_type": "gdrive", "file_id": "F1", "chunk_index": 0, "drive_id": "D1"},
-        [0.1, 0.2, 0.3, 0.4])
+        [0.1, 0.2, 0.3, 0.4], enriched=True, enriched_version=ENRICH_LOGIC_VERSION)
 
     extraction = {
         "thread_id": "gdrive-F1", "org": "unknown", "content_type": "update",

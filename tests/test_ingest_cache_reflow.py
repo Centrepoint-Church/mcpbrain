@@ -69,7 +69,7 @@ def _publish(tmp_path, fs, texts, modified=M, enriched=True, fid="F"):
             {"source_type": "gdrive", "file_id": fid, "chunk_index": i,
              "chunk_total": len(texts), "drive_id": "D1", "mime_type": PDF,
              "modified": modified, "extraction_version": 1},
-            V)
+            V, enriched=enriched, enriched_version=ENRICH_LOGIC_VERSION if enriched else 0)
     if enriched:
         extraction = {
             "thread_id": f"gdrive-{fid}", "org": "unknown", "content_type": "update",
@@ -311,3 +311,52 @@ def test_orphan_error_is_raised_not_silently_replaced(tmp_path, monkeypatch):
     # Nothing replaced: the old chunks and the relation are untouched.
     assert [c[0] for c in _chunks(a)] == ["gdrive-F-0", "gdrive-F-1"]
     assert _relation_doc(a) == "gdrive-F-1"
+
+
+# -- final review I3: a stale payload never rides on a partly-enriched file ----
+
+def _artifact_enrich(fs, fid="F", ch="vh2"):
+    art = ingest_cache._load(fs, ingest_cache._artifact_path(fid, ch, PIN, PDF))
+    return art.enrich
+
+
+def _payload_publisher(tmp_path, enriched_rows):
+    p = _store(tmp_path, "PP.sqlite3")
+    for i, t in enumerate(("alpha beta gamma", "fresh speaker notes")):
+        p.import_cached_chunk(
+            f"gdrive-F-{i}", t, f"n{i}",
+            {"source_type": "gdrive", "file_id": "F", "chunk_index": i, "chunk_total": 2,
+             "drive_id": "D1", "mime_type": PDF, "modified": M, "extraction_version": 1},
+            V, enriched=i in enriched_rows,
+            enriched_version=ENRICH_LOGIC_VERSION if i in enriched_rows else 0)
+    p.set_enrich_payload("F", json.dumps({"thread_id": "gdrive-F", "summary": "old"}),
+                         ENRICH_LOGIC_VERSION)
+    return p
+
+
+def test_publish_file_withholds_the_payload_when_a_chunk_is_unenriched(tmp_path):
+    fs = LocalDirFleetStorage(tmp_path / "fleet")
+    p = _payload_publisher(tmp_path, enriched_rows={0})
+    assert ingest_cache.publish_file(p, fs, "D1", "F", "vh2", PIN) is True
+    assert "extraction" not in _artifact_enrich(fs)
+
+
+def test_publish_file_attaches_the_payload_when_every_chunk_is_enriched(tmp_path):
+    fs = LocalDirFleetStorage(tmp_path / "fleet")
+    p = _payload_publisher(tmp_path, enriched_rows={0, 1})
+    assert ingest_cache.publish_file(p, fs, "D1", "F", "vh2", PIN) is True
+    assert _artifact_enrich(fs)["extraction"]["summary"] == "old"
+
+
+# -- final review I8: the import carry-over honours the reflow halt ------------
+
+def test_carry_over_import_is_deferred_while_reflow_is_halted(tmp_path):
+    fs = LocalDirFleetStorage(tmp_path / "fleet")
+    a = _local(tmp_path)
+    _publish(tmp_path, fs, ["alpha beta gamma\ndelta epsilon"])
+    a.set_cursor("reflow:halted", "reflow X: 1 dangling reference(s)")
+    before = (_chunks(a), _graph_counts(a))
+    with pytest.raises(ingest_cache.ImportDeferred):
+        ingest_cache.try_import(a, fs, "D1", "F", "vh2", PIN, mime=PDF)
+    assert (_chunks(a), _graph_counts(a)) == before
+    assert _relation_doc(a) == "gdrive-F-1" and _reflow_map(a) == []

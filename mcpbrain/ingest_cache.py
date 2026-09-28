@@ -204,6 +204,10 @@ def _reflow_rows(store, art: CacheArtifact, rows: list[dict], mark_enriched: boo
     re-applied. An uncovered row is text this install never extracted and
     always stays enriched=0.
 
+    While the reflow is halted (a wrong remap was caught), raise
+    ImportDeferred: carry-over waits for the attended resume like every
+    other reflow path.
+
     Spec §3 guard: if a pending or claimed enrichment unit names this file
     (its `gdrive-<fid>` thread, the file id, or any of its current doc_ids),
     raise ImportDeferred -- drain applying that unit after the re-chunk
@@ -222,8 +226,14 @@ def _reflow_rows(store, art: CacheArtifact, rows: list[dict], mark_enriched: boo
                            for r in list(old) + rows):
         return None
     from mcpbrain import reflow
-    from mcpbrain.store import ReflowOrphanError
+    from mcpbrain.store import REFLOW_HALT_CURSOR, ReflowOrphanError
     from mcpbrain.sync.normalise import Chunk
+    halted = store.get_cursor(REFLOW_HALT_CURSOR)
+    if halted:
+        # A wrong remap stopped the reflow; every carry-over path waits for
+        # the attended `bin/reflow.py resume` (spec §3), this one included.
+        raise ImportDeferred(f"ingest_cache: {art.file_id} carry-over deferred: "
+                             f"reflow halted ({halted[:120]})")
     refs = reflow.pending_unit_refs(home)
     if refs and ({f"gdrive-{art.file_id}", art.file_id} | {r["doc_id"] for r in old}) & refs:
         raise ImportDeferred(
@@ -573,7 +583,11 @@ def publish_file(store, fleet_storage, drive_id, file_id, content_hash, pin,
     chunks = collect_chunks(store, file_id)
     if not chunks:
         return False
-    if enrich is None:
+    if enrich is None and store.file_fully_enriched(file_id):
+        # Only a file whose every (non-cold) chunk is enriched: the payload is
+        # keyed by file_id and outlives a re-chunk, so after a reflow (new,
+        # never-extracted text) it would describe the OLD extraction, and a
+        # plain-path importer marks every row enriched from it.
         floor = max(int(pin.enrich_logic_floor), int(ENRICH_LOGIC_VERSION))
         row = store.get_enrich_payload(file_id)
         if row and int(row["logic_version"]) >= floor:
