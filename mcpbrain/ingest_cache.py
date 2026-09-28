@@ -150,66 +150,85 @@ def _encode_vec(vector) -> str:
 
 # -- read path --------------------------------------------------------------
 
-def _import_artifact(store, drive_id: str, art: CacheArtifact, pin,
-                     contextual_retrieval: bool | None = None, mime: str = "") -> bool:
-    """Import a validated artifact's chunks into the store, atomically.
+def _write_rows(store, art: CacheArtifact, rows: list[dict], mark_enriched: bool,
+                logic_v: int) -> bool:
+    """Write a validated artifact's rows: through the reflow carry-over when
+    this install already holds the same file content, else a plain replace.
+    False = store write failed (caller treats it as a cache miss). Raises
+    store.ReflowOrphanError (rolled back, nothing written) rather than fall
+    back to a replace that would silently strand this install's provenance."""
+    done = _reflow_rows(store, art, rows, mark_enriched, logic_v)
+    if done is not None:
+        return done
+    return _replace_rows(store, art, rows)
 
-    All chunk vectors are decoded/validated UP FRONT, before anything is
-    written; if any chunk is corrupt this returns False having written
-    NOTHING (never a partial import). Once every chunk validates, all rows
-    are written AND the file's now-orphaned tail chunks (B5, cache-import
-    half — see the inline comment below) are swept in one single transaction
-    (one `store._connect(write=True)` block, using the same per-row helper
-    `Store.import_cached_chunks` itself calls) so the artifact lands
-    completely, with no stale chunks left behind, or not at all. Callers
-    treat False as a cache miss (fall back to local extraction).
 
-    `contextual_retrieval`, when not None, must match the artifact's stamped
-    enrich["contextual_retrieval"] flag (when present) — see try_import.
+def _reflow_rows(store, art: CacheArtifact, rows: list[dict], mark_enriched: bool,
+                 logic_v: int) -> bool | None:
+    """Carry-over import (spec 2026-09-24 §3/§4 "Shared-drive ingest cache").
 
-    `mime`, when passed, must match the pipeline fingerprint the artifact was
-    published under (see effective_chunker_version)."""
-    if (art.embed_model != pin.embed_model or int(art.dim) != int(pin.dim)
-            or art.chunker_version != effective_chunker_version(pin, mime)
-            or int(art.dim) != int(store.dim)):
-        return False
+    Applies only when this install already has chunks for the file and EVERY
+    one of them, and every artifact row, carries the same Drive `modified` —
+    the proof the source is unchanged and only its chunking/extraction moved.
+    Then the artifact rows are planned against the local ones and applied with
+    Store.apply_reflow, so local enrichment state survives on covered text and
+    every provenance reference (relations, observations, actions, ...) is
+    remapped instead of left pointing at a replaced or deleted positional id.
+
+    The artifact carries rendered text only, so each row's single span is its
+    whole text (coverage proven on whole-chunk text — conservative). When the
+    artifact's own enrichment clears the version gates (`mark_enriched`), only
+    COVERED rows are marked enriched at its logic version: an uncovered row is
+    text this install never extracted and must still flow through enrichment.
+
+    Returns None when the carry-over does not apply (caller takes the plain
+    replace path), else the write result. A plan that would drop a whole
+    lineage describes a genuinely different document and takes the plain path.
+    """
+    old = store.owner_chunks([f"gdrive-{art.file_id}-"])
+    if not old or not rows:
+        return None
+    modified = (rows[0]["metadata"] or {}).get("modified")
+    if not modified or any((r["metadata"] or {}).get("modified") != modified
+                           for r in list(old) + rows):
+        return None
+    from mcpbrain import reflow
+    from mcpbrain.store import ReflowOrphanError
+    from mcpbrain.sync.normalise import Chunk
+    new = [Chunk(r["doc_id"], r["text"], r["content_hash"], r["metadata"], [r["text"]])
+           for r in rows]
     try:
-        # Guard enrich field access; if malformed (e.g. string instead of dict),
-        # fall back rather than raise.
-        logic_v = int(art.enrich.get("logic_version", 0)) if art.enrich else 0
-        # The Q6 contextual-retrieval prefix materially changes the embedding
-        # vector and is NOT part of pipeline_fingerprint (embed_model/dim/
-        # chunker_version only). Two installs sharing an org_pin but differing
-        # on this LOCAL config flag could otherwise import an artifact carrying
-        # a semantically different vector under the "cache hit is bit-identical
-        # to local embedding" guarantee. contextual_retrieval=None (the default)
-        # means "don't check, accept as before" for backward compatibility.
-        if contextual_retrieval is not None and art.enrich:
-            art_cr = art.enrich.get("contextual_retrieval")
-            if art_cr is not None and bool(art_cr) != bool(contextual_retrieval):
-                return False
-        # Skip local re-enrichment only when the cached enrichment is at least as new
-        # as BOTH the fleet floor and this install's own logic version.
-        mark_enriched = bool(art.enrich) and logic_v >= max(int(pin.enrich_logic_floor),
-                                                            int(ENRICH_LOGIC_VERSION))
-        rows = []
-        for cc in art.chunks:
-            try:
-                vector = _decode_vec(cc.embedding_b64, int(art.dim))
-            except Exception:
-                log.info("ingest_cache: corrupt vector in %s chunk %s (fallback)", art.file_id, cc.idx)
-                return False
-            meta = dict(cc.metadata or {})
-            meta[DRIVE_ID_META_KEY] = drive_id
-            doc_id = f"gdrive-{art.file_id}-{int(cc.idx)}"
-            rows.append({
-                "doc_id": doc_id, "text": cc.text, "content_hash": _text_hash(cc.text),
-                "metadata": meta, "vector": vector, "enriched": mark_enriched,
-                "enriched_version": logic_v if mark_enriched else 0,
-            })
-    except Exception:
-        log.info("ingest_cache: corrupt artifact %s (fallback to local)", art.file_id)
+        plan = reflow.plan(old, new)
+    except ValueError:
+        return None
+    if any(why == "lineage_gone" for why in plan.reasons.values()):
+        log.info("ingest_cache: %s reflow plan drops a whole lineage; plain replace",
+                 art.file_id)
+        return None
+    if mark_enriched:
+        for nr in plan.rows:
+            if nr.covered:
+                nr.enriched, nr.enriched_version = 1, logic_v
+    vectors = {r["doc_id"]: r["vector"] for r in rows}
+    try:
+        out = store.apply_reflow(art.file_id, "drive_import", plan,
+                                 [vectors[nr.chunk.doc_id] for nr in plan.rows])
+    except ReflowOrphanError:
+        log.error("ingest_cache: reflow import of %s would orphan references; "
+                  "rolled back", art.file_id)
+        raise
+    except Exception as exc:  # noqa: BLE001 — same contract as the plain write
+        log.warning(
+            "ingest_cache: reflow write failed importing artifact for %s "
+            "(NOT a cache-corruption signal): %s", art.file_id, exc)
         return False
+    log.info("ingest_cache: %s imported by carry-over: %s", art.file_id, out)
+    return True
+
+
+def _replace_rows(store, art: CacheArtifact, rows: list[dict]) -> bool:
+    """Plain replace: write every row and sweep the file's orphaned tail, in
+    ONE transaction. False = store write failed."""
     try:
         # B5, cache-import half. Spec 2 closed orphan-on-shrink for locally
         # extracted files (drive.upsert_file_chunks) but skipped this path to
@@ -266,6 +285,74 @@ def _import_artifact(store, drive_id: str, art: CacheArtifact, pin,
         log.warning(
             "ingest_cache: store write failed importing artifact for %s "
             "(NOT a cache-corruption signal): %s", art.file_id, exc)
+        return False
+    return True
+
+
+def _import_artifact(store, drive_id: str, art: CacheArtifact, pin,
+                     contextual_retrieval: bool | None = None, mime: str = "") -> bool:
+    """Import a validated artifact's chunks into the store, atomically.
+
+    All chunk vectors are decoded/validated UP FRONT, before anything is
+    written; if any chunk is corrupt this returns False having written
+    NOTHING (never a partial import). Once every chunk validates, all rows
+    are written AND the file's now-orphaned tail chunks (B5, cache-import
+    half — see the inline comment below) are swept in one single transaction
+    (one `store._connect(write=True)` block, using the same per-row helper
+    `Store.import_cached_chunks` itself calls) so the artifact lands
+    completely, with no stale chunks left behind, or not at all. Callers
+    treat False as a cache miss (fall back to local extraction). When this
+    install already holds the same file content (same Drive `modified`), the
+    write goes through the reflow carry-over instead (see _reflow_rows), which
+    may raise store.ReflowOrphanError (rolled back, nothing written).
+
+    `contextual_retrieval`, when not None, must match the artifact's stamped
+    enrich["contextual_retrieval"] flag (when present) — see try_import.
+
+    `mime`, when passed, must match the pipeline fingerprint the artifact was
+    published under (see effective_chunker_version)."""
+    if (art.embed_model != pin.embed_model or int(art.dim) != int(pin.dim)
+            or art.chunker_version != effective_chunker_version(pin, mime)
+            or int(art.dim) != int(store.dim)):
+        return False
+    try:
+        # Guard enrich field access; if malformed (e.g. string instead of dict),
+        # fall back rather than raise.
+        logic_v = int(art.enrich.get("logic_version", 0)) if art.enrich else 0
+        # The Q6 contextual-retrieval prefix materially changes the embedding
+        # vector and is NOT part of pipeline_fingerprint (embed_model/dim/
+        # chunker_version only). Two installs sharing an org_pin but differing
+        # on this LOCAL config flag could otherwise import an artifact carrying
+        # a semantically different vector under the "cache hit is bit-identical
+        # to local embedding" guarantee. contextual_retrieval=None (the default)
+        # means "don't check, accept as before" for backward compatibility.
+        if contextual_retrieval is not None and art.enrich:
+            art_cr = art.enrich.get("contextual_retrieval")
+            if art_cr is not None and bool(art_cr) != bool(contextual_retrieval):
+                return False
+        # Skip local re-enrichment only when the cached enrichment is at least as new
+        # as BOTH the fleet floor and this install's own logic version.
+        mark_enriched = bool(art.enrich) and logic_v >= max(int(pin.enrich_logic_floor),
+                                                            int(ENRICH_LOGIC_VERSION))
+        rows = []
+        for cc in art.chunks:
+            try:
+                vector = _decode_vec(cc.embedding_b64, int(art.dim))
+            except Exception:
+                log.info("ingest_cache: corrupt vector in %s chunk %s (fallback)", art.file_id, cc.idx)
+                return False
+            meta = dict(cc.metadata or {})
+            meta[DRIVE_ID_META_KEY] = drive_id
+            doc_id = f"gdrive-{art.file_id}-{int(cc.idx)}"
+            rows.append({
+                "doc_id": doc_id, "text": cc.text, "content_hash": _text_hash(cc.text),
+                "metadata": meta, "vector": vector, "enriched": mark_enriched,
+                "enriched_version": logic_v if mark_enriched else 0,
+            })
+    except Exception:
+        log.info("ingest_cache: corrupt artifact %s (fallback to local)", art.file_id)
+        return False
+    if not _write_rows(store, art, rows, mark_enriched, logic_v):
         return False
     # A#4: apply the cached enrichment so the importer's graph gets this doc's
     # entities/relations without re-running Haiku. Validate through the SAME
