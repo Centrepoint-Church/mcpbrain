@@ -100,11 +100,18 @@ def _find_word(o: str, ns: str, pos: int) -> int:
     return -1
 
 
-def _locate(o: str, spans: list[str], cursor: int) -> tuple[int, int] | None:
-    """(start, end) of a new chunk's source spans inside `o`, searching forward
-    from `cursor` first so repeated text maps monotonically. None if any
-    non-empty span is missing (the chunk then carries new text)."""
+def _locate(o: str, spans: list[str], cursor: int) -> tuple[int, int, bool] | None:
+    """(start, end, complete) of a new chunk's source spans inside `o`,
+    searching forward from `cursor` first so repeated text maps monotonically.
+
+    POSITION and COVERAGE are separate answers. (start, end) spans the spans
+    that WERE found -- a new chunk that is an old slide plus its new speaker
+    notes still sits where that slide's text is, and must stay the remap target
+    for the slide's old chunk. `complete` is whether EVERY non-empty span was
+    found; only a complete chunk can be covered. None when no span was found at
+    all (the chunk is entirely new text and has no position in `o`)."""
     start = end = None
+    complete = True
     pos = cursor
     for s in spans:
         ns = norm(s)
@@ -114,13 +121,14 @@ def _locate(o: str, spans: list[str], cursor: int) -> tuple[int, int] | None:
         if at < 0:
             at = _find_word(o, ns, 0)
         if at < 0:
-            return None
+            complete = False
+            continue
         start = at if start is None else min(start, at)
         end = at + len(ns) if end is None else max(end, at + len(ns))
         pos = at + len(ns)
     if start is None:
         return None
-    return start, end
+    return start, end, complete
 
 
 def _majority(overlapped: list[tuple[int, int]], old: list[dict], key: str):
@@ -143,11 +151,13 @@ def _plan_lineage(key: str, old: list[dict], new: list[Chunk], plan_: ReflowPlan
     positions: list[tuple[int, int] | None] = []
     cursor = 0
     for c in new:
-        loc = _locate(o, c.spans or [c.text], cursor)
+        found = _locate(o, c.spans or [c.text], cursor)
+        loc = found[:2] if found is not None else None
         positions.append(loc)
         overlapped: list[tuple[int, int]] = []
         if loc is not None:
-            cursor = max(cursor, loc[0])
+            cursor = max(cursor, loc[0])        # position advances the cursor
+        if found is not None and found[2]:      # only a complete chunk is covered
             i = bisect_right(ends, loc[0])
             while i < len(offs) and offs[i][0] < loc[1]:
                 w = min(loc[1], offs[i][1]) - max(loc[0], offs[i][0])

@@ -312,3 +312,27 @@ def test_apply_reflow_rejects_malformed_plans(tmp_path):
     p.deletes = ["gdrive-OTHER-0"]
     with pytest.raises(ValueError):
         s.apply_reflow("F", "drive", p, [V])
+
+
+def test_apply_reflow_refuses_to_delete_a_whole_lineage(tmp_path):
+    """An attachment lineage with no new counterpart (its re-extraction came
+    back empty) must never be deleted by a reflow: refuse before any write."""
+    s = _store(tmp_path)
+    for d, t in (("gmail-M-body-0", "body text here"), ("gmail-M-att-0-0", "attachment words")):
+        s.upsert_chunk(d, t, "h-" + d, {"source_type": "gmail", "message_id": "M",
+                                        "chunk_index": 0})
+    with s._connect(write=True) as db:
+        db.execute("UPDATE chunks SET enriched=1, enriched_version=3")
+    _all_refs(s, "gmail-M-att-0-0")
+    before = _snapshot(s)
+    raw_before = (tmp_path / "a.sqlite3").read_bytes()
+    new = [Chunk("gmail-M-body-0", "body text here", "n0",
+                 {"source_type": "gmail", "message_id": "M", "chunk_index": 0},
+                 ["body text here"])]
+    p = plan(s.owner_chunks(["gmail-M-"]), new)
+    assert p.reasons["gmail-M-att-0-0"] == "lineage_gone"
+    assert "gmail-M-att-0" in p.unequal
+    with pytest.raises(ValueError, match="lineage"):
+        s.apply_reflow("M", "gmail", p, [V])
+    assert _snapshot(s) == before
+    assert (tmp_path / "a.sqlite3").read_bytes() == raw_before

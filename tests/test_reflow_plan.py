@@ -210,3 +210,36 @@ def test_no_new_chunks_refuses():
 
 def test_norm():
     assert norm("  a\n\tb  c ") == "a b c"
+
+
+def _deck_old(n):
+    return [_old(i, f"Slide {i} title words s{i}a s{i}b", n) for i in range(n)]
+
+
+def test_partly_located_chunks_stay_remap_targets():
+    """Every new chunk = its old slide + new speaker notes: none is covered, but
+    each still sits where its slide's text is, so the remap stays i -> i."""
+    old = _deck_old(4)
+    new = [_new(i, f"{o['text']}\nNotes: fresh remark n{i}",
+                [o["text"], f"Notes: fresh remark n{i}"]) for i, o in enumerate(old)]
+    p = plan(old, new)
+    assert not any(r.covered for r in p.rows)
+    assert all(r.enriched == 0 for r in p.rows)
+    assert p.remap == {f"gdrive-F-{i}": f"gdrive-F-{i}" for i in range(4)}
+    assert set(p.reasons.values()) == {"exact"}
+
+
+def test_notes_on_odd_slides_only_keep_positions():
+    old = _deck_old(4)
+    new = []
+    for i, o in enumerate(old):
+        if i % 2:
+            new.append(_new(i, f"{o['text']}\nNotes: n{i}", [o["text"], f"Notes: n{i}"]))
+        else:
+            new.append(_new(i, o["text"]))
+    p = plan(old, new)
+    assert [r.covered for r in p.rows] == [True, False, True, False]
+    assert p.remap["gdrive-F-1"] == "gdrive-F-1"
+    assert p.remap["gdrive-F-3"] == "gdrive-F-3"
+    assert p.remap == {f"gdrive-F-{i}": f"gdrive-F-{i}" for i in range(4)}
+    assert set(p.reasons.values()) == {"exact"}

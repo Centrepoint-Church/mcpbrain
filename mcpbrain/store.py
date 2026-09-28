@@ -3457,6 +3457,14 @@ class Store:
         thing back to the untouched old chunks: a wrong remap must stop, not
         propagate."""
         rows = list(plan.rows)
+        gone = sorted(o for o, why in plan.reasons.items() if why == "lineage_gone")
+        if gone:
+            # A reflow never deletes a whole lineage. An old lineage with no new
+            # counterpart (e.g. an attachment whose re-extraction silently came
+            # back empty) is a failed extraction, not a proof of absence -- the
+            # handler must take the ordinary change path, not apply this plan.
+            raise ValueError(f"apply_reflow {owner}: plan would delete whole "
+                             f"lineage(s) {sorted(plan.unequal)}: {gone[:5]}")
         if len(vectors) != len(rows):
             raise ValueError("apply_reflow: one vector per new chunk")
         if not rows:
