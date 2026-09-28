@@ -348,6 +348,17 @@ def test_publish_file_attaches_the_payload_when_every_chunk_is_enriched(tmp_path
     assert _artifact_enrich(fs)["extraction"]["summary"] == "old"
 
 
+@pytest.mark.parametrize("body", ["not json{", "5", "null", "[1, 2]"])
+def test_publish_file_withholds_a_corrupt_payload_instead_of_failing(tmp_path, body):
+    """A corrupt payload body fails closed: the file still publishes, without
+    the payload, instead of raising for that file on every cycle."""
+    fs = LocalDirFleetStorage(tmp_path / "fleet")
+    p = _payload_publisher(tmp_path, enriched_rows={0, 1})
+    p.set_enrich_payload("F", body, ENRICH_LOGIC_VERSION)
+    assert ingest_cache.publish_file(p, fs, "D1", "F", "vh2", PIN) is True
+    assert "extraction" not in (_artifact_enrich(fs) or {})
+
+
 # -- final review I8: the import carry-over honours the reflow halt ------------
 
 def test_carry_over_import_is_deferred_while_reflow_is_halted(tmp_path):

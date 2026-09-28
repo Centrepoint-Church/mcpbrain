@@ -593,8 +593,21 @@ def publish_file(store, fleet_storage, drive_id, file_id, content_hash, pin,
         floor = max(int(pin.enrich_logic_floor), int(ENRICH_LOGIC_VERSION))
         row = store.get_enrich_payload(file_id)
         if row and int(row["logic_version"]) >= floor:
-            enrich = {"logic_version": int(row["logic_version"]),
-                      "extraction": json.loads(row["payload"])}
+            try:
+                extraction = json.loads(row["payload"])
+            except (TypeError, ValueError) as exc:
+                extraction = None
+                log.debug("ingest_cache: unparseable enrich payload for %s: %s",
+                          file_id, exc)
+            if isinstance(extraction, dict):
+                enrich = {"logic_version": int(row["logic_version"]),
+                          "extraction": extraction}
+            else:
+                # Fail closed: publish the chunks without the payload. Raising
+                # here would fail this file on every cycle until the payload
+                # is rewritten; importers then re-enrich it themselves.
+                log.debug("ingest_cache: withholding malformed enrich payload for %s",
+                          file_id)
     mime = (chunks[0].metadata or {}).get("mime_type", "")
     publish(store, fleet_storage, drive_id, file_id, content_hash, chunks, pin,
             enrich=enrich, published_by=published_by,
