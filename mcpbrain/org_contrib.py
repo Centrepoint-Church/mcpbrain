@@ -107,10 +107,16 @@ def _chunk_provenance(store, doc_id: str) -> tuple[bool, str]:
     """
     if not doc_id:
         return False, "unknown"
+    sql = "SELECT metadata, enrich_state FROM chunks WHERE doc_id=? LIMIT 1"
     with store._connect() as db:
-        r = db.execute(
-            "SELECT metadata, enrich_state FROM chunks WHERE doc_id=? LIMIT 1",
-            (doc_id,)).fetchone()
+        r = db.execute(sql, (doc_id,)).fetchone()
+    if r is None:
+        # An id a reflow deleted resolves through reflow_map to the chunk that
+        # holds its text now (spec §3); anything else still fails closed.
+        target = store.resolve_reflowed_ids([doc_id])
+        if target:
+            with store._connect() as db:
+                r = db.execute(sql, (target[0],)).fetchone()
     if r is None:
         return False, "unknown"                    # no provenance — fail closed
     st = ""

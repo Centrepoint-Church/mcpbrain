@@ -379,6 +379,15 @@ def _resolve_doc_ids(store, extraction: dict, unit_messages_by_thread: dict) -> 
     """
     part_ids = extraction.get("part_doc_ids")
     if part_ids:
+        # A unit written before a reflow can name ids the reflow deleted (the
+        # document now has fewer chunks): resolve them through reflow_map to
+        # the chunk holding that text now (spec §3) instead of silently marking
+        # nothing. getattr only because unit-test fakes predate the method --
+        # the real Store always has it, and tests/test_store_reflow.py proves
+        # this path against one.
+        resolve = getattr(store, "resolve_reflowed_ids", None)
+        if resolve is not None:
+            part_ids = resolve(list(part_ids))
         return store.drop_cold(list(part_ids))
     msg_ids = [m.get("message_id") for m in extraction.get("messages", [])
                if m.get("message_id")]

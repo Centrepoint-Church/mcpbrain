@@ -714,6 +714,33 @@ _REFLOW_REF_COLUMNS = (
     ("recall_feedback", "doc_id"),
 )
 
+# The positional suffix a chunk id carries after its owner prefix, per source
+# (gdrive-<fid>-<i>, gmail-<mid>-body-<i> / -att-<n>-<i>, anarlog-<sid>-<kind>-<i>,
+# cal-<eid> / cal-<eid>-<i>). owner_chunks requires it so a prefix can never
+# take in a different owner whose id merely starts with the same characters.
+_OWNER_SUFFIX = {
+    "gdrive-": re.compile(r"\d+"),
+    # also accepts a narrower caller prefix: "gmail-<mid>-att-" + "2-0"
+    "gmail-": re.compile(r"(?:[a-z_]+-)?\d+(?:-\d+)?"),
+    "anarlog-": re.compile(r"(?:[a-z_]+-)?\d+"),
+    "cal-": re.compile(r"(?:-\d+)?"),
+}
+
+
+def _owner_suffix_ok(prefix: str, rest: str) -> bool:
+    for tag, rx in _OWNER_SUFFIX.items():
+        if not prefix.startswith(tag):
+            continue
+        if tag == "cal-":
+            # cal-<eid> is itself a chunk id; cal-<eid>- takes only the split pieces
+            if prefix.endswith("-"):
+                return re.fullmatch(r"\d+", rest) is not None
+            return rx.fullmatch(rest) is not None
+        if not prefix.endswith("-") and rest.startswith("-"):
+            rest = rest[1:]                 # "gdrive-<fid>" given without its dash
+        return rx.fullmatch(rest) is not None
+    return True
+
 
 class Store:
     # Phase C: bump when the FTS contextual-text format changes so
@@ -939,6 +966,28 @@ class Store:
                 PRIMARY KEY (source, ref_id)){_S}""")
             db.execute("CREATE INDEX IF NOT EXISTS idx_sync_queue_due "
                        "ON sync_queue(next_attempt_at, modified_at DESC)")
+
+            # --- content-preserving reflow (extraction-fidelity §3) -------------
+            # reflow_map is an APPEND-ONLY log, not a lookup keyed on old id:
+            # doc_ids are positional and reused, so one id is both an old and a
+            # new chunk. The latest row for an id (idx_reflow_map_old) is what a
+            # stale reference falls back to once that id no longer has a chunk.
+            db.execute(f"""CREATE TABLE IF NOT EXISTS reflow_map(
+                id          INTEGER PRIMARY KEY,
+                owner       TEXT NOT NULL,
+                old_doc_id  TEXT NOT NULL,
+                new_doc_id  TEXT NOT NULL,
+                reason      TEXT NOT NULL,
+                at          TEXT NOT NULL){_S}""")
+            db.execute("CREATE INDEX IF NOT EXISTS idx_reflow_map_old "
+                       "ON reflow_map(old_doc_id, id)")
+            db.execute(f"""CREATE TABLE IF NOT EXISTS reflow_owners(
+                owner       TEXT PRIMARY KEY,
+                source      TEXT NOT NULL,
+                at          TEXT NOT NULL,
+                chunks_new  INTEGER NOT NULL,
+                carried     INTEGER NOT NULL,
+                reenrich    INTEGER NOT NULL){_S}""")
 
             # Durable seam for the shared-drive cache-miss -> embed -> publish
             # pipeline. A row means "this file's chunks are extracted and
@@ -3181,6 +3230,13 @@ class Store:
         row = self.get_chunk(doc_id)
         if row is not None:
             return row
+        # An id a reflow deleted (the document now has fewer chunks) resolves to
+        # the chunk that holds its text now, rather than silently missing.
+        target = self.resolve_reflowed_ids([doc_id])
+        if target:
+            row = self.get_chunk(target[0])
+            if row is not None:
+                return row
         if not doc_id.startswith("note-"):
             return None
         rows = [r for r in (self.get_chunk(d) for d in self._note_sibling_ids(doc_id))
@@ -3337,33 +3393,310 @@ class Store:
     # --- reflow (extraction-fidelity) -- CONTRACT (Stage 0), unit 1d ---------
 
     def enqueue_items(self, items, *, source: str) -> int:
-        """enqueue_and_advance without a cursor (the reflow seed has no feed
-        position). ON CONFLICT(source, ref_id) DO NOTHING."""
-        raise NotImplementedError("Store.enqueue_items: unit 1d")
+        """enqueue_and_advance without a cursor: for producers (the reflow
+        seed) that have no feed position to persist. ON CONFLICT(source,
+        ref_id) DO NOTHING -- an item already queued keeps its attempts and
+        backoff. Returns the number of rows actually inserted."""
+        now = datetime.now(timezone.utc).isoformat()
+        n = 0
+        with self._connect(write=True) as db:
+            for it in items:
+                n += db.execute(
+                    "INSERT INTO sync_queue(source, ref_id, version, event, modified_at,"
+                    " discovered_at) VALUES(?,?,?,?,?,?) "
+                    "ON CONFLICT(source, ref_id) DO NOTHING",
+                    (source, it["ref_id"], it.get("version", ""), it["event"],
+                     it["modified_at"], now)).rowcount
+        return n
 
     def owner_chunks(self, doc_id_prefixes: list[str]) -> list[dict]:
         """Rows (doc_id, text, metadata dict, enriched, enriched_version,
         enrich_state, salience, memory_tier, memory_type) for every chunk whose
-        doc_id starts with any prefix, in rowid order."""
-        raise NotImplementedError("Store.owner_chunks: unit 1d")
+        doc_id starts with any prefix, in rowid order.
+
+        Case-SENSITIVE and positional-suffix checked. SQLite's LIKE folds ASCII
+        case, so `gdrive-abc-%` would also return `gdrive-ABC-0` -- another
+        file's chunks, which a reflow would then remap and DELETE. The match is
+        an index-backed half-open range on the UNIQUE doc_id instead, and the
+        remainder after the prefix must be the owner's own positional suffix
+        (`_OWNER_SUFFIX`): a bare `cal-<eid>` prefix must not take in a
+        recurring instance `cal-<eid>_20260901T...` or a longer id that happens
+        to start with the same characters."""
+        out: list[dict] = []
+        seen: set[str] = set()
+        with self._connect() as db:
+            for pfx in doc_id_prefixes:
+                if not pfx:
+                    continue
+                hi = pfx[:-1] + chr(ord(pfx[-1]) + 1)
+                for r in db.execute(
+                        "SELECT doc_id, text, metadata, enriched, enriched_version, "
+                        "enrich_state, salience, memory_tier, memory_type FROM chunks "
+                        "WHERE doc_id >= ? AND doc_id < ? ORDER BY rowid", (pfx, hi)):
+                    d = dict(r)
+                    did = d["doc_id"]
+                    if (did in seen or not did.startswith(pfx)
+                            or not _owner_suffix_ok(pfx, did[len(pfx):])):
+                        continue
+                    seen.add(did)
+                    d["metadata"] = json.loads(d["metadata"] or "{}")
+                    out.append(d)
+        return out
 
     def apply_reflow(self, owner: str, source: str, plan, vectors, *, home=None) -> dict:
-        """Apply a reflow.ReflowPlan in ONE transaction; returns {written,
-        carried, reenrich, deleted, remapped}; raises ReflowOrphanError (rolled
-        back) on any dangling reference."""
-        raise NotImplementedError("Store.apply_reflow: unit 1d")
+        """Apply a reflow.ReflowPlan in ONE transaction (spec §3); returns
+        {written, carried, reenrich, deleted, remapped}.
+
+        Order inside the single BEGIN IMMEDIATE: write every new chunk over its
+        positional id with its vector + FTS row -> carry enrichment state ->
+        remap every doc_id reference SIMULTANEOUSLY (one UPDATE per target
+        table through a temp mapping table, so i->j and j->i can never chain)
+        -> merge chunk_quality -> delete the old ids beyond the new chunk set
+        -> append reflow_map -> orphan guard. The guard raises
+        ReflowOrphanError INSIDE the transaction, so `_connect` rolls the whole
+        thing back to the untouched old chunks: a wrong remap must stop, not
+        propagate."""
+        rows = list(plan.rows)
+        if len(vectors) != len(rows):
+            raise ValueError("apply_reflow: one vector per new chunk")
+        if not rows:
+            raise ValueError("apply_reflow: no new chunks -- never apply a deletion")
+        new_ids = [r.chunk.doc_id for r in rows]
+        if len(set(new_ids)) != len(new_ids):
+            raise ValueError("apply_reflow: duplicate new doc_id")
+        old_ids = list(plan.remap)
+        stray = set(plan.deletes) - set(old_ids)
+        if stray or set(plan.deletes) & set(new_ids):
+            raise ValueError("apply_reflow: deletes must be old ids with no new chunk")
+        now = datetime.now(timezone.utc).isoformat()
+        carried = sum(1 for r in rows if r.covered)
+        reenrich = sum(1 for r in rows if not r.enriched)
+        with self._connect(write=True) as db:
+            tables = {r[0] for r in db.execute(
+                "SELECT name FROM sqlite_master WHERE type='table'")}
+            for row, vec in zip(rows, vectors):
+                c = row.chunk
+                self._write_cached_chunk_row(
+                    db, c.doc_id, c.text, c.content_hash, c.metadata, vec,
+                    enriched=bool(row.enriched), enriched_version=row.enriched_version,
+                    home=home)
+                db.execute("UPDATE chunks SET enrich_state=?, salience=COALESCE(?, salience),"
+                           " memory_tier=COALESCE(?, memory_tier),"
+                           " memory_type=COALESCE(?, memory_type), enrich_attempts=0"
+                           " WHERE doc_id=?",
+                           (row.enrich_state, row.salience, row.memory_tier,
+                            row.memory_type, c.doc_id))
+            db.execute("CREATE TEMP TABLE IF NOT EXISTS reflow_tmp("
+                       "old TEXT PRIMARY KEY, new TEXT NOT NULL)")
+            db.execute("DELETE FROM reflow_tmp")
+            db.executemany("INSERT INTO reflow_tmp(old, new) VALUES(?,?)",
+                           list(plan.remap.items()))
+            remapped = 0
+            for table, col in _REFLOW_REF_COLUMNS:
+                if table not in tables:
+                    continue
+                remapped += db.execute(
+                    f"UPDATE {table} SET {col}=(SELECT new FROM reflow_tmp "
+                    f"WHERE old={table}.{col}) "
+                    f"WHERE {col} IN (SELECT old FROM reflow_tmp) "
+                    f"AND {col} != (SELECT new FROM reflow_tmp WHERE old={table}.{col})"
+                ).rowcount
+            if "chunk_quality" in tables and old_ids:
+                self._merge_chunk_quality(db, plan.remap)
+            if plan.deletes:
+                ph = ",".join("?" * len(plan.deletes))
+                rowids = [r[0] for r in db.execute(
+                    f"SELECT rowid FROM chunks WHERE doc_id IN ({ph})", plan.deletes)]
+                if rowids:
+                    rp = ",".join("?" * len(rowids))
+                    db.execute(f"DELETE FROM vec_chunks WHERE rowid IN ({rp})", rowids)
+                    db.execute(f"DELETE FROM fts_chunks WHERE rowid IN ({rp})", rowids)
+                    db.execute(f"DELETE FROM chunks WHERE rowid IN ({rp})", rowids)
+            db.executemany(
+                "INSERT INTO reflow_map(owner, old_doc_id, new_doc_id, reason, at) "
+                "VALUES(?,?,?,?,?)",
+                [(owner, o, n, plan.reasons.get(o, "exact"), now)
+                 for o, n in plan.remap.items()])
+            # Orphan guard. (1) Every remap target must be a chunk that now
+            # exists -- otherwise reflow_map would log, and read_doc would
+            # resolve to, an id with no row. (2) Nothing may reference one of
+            # this owner's ids that no longer has a chunk row.
+            ids = sorted(set(old_ids) | set(new_ids))
+            ph = ",".join("?" * len(ids))
+            present = {r[0] for r in db.execute(
+                f"SELECT doc_id FROM chunks WHERE doc_id IN ({ph})", ids)}
+            missing_targets = sorted(set(plan.remap.values()) - present)
+            dangling = 0
+            for table, col in _REFLOW_REF_COLUMNS:
+                if table not in tables:
+                    continue
+                dangling += db.execute(
+                    f"SELECT count(*) FROM {table} WHERE {col} IN ({ph}) "
+                    f"AND {col} NOT IN (SELECT doc_id FROM chunks)", ids).fetchone()[0]
+            if missing_targets or dangling:
+                raise ReflowOrphanError(
+                    f"reflow {owner}: {dangling} dangling reference(s), "
+                    f"{len(missing_targets)} remap target(s) with no chunk "
+                    f"{missing_targets[:5]}")
+            db.execute("INSERT OR REPLACE INTO reflow_owners(owner, source, at, chunks_new,"
+                       " carried, reenrich) VALUES(?,?,?,?,?,?)",
+                       (owner, source, now, len(rows), carried, reenrich))
+            db.execute("DROP TABLE reflow_tmp")
+        return {"written": len(rows), "carried": carried, "reenrich": reenrich,
+                "deleted": len(plan.deletes), "remapped": remapped}
+
+    @staticmethod
+    def _merge_chunk_quality(db, remap: dict[str, str]) -> None:
+        """Fold the old ids' chunk_quality rows into their remap targets:
+        exposures and uses summed; quality, memory_strength, last_accessed and
+        updated_at the max. Every old id is removed first, then one merged row
+        per target is written -- so a target that is also an old id (positional
+        reuse) is replaced by the merge, never double-counted."""
+        old_ids = list(remap)
+        ph = ",".join("?" * len(old_ids))
+        qrows = [dict(q) for q in db.execute(
+            f"SELECT * FROM chunk_quality WHERE doc_id IN ({ph})", old_ids)]
+        if not qrows:
+            return
+        merged: dict[str, dict] = {}
+        for q in qrows:
+            tgt = remap[q["doc_id"]]
+            m = merged.get(tgt)
+            if m is None:
+                merged[tgt] = {**q, "doc_id": tgt}
+                continue
+            for k in ("exposures", "uses"):
+                if k in q:
+                    m[k] = (m.get(k) or 0) + (q[k] or 0)
+            for k in ("quality", "memory_strength", "last_accessed", "updated_at"):
+                if k in q and q[k] is not None and (m.get(k) is None or q[k] > m[k]):
+                    m[k] = q[k]
+        db.execute(f"DELETE FROM chunk_quality WHERE doc_id IN ({ph})", old_ids)
+        for m in merged.values():
+            cols = list(m)
+            db.execute(f"INSERT OR REPLACE INTO chunk_quality({','.join(cols)}) "
+                       f"VALUES({','.join('?' * len(cols))})", [m[k] for k in cols])
 
     def latest_reflow_target(self, doc_id: str) -> str | None:
-        raise NotImplementedError("Store.latest_reflow_target: unit 1d")
+        """The new_doc_id of the most recent reflow_map row for `doc_id`, or
+        None. One hop; resolve_reflowed_ids follows the chain."""
+        with self._connect() as db:
+            try:
+                r = db.execute("SELECT new_doc_id FROM reflow_map WHERE old_doc_id=? "
+                               "ORDER BY id DESC LIMIT 1", (doc_id,)).fetchone()
+            except sqlite3.OperationalError as exc:
+                if "no such table" in str(exc):     # a store not yet init()'d
+                    return None
+                raise
+        return r["new_doc_id"] if r else None
+
+    def resolve_reflowed_ids(self, doc_ids: list[str], *, max_hops: int = 8) -> list[str]:
+        """Map doc_ids onto chunks that exist, preserving order, de-duplicated.
+
+        An id with a chunk row is kept as-is. An id without one is followed
+        through reflow_map (latest row per hop -- a second reflow of the same
+        owner can have deleted the first one's target) until it reaches an id
+        that exists; if it never does, it is dropped. The fallback spec §3
+        gives read_doc, drain's doc_id resolution and org provenance."""
+        ids = [d for d in (doc_ids or []) if d]
+        if not ids:
+            return []
+        ph = ",".join("?" * len(ids))
+        with self._connect() as db:
+            present = {r[0] for r in db.execute(
+                f"SELECT doc_id FROM chunks WHERE doc_id IN ({ph})", ids)}
+        out: list[str] = []
+        for d in ids:
+            cur, seen = d, {d}
+            while cur not in present:
+                nxt = self.latest_reflow_target(cur)
+                if not nxt or nxt in seen or len(seen) > max_hops:
+                    cur = None
+                    break
+                seen.add(nxt)
+                if self.get_chunk(nxt) is not None:
+                    present.add(nxt)
+                cur = nxt
+            if cur is not None and cur not in out:
+                out.append(cur)
+        return out
 
     def reflow_stats(self) -> dict:
         """{owners_done, chunks_carried, chunks_reenrich, queued}."""
-        raise NotImplementedError("Store.reflow_stats: unit 1d")
+        with self._connect() as db:
+            o = db.execute("SELECT count(*) n, COALESCE(sum(carried),0) c, "
+                           "COALESCE(sum(reenrich),0) r FROM reflow_owners").fetchone()
+            q = db.execute("SELECT count(*) FROM sync_queue WHERE source LIKE 'reflow:%'"
+                           ).fetchone()[0]
+        return {"owners_done": o["n"], "chunks_carried": o["c"],
+                "chunks_reenrich": o["r"], "queued": q}
 
     def reflow_candidates(self, limit: int) -> list[tuple[str, str]]:
-        """Level-triggered selector: (source, owner) pairs, source in
-        reflow:drive|gmail|anarlog|calendar, excluding owners already queued."""
-        raise NotImplementedError("Store.reflow_candidates: unit 1d")
+        """Level-triggered reflow selector (spec §4): (source, owner) pairs,
+        source in reflow:drive|gmail|anarlog|calendar, excluding owners already
+        queued. An owner stops matching once its chunks carry the current
+        split/extraction versions, so the seed converges and goes idle.
+
+        Rules, one query each:
+          1. Drive files in a block-extracted MIME below that MIME's
+             EXTRACTION_VERSIONS entry (owner file_id);
+          2. Gmail attachments likewise, on attachment_mime (owner message_id);
+          3. any multi-chunk, non-table owner below SPLIT_VERSION -- gdrive
+             (file_id), gmail (message_id), anarlog (session_id), calendar
+             (event_id).
+        The already-queued exclusion is IN the query, before LIMIT: filtered
+        afterwards, a window of stuck (backing-off) items would fill every
+        rule's LIMIT with owners that are then discarded, and the seed would
+        stall with real candidates left."""
+        from mcpbrain.chunking import SPLIT_VERSION
+        from mcpbrain.sync.blocks import EXTRACTION_VERSIONS
+        if limit <= 0:
+            return []
+        mimes = list(EXTRACTION_VERSIONS)
+        mph = ",".join("?" * len(mimes))
+        case_args = [x for m in mimes for x in (m, EXTRACTION_VERSIONS[m])]
+
+        def case(expr: str) -> str:
+            return f"CASE {expr} " + " ".join("WHEN ? THEN ?" for _ in mimes) + " ELSE 0 END"
+
+        st, xv, sv = (_meta_extract("$.source_type"), _meta_extract("$.extraction_version"),
+                      _meta_extract("$.split_version"))
+        total, sub = _meta_extract("$.chunk_total"), _meta_extract("$.content_subtype")
+        mime, amime = _meta_extract("$.mime_type"), _meta_extract("$.attachment_mime")
+        rules = [
+            ("reflow:drive", "$.file_id",
+             f"{st}='gdrive' AND {mime} IN ({mph}) AND COALESCE({xv},0) < {case(mime)}",
+             mimes + case_args),
+            ("reflow:gmail", "$.message_id",
+             f"{st}='gmail' AND {amime} IN ({mph}) AND COALESCE({xv},0) < {case(amime)}",
+             mimes + case_args),
+        ]
+        for src, stype, fld in (("reflow:drive", "gdrive", "$.file_id"),
+                                ("reflow:gmail", "gmail", "$.message_id"),
+                                ("reflow:anarlog", "anarlog", "$.session_id"),
+                                ("reflow:calendar", "calendar", "$.event_id")):
+            rules.append((src, fld,
+                          f"{st}=? AND COALESCE({sv},0) < ? AND COALESCE({total},1) > 1 "
+                          f"AND COALESCE({sub},'') != 'table'",
+                          [stype, SPLIT_VERSION]))
+        out: list[tuple[str, str]] = []
+        seen: set[tuple[str, str]] = set()
+        with self._connect() as db:
+            for src, fld, where, args in rules:
+                owner = _meta_extract(fld)
+                for r in db.execute(
+                        f"SELECT DISTINCT {owner} AS o FROM chunks WHERE {where} "
+                        f"AND {owner} IS NOT NULL AND {owner} != '' "
+                        f"AND {owner} NOT IN (SELECT ref_id FROM sync_queue "
+                        f"WHERE source LIKE 'reflow:%') LIMIT ?", [*args, limit]):
+                    key = (src, str(r["o"]))
+                    if key in seen:
+                        continue
+                    seen.add(key)
+                    out.append(key)
+                    if len(out) >= limit:
+                        return out
+        return out
 
     def enqueue_and_advance(self, items, *, source: str, cursor: str) -> int:
         """UPSERT queue rows and advance this source's cursor in ONE transaction.
