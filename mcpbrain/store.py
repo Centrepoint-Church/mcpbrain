@@ -993,15 +993,27 @@ class Store:
                 chunks_new  INTEGER NOT NULL,
                 carried     INTEGER NOT NULL,
                 reenrich    INTEGER NOT NULL,
-                outcome     TEXT NOT NULL DEFAULT 'carried'){_S}""")
+                outcome     TEXT NOT NULL DEFAULT 'carried',
+                uncovered   INTEGER NOT NULL DEFAULT 0,
+                inherited_unenriched INTEGER NOT NULL DEFAULT 0){_S}""")
             # One row per owner the reflow is DONE with, whatever the outcome:
             # carried (apply_reflow) | ordinary (source changed -> normal path)
             # | gave_up | source_gone | unsupported. Pre-outcome stores hold
             # apply_reflow rows only, hence the default.
-            if "outcome" not in {r["name"] for r in db.execute(
-                    "PRAGMA table_info(reflow_owners)")}:
+            ro_cols = {r["name"] for r in db.execute("PRAGMA table_info(reflow_owners)")}
+            if "outcome" not in ro_cols:
                 db.execute("ALTER TABLE reflow_owners ADD COLUMN outcome TEXT "
                            "NOT NULL DEFAULT 'carried'")
+            # Dry run #2 D4: `reenrich` (every new row left enriched=0) overstated
+            # the extraction cost. `uncovered` = new text no old chunk held (the
+            # genuine new work); `inherited_unenriched` = covered text whose old
+            # chunks were never enriched either (cold by design, or pending).
+            # `reenrich` is still written (their sum) for older readers. Rows
+            # written before these columns read 0 for both.
+            for col in ("uncovered", "inherited_unenriched"):
+                if col not in ro_cols:
+                    db.execute(f"ALTER TABLE reflow_owners ADD COLUMN {col} INTEGER "
+                               "NOT NULL DEFAULT 0")
 
             # Durable seam for the shared-drive cache-miss -> embed -> publish
             # pipeline. A row means "this file's chunks are extracted and
@@ -3628,7 +3640,10 @@ class Store:
 
     def apply_reflow(self, owner: str, source: str, plan, vectors, *, home=None) -> dict:
         """Apply a reflow.ReflowPlan in ONE transaction (spec §3); returns
-        {written, carried, reenrich, deleted, remapped}.
+        {written, carried, uncovered, inherited_unenriched, deleted, remapped}
+        (carried = covered AND enriched; uncovered = covered False, the
+        genuinely new extraction work; inherited_unenriched = covered but the
+        old text was unenriched too).
 
         Order inside the single BEGIN IMMEDIATE: write every new chunk over its
         positional id with its vector + FTS row -> carry enrichment state ->
@@ -3660,13 +3675,16 @@ class Store:
         if stray or set(plan.deletes) & set(new_ids):
             raise ValueError("apply_reflow: deletes must be old ids with no new chunk")
         now = datetime.now(timezone.utc).isoformat()
-        # carried = text whose enrichment survived; covered-but-unenriched
-        # text still needs extraction and counts as re-enrich.
-        carried = sum(1 for r in rows if r.covered and r.enriched)
-        reenrich = sum(1 for r in rows if not r.enriched)
+        # carried = text whose enrichment survived. What is left at enriched=0
+        # splits into uncovered (new text: the real extraction cost) and
+        # inherited_unenriched (its old text was never enriched either).
+        counts = {"carried": sum(1 for r in rows if r.covered and r.enriched),
+                  "uncovered": sum(1 for r in rows if not r.covered),
+                  "inherited_unenriched": sum(1 for r in rows
+                                              if r.covered and not r.enriched)}
         try:
             return self._apply_reflow_txn(owner, source, plan, vectors, rows, new_ids,
-                                          old_ids, now, carried, reenrich, home)
+                                          old_ids, now, counts, home)
         except ReflowOrphanError as exc:
             # A wrong remap on ANY carry-over path (the reflow queue handler or
             # the ingest-cache import) halts the reflow cadence: the
@@ -3676,7 +3694,7 @@ class Store:
             raise
 
     def _apply_reflow_txn(self, owner, source, plan, vectors, rows, new_ids, old_ids,
-                          now, carried, reenrich, home) -> dict:
+                          now, counts, home) -> dict:
         with self._connect(write=True) as db:
             tables = {r[0] for r in db.execute(
                 "SELECT name FROM sqlite_master WHERE type='table'")}
@@ -3769,10 +3787,13 @@ class Store:
                 db.execute("UPDATE enrich_payloads SET covers=? WHERE file_id=?",
                            (json.dumps(covers), fid))
             db.execute("INSERT OR REPLACE INTO reflow_owners(owner, source, at, chunks_new,"
-                       " carried, reenrich, outcome) VALUES(?,?,?,?,?,?,'carried')",
-                       (owner, source, now, len(rows), carried, reenrich))
+                       " carried, reenrich, outcome, uncovered, inherited_unenriched)"
+                       " VALUES(?,?,?,?,?,?,'carried',?,?)",
+                       (owner, source, now, len(rows), counts["carried"],
+                        counts["uncovered"] + counts["inherited_unenriched"],
+                        counts["uncovered"], counts["inherited_unenriched"]))
             db.execute("DROP TABLE reflow_tmp")
-        return {"written": len(rows), "carried": carried, "reenrich": reenrich,
+        return {"written": len(rows), **counts,
                 "deleted": len(plan.deletes), "remapped": remapped}
 
     @staticmethod
@@ -3918,12 +3939,15 @@ class Store:
 
     def reflow_stats(self, *, live_remaining: bool = False,
                      remaining_cap: int = 5000, sources=None) -> dict:
-        """{owners_done, by_outcome, chunks_carried, chunks_reenrich, queued,
-        remaining, total, last_seed}.
+        """{owners_done, by_outcome, chunks_carried, chunks_uncovered,
+        chunks_inherited_unenriched, queued, remaining, total, last_seed}.
 
         owners_done counts every owner with a terminal outcome (by_outcome
         splits it). chunks_carried = new chunks covered AND enriched;
-        chunks_reenrich = new chunks at enriched=0. remaining = owners the
+        chunks_uncovered = new chunks no old text covered (the genuine new
+        extraction work); chunks_inherited_unenriched = covered chunks whose
+        old text was unenriched too (cold by design, or never reached) --
+        not a cost the reflow adds. remaining = owners the
         selector still matches and that are not queued: computed live (a
         bounded reflow_candidates call, capped at remaining_cap -- several
         chunk-table scans, so for attended callers: doctor, bin/reflow.py) when
@@ -3941,7 +3965,9 @@ class Store:
             by = {r["outcome"]: r["n"] for r in db.execute(
                 "SELECT outcome, count(*) n FROM reflow_owners GROUP BY outcome")}
             o = db.execute("SELECT count(*) n, COALESCE(sum(carried),0) c, "
-                           "COALESCE(sum(reenrich),0) r FROM reflow_owners").fetchone()
+                           "COALESCE(sum(uncovered),0) u, "
+                           "COALESCE(sum(inherited_unenriched),0) i "
+                           "FROM reflow_owners").fetchone()
             q = db.execute("SELECT count(*) FROM sync_queue WHERE source LIKE 'reflow:%'"
                            ).fetchone()[0]
         last_seed = None
@@ -3959,7 +3985,8 @@ class Store:
             remaining = (last_seed or {}).get("remaining")
         total = (o["n"] + q + remaining) if remaining is not None else None
         return {"owners_done": o["n"], "by_outcome": by, "chunks_carried": o["c"],
-                "chunks_reenrich": o["r"], "queued": q, "remaining": remaining,
+                "chunks_uncovered": o["u"], "chunks_inherited_unenriched": o["i"],
+                "queued": q, "remaining": remaining,
                 "total": total, "last_seed": last_seed}
 
     def drop_queued_reflow_rows(self, sources) -> int:

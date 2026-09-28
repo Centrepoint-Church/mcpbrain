@@ -11,9 +11,11 @@ Runs the real reflow handler (ReflowContext.handle) over up to --limit
 reflow_candidates of the COPY, with the real Google services and embedder
 built exactly as bin/repair.py builds them (auth.build_google_services(),
 embed.get_embedder()) and the real anarlog database when anarlog is enabled.
-Then reports outcomes per class and per MIME, carried vs re-enrich chunk
-counts, per-item extraction / embed / apply_reflow seconds (p50/p95/max), the
-Gmail/Calendar "source changed" rate, and the store checks: every
+Then reports outcomes per class and per MIME; chunk counts split into
+carried (covered AND enriched), uncovered (new text to enrich -- the real
+extraction cost) and inherited_unenriched (covered, but the old text was never
+enriched either); per-item extraction / embed / apply_reflow seconds
+(p50/p95/max); the Gmail/Calendar "source changed" rate; and the store checks: every
 _REFLOW_REF_COLUMNS reference with no chunk row (before AND after),
 PRAGMA foreign_key_check and PRAGMA integrity_check. Invalidated relations
 (invalidated_at IS NOT NULL) are history, not orphans, and are excluded from
@@ -278,8 +280,8 @@ def run(store, *, home, services: dict, embedder, limit: int, per_mime: bool,
                 rec["outcome"] = "deferred"
             elif "stats" in cur:
                 rec["outcome"] = "carried"
-                rec["carried"] = cur["stats"].get("carried", 0)
-                rec["reenrich"] = cur["stats"].get("reenrich", 0)
+                for k in ("carried", "uncovered", "inherited_unenriched"):
+                    rec[k] = cur["stats"].get(k, 0)
             else:
                 rec["outcome"] = cur.get("outcome", "noop")
         except ReflowOrphanError as exc:
@@ -313,7 +315,8 @@ def run(store, *, home, services: dict, embedder, limit: int, per_mime: bool,
         "sources_seeded": sorted(sources), "sources_workable": sorted(workable),
         "by_outcome": by_outcome, "by_class": by_class,
         "chunks_carried": sum(r.get("carried", 0) for r in items),
-        "chunks_reenrich": sum(r.get("reenrich", 0) for r in items),
+        "chunks_uncovered": sum(r.get("uncovered", 0) for r in items),
+        "chunks_inherited_unenriched": sum(r.get("inherited_unenriched", 0) for r in items),
         "extract_s": _dist([r["extract_s"] for r in items if "extract_s" in r]),
         "embed_s": _dist([r["embed_s"] for r in items if "embed_s" in r]),
         "apply_reflow_s": _dist([r["apply_s"] for r in items if "apply_s" in r]),

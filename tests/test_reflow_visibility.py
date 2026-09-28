@@ -184,7 +184,8 @@ def test_carried_means_covered_and_enriched(tmp_path):
     new = [Chunk("gdrive-F-0", "text F 0\ntext F 1", "n", {"source_type": "gdrive",
                  "file_id": "F", "chunk_index": 0}, ["text F 0", "text F 1"])]
     out = s.apply_reflow("F", "drive", plan(old, new), [[0.1] * 4])
-    assert out["carried"] == 0 and out["reenrich"] == 1       # covered, not enriched
+    assert out["carried"] == 0 and out["uncovered"] == 0      # covered, not enriched
+    assert out["inherited_unenriched"] == 1
     st = s.reflow_stats()
     assert st["by_outcome"] == {"carried": 1} and st["chunks_carried"] == 0
 
@@ -316,3 +317,83 @@ def test_dashboard_gated_seed_with_unknown_remaining_is_blocked():
                             ) == "blocked: " + status.replace("_", " ")
     assert _reflow_text({"owners_done": 0, "queued": 0, "remaining": None,
                          "last_seed": {"status": "ok"}}) == "idle"
+
+
+# -- dry run #2 D4: "re-enrich" split into uncovered vs inherited-unenriched --
+
+def _d4_owner(s):
+    """Old: chunk 0 enriched, chunk 1 never enriched (e.g. cold by design).
+    New: chunk 0 = old 0 (carried), chunk 1 = old 1 (covered, inherits
+    enriched=0), chunk 2 = genuinely new text (uncovered)."""
+    from mcpbrain.reflow import plan
+    from mcpbrain.sync.normalise import Chunk
+    _seed_owner(s, "F", n=2, enriched=False)
+    with s._connect(write=True) as db:
+        db.execute("UPDATE chunks SET enriched=1 WHERE doc_id='gdrive-F-0'")
+        db.execute("UPDATE chunks SET enrich_state='cold' WHERE doc_id='gdrive-F-1'")
+    old = s.owner_chunks(["gdrive-F-"])
+    md = {"source_type": "gdrive", "file_id": "F"}
+    new = [Chunk("gdrive-F-0", "text F 0", "a", {**md, "chunk_index": 0}, ["text F 0"]),
+           Chunk("gdrive-F-1", "text F 1", "b", {**md, "chunk_index": 1}, ["text F 1"]),
+           Chunk("gdrive-F-2", "speaker notes for Northgate Trust", "c",
+                 {**md, "chunk_index": 2}, ["speaker notes for Northgate Trust"])]
+    return s.apply_reflow("F", "drive", plan(old, new), [[0.1] * 4] * 3)
+
+
+def test_apply_reflow_reports_uncovered_and_inherited_unenriched(tmp_path):
+    s = _store(tmp_path)
+    out = _d4_owner(s)
+    assert (out["carried"], out["uncovered"], out["inherited_unenriched"]) == (1, 1, 1)
+    assert "reenrich" not in out
+    st = s.reflow_stats()
+    assert (st["chunks_carried"], st["chunks_uncovered"],
+            st["chunks_inherited_unenriched"]) == (1, 1, 1)
+    assert "chunks_reenrich" not in st
+
+
+def test_reflow_owners_gains_the_split_columns_on_an_existing_store(tmp_path):
+    s = _store(tmp_path)
+    with s._connect(write=True) as db:
+        db.execute("DROP TABLE reflow_owners")
+        db.execute("CREATE TABLE reflow_owners(owner TEXT PRIMARY KEY, source TEXT NOT NULL,"
+                   " at TEXT NOT NULL, chunks_new INTEGER NOT NULL, carried INTEGER NOT NULL,"
+                   " reenrich INTEGER NOT NULL, outcome TEXT NOT NULL DEFAULT 'carried')")
+        db.execute("INSERT INTO reflow_owners VALUES('G','drive','t',1,1,0,'carried')")
+    s.init()
+    _d4_owner(s)
+    s.record_reflow_outcome("X", "gmail", "source_gone")
+    st = s.reflow_stats()
+    assert (st["chunks_carried"], st["chunks_uncovered"],
+            st["chunks_inherited_unenriched"]) == (2, 1, 1)
+
+
+def test_doctor_labels_uncovered_and_inherited_separately(tmp_path):
+    s = _store(tmp_path)
+    _d4_owner(s)
+    line = reflow_line(s)
+    assert "1 chunks carried" in line
+    assert "1 new text to enrich" in line and "1 inherited unenriched" in line
+    assert "re-enrich" not in line
+
+
+def _reflow_chunks_text(r):
+    import json
+    import re
+    import shutil
+    import pytest
+    if not shutil.which("node"):
+        pytest.skip("node not installed")
+    html = (Path(dashboard.__file__).parent / "wizard" / "dashboard.html").read_text()
+    fn = re.search(r"function reflowChunksText\(r\)\{.*?\n\}\n", html, flags=re.S).group(0)
+    js = f"const fmt = String;\n{fn}\nprocess.stdout.write(reflowChunksText({json.dumps(r)}));"
+    out = subprocess.run(["node", "-e", js], capture_output=True, text=True, check=True)
+    return out.stdout
+
+
+def test_dashboard_reflow_tooltip_splits_the_chunk_counts():
+    html = (Path(dashboard.__file__).parent / "wizard" / "dashboard.html").read_text()
+    assert "reflowChunksText(data.reflow)" in html
+    assert _reflow_chunks_text({"chunks_carried": 5, "chunks_uncovered": 2,
+                                "chunks_inherited_unenriched": 3}) == \
+        "5 chunks carried · 2 new text to enrich · 3 inherited unenriched"
+    assert _reflow_chunks_text(None) == ""

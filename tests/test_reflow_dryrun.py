@@ -111,7 +111,8 @@ def test_run_carries_over_never_records_a_publish_and_writes_the_summary(
     assert dryrun.main(["--store", str(path), "--limit", "5", "--per-mime",
                         "--out", str(out), "--yes"]) == 0
     summary = json.loads(out.read_text())
-    for key in ("by_outcome", "by_class", "chunks_carried", "chunks_reenrich",
+    for key in ("by_outcome", "by_class", "chunks_carried", "chunks_uncovered",
+                "chunks_inherited_unenriched",
                 "extract_s", "embed_s", "apply_reflow_s", "gmail_calendar_source_changed",
                 "orphans_before", "orphans_after", "orphans_new", "foreign_key_check",
                 "integrity_check", "problems"):

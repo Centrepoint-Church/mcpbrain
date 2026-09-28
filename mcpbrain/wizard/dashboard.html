@@ -409,6 +409,16 @@ function reflowText(r){
   return done ? "done (" + fmt(done) + ")" : "idle";
 }
 
+// The chunk side of a reflow (dry run #2 D4): carried vs the two kinds of
+// unenriched rows -- genuinely new text (the real extraction cost) and text
+// whose old chunks were never enriched either (cold by design, or pending).
+function reflowChunksText(r){
+  if(!r) return "";
+  return fmt(r.chunks_carried || 0) + " chunks carried · "
+    + fmt(r.chunks_uncovered || 0) + " new text to enrich · "
+    + fmt(r.chunks_inherited_unenriched || 0) + " inherited unenriched";
+}
+
 function render(data){
   const idx = data.index || {}, g = data.graph || {}, d = data.daemon || {};
 
@@ -436,6 +446,7 @@ function render(data){
   renderConnections(data.connections);
   renderDaemon(d);
   $("d-reflow").textContent = reflowText(data.reflow);
+  $("d-reflow").title = reflowChunksText(data.reflow);
 
   const live = $("live-text");
   if(!paused && data.as_of) live.textContent = "live · " + asofLabel(data.as_of);

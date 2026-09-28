@@ -88,10 +88,10 @@ def test_apply_reflow_merges_to_one_chunk_and_remaps_relation(tmp_path):
     assert s.read_doc("gdrive-F-1")["doc_id"] == "gdrive-F-0"
     assert [d for d, _ in s.fts_search("epsilon", 5)] == ["gdrive-F-0"]
     st = s.reflow_stats()
-    assert {k: st[k] for k in ("owners_done", "chunks_carried", "chunks_reenrich",
-                               "queued", "by_outcome")} == {
-        "owners_done": 1, "chunks_carried": 1, "chunks_reenrich": 0, "queued": 0,
-        "by_outcome": {"carried": 1}}
+    assert {k: st[k] for k in ("owners_done", "chunks_carried", "chunks_uncovered",
+                               "chunks_inherited_unenriched", "queued", "by_outcome")} == {
+        "owners_done": 1, "chunks_carried": 1, "chunks_uncovered": 0,
+        "chunks_inherited_unenriched": 0, "queued": 0, "by_outcome": {"carried": 1}}
 
 
 def test_every_reference_table_is_remapped(tmp_path):
@@ -201,7 +201,7 @@ def test_uncovered_chunk_is_hot_and_unenriched(tmp_path):
     with s._connect() as db:
         r = db.execute("SELECT enriched, enrich_state FROM chunks WHERE doc_id='gdrive-F-1'").fetchone()
     assert tuple(r) == (0, None)
-    assert out["carried"] == 1 and out["reenrich"] == 1
+    assert out["carried"] == 1 and out["uncovered"] == 1 and out["inherited_unenriched"] == 0
 
 
 def test_chunk_quality_is_merged(tmp_path):

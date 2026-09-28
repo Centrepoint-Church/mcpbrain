@@ -703,7 +703,9 @@ def reflow_line(store) -> str:
     by = st.get("by_outcome") or {}
     outcomes = ", ".join(f"{k} {v}" for k, v in sorted(by.items())) or "none yet"
     detail = (f"{st['owners_done']} of {st['total']} owners done ({outcomes}); "
-              f"{st['chunks_carried']} chunks carried, {st['chunks_reenrich']} re-enrich")
+              f"{st['chunks_carried']} chunks carried, "
+              f"{st.get('chunks_uncovered', 0)} new text to enrich, "
+              f"{st.get('chunks_inherited_unenriched', 0)} inherited unenriched")
     pending = st["queued"] + (st["remaining"] or 0)
     last = (st.get("last_seed") or {}).get("status")
     # Blocked = work remains (queued rows or unseeded owners) AND the last
