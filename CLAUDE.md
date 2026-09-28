@@ -301,7 +301,36 @@ assert_relation / merge / undo, each with `basis` user_stated|inferred) plus
 
 ## Shipping caveats
 
-- **Extraction fidelity (2026-09-24 spec) — IMPLEMENTED on `main`, NOT released.**
+- **Current state (2026-09-28): the four version files (+ `uv.lock`) are at `0.7.132`,
+  RELEASED** — source `950b8bd9`, gh-pages `105058ed`, plugin `a443263`; the index
+  serves only `mcpbrain-0.7.132-py3-none-any.whl`, `install.ps1` 200. Full suite
+  **4268 passed**, ruff clean, tenant check passed. Fleet resolution:
+  `mcpbrain==0.7.132`, `mcp==2.2.0`, `fastembed==0.8.1`, **`pymupdf==1.28.2`** —
+  the lock pins pymupdf 1.27.2.3, so the new PDF extractor had never run on what
+  the fleet gets; full suite re-run under `uv run --with pymupdf==1.28.2 --with
+  mcp==2.2.0 --with fastembed==0.8.1`: 4268 passed. **pymupdf 1.28 deprecates the
+  `fitz` import name the extractors use** — works today, will break in a future
+  pymupdf; switch to `import pymupdf` and bound the dependency before it bites.
+  Wheel CONTENTS asserted (blocks/rtf/reflow_handler present, `sort=True`,
+  `apply_reflow`, `sweep_changed_chunks`, `SPLIT_VERSION = 1`, tenant files; no
+  gold set, no `tenant_people.json`). Installed on this machine from the PUBLISHED
+  index (bootout → `--reinstall-package` → clear `__pycache__` → bootstrap);
+  `/api/status` reports `0.7.132`, not stalled, 0 watchdog exits.
+  **Pre-release dry runs on store copies** (`bin/reflow_dryrun.py`): #2 FAILED the
+  orphan gate and exposed real defects that only a real store has — Gmail and
+  calendar owners carrying legacy duplicate/tail rows (a pre-split `cal-<eid>` row
+  beside `cal-<eid>-0/1`; Gmail bodies with 40–60 never-deleted legacy tail
+  chunks) were misread as "source changed" and sent down the destructive ordinary
+  path. Fixed (Gmail always carries; calendar/anarlog use bidirectional
+  containment), then #3 (400 owners) and #4 (250, final code) passed: 0 failures,
+  0 source-changed, no new orphans, fk 0, integrity ok; #3 chunks 2,081 carried /
+  488 uncovered (genuine new extraction) / 498 inherited-unenriched; gold 0.850 /
+  0.577 unchanged. `apply_reflow` p95 ≤ 78 ms; extraction p95 ~6 s, one OCR PDF at
+  288 s (under `STALL_S` 1800, so no watchdog loop). **The live store already holds
+  pre-existing dangling references** (e.g. 27,545 `entity_observations.source`,
+  7,114 `recall_feedback`, 5,997 `actions`, 449 relations — many are message ids,
+  not doc ids), which is why the dry-run gate is on NEW orphans.
+- **Extraction fidelity (2026-09-24 spec) — RELEASED in 0.7.132.**
   Spec `docs/superpowers/specs/2026-09-24-extraction-fidelity-design.md`. PDF,
   DOCX, PPTX, RTF, Google Docs and Slides are now extracted as structured blocks
   (headings, paragraphs, tables, slide notes) and rendered with a
