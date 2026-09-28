@@ -26,6 +26,16 @@ from mcpbrain.embed import get_embedder  # noqa: E402
 from mcpbrain.store import Store        # noqa: E402
 
 
+def _describe_store_error(exc: sqlite3.OperationalError, db_path) -> str:
+    """Only a missing table means the daemon never initialised this store; a
+    busy/locked store (or anything else) is reported as what it is."""
+    msg = str(exc)
+    if "no such table" in msg:
+        return (f"reflow tables not present in {db_path} ({msg}) -- this store "
+                f"has never been initialized by the daemon")
+    return f"could not read the store at {db_path}: {msg} (is the daemon mid-write? retry)"
+
+
 def main(argv=None) -> int:
     ap = argparse.ArgumentParser(prog="reflow")
     sub = ap.add_subparsers(dest="cmd", required=True)
@@ -47,15 +57,12 @@ def main(argv=None) -> int:
     try:
         halted = store.get_cursor("reflow:halted") or ""
         if ns.cmd == "status":
-            integrity = store.get_cursor("reflow:integrity_checked")
             # live_remaining: the owners still to do, counted now (a bounded,
             # read-only selector query) rather than the seed's last figure.
-            print({**store.reflow_stats(live_remaining=True), "halted": halted or None,
-                   "integrity": integrity})
+            print(store.reflow_status(live_remaining=True))
             return 0
     except sqlite3.OperationalError as exc:
-        print(f"reflow tables not present in {db_path} ({exc}) -- this store "
-              f"has never been initialized by the daemon", file=sys.stderr)
+        print(_describe_store_error(exc, db_path), file=sys.stderr)
         return 2
 
     if not halted:
@@ -67,8 +74,7 @@ def main(argv=None) -> int:
     try:
         store.set_cursor("reflow:halted", "")
     except sqlite3.OperationalError as exc:
-        print(f"reflow tables not present in {db_path} ({exc}) -- this store "
-              f"has never been initialized by the daemon", file=sys.stderr)
+        print(_describe_store_error(exc, db_path), file=sys.stderr)
         return 2
     print("halt cleared")
     return 0

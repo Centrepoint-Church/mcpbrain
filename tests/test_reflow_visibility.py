@@ -447,3 +447,33 @@ def test_unequal_column_migrates_an_existing_store(tmp_path):
     assert _unequal_count(s, "G") == 0
     _d4_owner(s)
     assert s.reflow_stats()["owners_text_differed"] == 1
+
+
+def test_reflow_status_is_one_assembly_of_stats_halt_and_integrity(tmp_path):
+    """status, bin/reflow.py and the daemon's /api/status used to each glue
+    reflow_stats + the halt cursor + the integrity cursor together."""
+    s = _store(tmp_path)
+    s.set_cursor("reflow:halted", "reflow F: 1 dangling reference(s)")
+    s.set_cursor("reflow:integrity_checked", "ok")
+    st = s.reflow_status()
+    assert st["halted"].startswith("reflow F") and st["integrity"] == "ok"
+    assert "owners_done" in st and "queued" in st
+    s.set_cursor("reflow:halted", "")
+    assert s.reflow_status()["halted"] is None
+
+
+def _load_bin_reflow():
+    import importlib.util
+    spec = importlib.util.spec_from_file_location("bin_reflow", _BIN)
+    mod = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(mod)
+    return mod
+
+
+def test_bin_reflow_labels_only_a_missing_table_as_never_initialized():
+    import sqlite3
+    mod = _load_bin_reflow()
+    assert "never been initialized" in mod._describe_store_error(
+        sqlite3.OperationalError("no such table: reflow_owners"), "db")
+    locked = mod._describe_store_error(sqlite3.OperationalError("database is locked"), "db")
+    assert "never been initialized" not in locked and "database is locked" in locked

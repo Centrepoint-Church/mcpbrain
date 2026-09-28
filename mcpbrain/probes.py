@@ -253,6 +253,29 @@ def _iso(epoch: float):
         return None
 
 
+def last_backup_success(home) -> float | None:
+    """Epoch seconds of the last SUCCESSFUL backup, or None if unknown.
+
+    The same preference probe_backup applies: backup_state.json's recorded
+    `last_success` when that file exists (a failed upload still refreshes
+    snapshot.enc, so its mtime would lie); only when the state file is absent,
+    a non-empty snapshot.enc's mtime. Public so the reflow seed's backup gate
+    need not reach into this module's private reader."""
+    state = _read_backup_state(home)
+    if state is not None:
+        try:
+            v = float(state.get("last_success") or 0)
+        except (TypeError, ValueError):
+            return None
+        return v or None
+    snap = Path(home) / "snapshot.enc"
+    try:
+        st = snap.stat()
+    except OSError:
+        return None
+    return st.st_mtime if st.st_size > 0 else None
+
+
 def _read_backup_state(home) -> dict | None:
     """The daemon's record of the last backup ATTEMPT, or None if absent.
 

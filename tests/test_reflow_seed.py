@@ -477,3 +477,32 @@ def test_due_rows_still_fill_the_window(tmp_path, monkeypatch):
         s.defer_sync_item("reflow:drive", it["ref_id"], past)   # delay elapsed: due
     d = _seed_daemon(tmp_path, monkeypatch, s)
     assert d._run_reflow_seed()["reflow_seed"] == "window_full"
+
+
+def test_backup_gate_falls_back_to_snapshot_mtime_without_a_state_file(tmp_path, monkeypatch):
+    """Same rule as probes.probe_backup: prefer backup_state.json's recorded
+    success; only when that file is absent, a non-empty fresh snapshot.enc."""
+    s = _store(tmp_path)
+    _c(s, "gmail-N-body-0", source_type="gmail", message_id="N", chunk_total=2)
+    (tmp_path / "snapshot.enc").write_bytes(b"x" * 16)
+    d = _seed_daemon(tmp_path, monkeypatch, s)
+    assert d._run_reflow_seed()["enqueued"] == 1
+
+
+def test_backup_gate_state_file_wins_over_a_fresh_snapshot(tmp_path, monkeypatch):
+    from mcpbrain import daemon as dmod
+    s = _store(tmp_path)
+    _c(s, "gmail-N-body-0", source_type="gmail", message_id="N", chunk_total=2)
+    (tmp_path / "snapshot.enc").write_bytes(b"x" * 16)      # a failed upload still refreshes it
+    stale = time.time() - dmod.REFLOW_BACKUP_MAX_AGE_S - 10
+    (tmp_path / "backup_state.json").write_text(json.dumps({"last_success": stale}))
+    d = _seed_daemon(tmp_path, monkeypatch, s)
+    assert d._run_reflow_seed() == {"reflow_seed": "no_recent_backup"}
+
+
+def test_backup_gate_ignores_an_empty_snapshot(tmp_path, monkeypatch):
+    s = _store(tmp_path)
+    _c(s, "gmail-N-body-0", source_type="gmail", message_id="N", chunk_total=2)
+    (tmp_path / "snapshot.enc").write_bytes(b"")
+    d = _seed_daemon(tmp_path, monkeypatch, s)
+    assert d._run_reflow_seed() == {"reflow_seed": "no_recent_backup"}

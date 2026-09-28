@@ -1470,9 +1470,7 @@ class Daemon:
         # Best-effort -- status must never raise.
         reflow = None
         try:
-            reflow = {**self._store.reflow_stats(),
-                      "halted": self._store.get_cursor("reflow:halted") or None,
-                      "integrity": self._store.get_cursor("reflow:integrity_checked") or None}
+            reflow = self._store.reflow_status()
         except Exception as exc:  # noqa: BLE001
             log.debug("status: reflow block degraded: %s", exc)
         return {
@@ -3251,12 +3249,9 @@ class Daemon:
             return {"reflow_seed": "disabled"}
         if self._store.get_cursor("reflow:halted"):
             return {"reflow_seed": "halted"}
-        from mcpbrain.probes import _read_backup_state
-        st = _read_backup_state(home) or {}
-        try:
-            fresh = time.time() - float(st.get("last_success") or 0) <= REFLOW_BACKUP_MAX_AGE_S
-        except (TypeError, ValueError):
-            fresh = False
+        from mcpbrain.probes import last_backup_success
+        last = last_backup_success(home)
+        fresh = last is not None and time.time() - last <= REFLOW_BACKUP_MAX_AGE_S
         if not fresh:
             return {"reflow_seed": "no_recent_backup"}
         try:

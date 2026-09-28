@@ -693,8 +693,8 @@ def reflow_line(store) -> str:
     switch, or an error): never reported as idle, which is how an unattended
     rollout would stall unnoticed. `remaining` is computed live (bounded)."""
     try:
-        st = store.reflow_stats(live_remaining=True)
-        halted = store.get_cursor("reflow:halted")
+        st = store.reflow_status(live_remaining=True)
+        halted = st["halted"]
     except Exception as exc:  # noqa: BLE001 — a diagnostic must never be fatal
         return f"➖ {'Reflow':<16} skipped ({exc})"
     if halted:

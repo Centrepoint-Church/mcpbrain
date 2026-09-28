@@ -4065,6 +4065,14 @@ class Store:
                 "AND (next_attempt_at IS NULL OR next_attempt_at <= ?)", (now,)
             ).fetchone()[0]
 
+    def reflow_status(self, *, live_remaining: bool = False, sources=None) -> dict:
+        """reflow_stats plus `halted` (the halt reason, or None) and
+        `integrity` (the backlog-end integrity_check result, or None): the one
+        assembly /api/status, doctor and bin/reflow.py status all show."""
+        st = self.reflow_stats(live_remaining=live_remaining, sources=sources)
+        return {**st, "halted": self.get_cursor(REFLOW_HALT_CURSOR) or None,
+                "integrity": self.get_cursor("reflow:integrity_checked") or None}
+
     def drop_queued_reflow_rows(self, sources) -> int:
         """Delete queued reflow rows for `sources` (e.g. {"reflow:calendar"}).
         For a source that cannot be worked on this install (scope not
