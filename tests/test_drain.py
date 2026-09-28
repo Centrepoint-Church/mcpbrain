@@ -1255,3 +1255,30 @@ def test_stamp_part_doc_ids_overrides_a_model_echoed_value():
     exts = [{"thread_id": "t1", "part": 1, "part_doc_ids": ["evil"]}]
     _stamp_part_doc_ids(exts, {("t1", 1): ["a"]})
     assert exts[0]["part_doc_ids"] == ["a"]
+
+
+def test_drain_payload_covers_only_what_the_unit_held(store, home):
+    """Residual R1: a Drive message resolves file-wide to EVERY chunk of the
+    file, but the payload records only the chunks the unit actually carried
+    (its messages' chunk_doc_ids), so publish_file can tell a partial payload
+    from a whole-file one. With no unit file nothing is known and the payload
+    covers nothing."""
+    fid = "F7"
+    for i in range(2):
+        store.upsert_chunk(f"gdrive-{fid}-{i}", f"page {i}", f"h{i}",
+                           {"source_type": "gdrive", "file_id": fid, "chunk_index": i})
+    msg = {"message_id": fid, "sender": "", "date": "2026-06-16", "labels": "",
+           "subject": "Doc"}
+    units = home / "enrich_queue" / "units"
+    units.mkdir(parents=True)
+    (units / "u9.json").write_text(json.dumps({"threads": [
+        {"thread_id": fid, "messages": [{**msg, "chunk_doc_ids": [f"gdrive-{fid}-1"]}]}]}))
+    batch = _batch("u9", [_envelope(fid, messages=[msg])])
+    batch["unit_id"] = "u9"
+    _write_inbox(home, "u9.json", batch)
+    drain.drain(store, home=home, apply=RecordingApply())
+    assert not store.enrich_payload_covers_file(fid)
+    with store._connect() as db:
+        covers = db.execute("SELECT covers FROM enrich_payloads WHERE file_id=?",
+                            (fid,)).fetchone()[0]
+    assert json.loads(covers) == [f"gdrive-{fid}-1"]

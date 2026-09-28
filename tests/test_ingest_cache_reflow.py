@@ -360,3 +360,91 @@ def test_carry_over_import_is_deferred_while_reflow_is_halted(tmp_path):
         ingest_cache.try_import(a, fs, "D1", "F", "vh2", PIN, mime=PDF)
     assert (_chunks(a), _graph_counts(a)) == before
     assert _relation_doc(a) == "gdrive-F-1" and _reflow_map(a) == []
+
+
+# -- residual R1: a payload publishes only when it covers the whole file ------
+
+def _noop_apply(store, extraction, *, doc_ids, entity_index=None):
+    return {}
+
+
+def _drain_unit(store, home, fid, chunk_ids, summary_text):
+    """Run the REAL drain over one Drive unit whose message carries exactly
+    `chunk_ids` (what prepare packed: the file's unenriched chunks)."""
+    from mcpbrain import drain as drain_mod
+    units = home / "enrich_queue" / "units"
+    units.mkdir(parents=True, exist_ok=True)
+    msg = {"message_id": fid, "sender": "", "date": "2026-09-01", "labels": "",
+           "subject": "Budget", "chunk_doc_ids": list(chunk_ids)}
+    (units / "u1.json").write_text(json.dumps(
+        {"kind": "thread", "threads": [{"thread_id": fid, "messages": [msg]}]}))
+    inbox = home / "enrich_inbox"
+    inbox.mkdir(parents=True, exist_ok=True)
+    env = {"thread_id": fid, "org": "unknown", "content_type": "update",
+           "summary": summary_text, "entities": [], "topics": [], "actions": [],
+           "relations": [], "messages": [{k: v for k, v in msg.items()
+                                          if k != "chunk_doc_ids"}],
+           "resolved_action_ids": [], "updated_actions": [],
+           "reply_needed": False, "reply_reason": ""}
+    (inbox / "u1.json").write_text(json.dumps(
+        {"unit_id": "u1", "extractions": [env], "merge_answers": []}))
+    return drain_mod.drain(store, home=home, apply=_noop_apply)
+
+
+def _reflowed_publisher(tmp_path, home):
+    """P: F enriched as two chunks with a whole-file payload; a reflow keeps
+    chunk 0's text (carried) and adds never-extracted text at chunk 1; drain
+    then re-enriches ONLY that uncovered row."""
+    from mcpbrain import reflow
+    from mcpbrain.sync.normalise import Chunk
+    p = _local(tmp_path, name="PR.sqlite3")
+    p.set_enrich_payload("F", json.dumps({"thread_id": "F", "summary": "whole old"}),
+                         ENRICH_LOGIC_VERSION)
+    texts = ["alpha beta gamma\ndelta epsilon", "zeta speaker notes never extracted"]
+    new = [Chunk(f"gdrive-F-{i}", t, f"n{i}",
+                 {"source_type": "gdrive", "file_id": "F", "chunk_index": i,
+                  "chunk_total": 2, "drive_id": "D1", "mime_type": PDF,
+                  "modified": M, "extraction_version": 1}, [t])
+           for i, t in enumerate(texts)]
+    p.apply_reflow("F", "drive", reflow.plan(p.owner_chunks(["gdrive-F-"]), new), [V, V])
+    assert [c[2] for c in _chunks(p)] == [1, 0]
+    _drain_unit(p, home, "F", ["gdrive-F-1"], "only the speaker notes")
+    assert [c[2] for c in _chunks(p)] == [1, 1]
+    return p
+
+
+def test_partial_reenrichment_payload_is_not_published_after_a_reflow(tmp_path, _home):
+    fs = LocalDirFleetStorage(tmp_path / "fleet")
+    p = _reflowed_publisher(tmp_path, _home)
+    assert ingest_cache.publish_file(p, fs, "D1", "F", "vh2", PIN) is True
+    assert "extraction" not in _artifact_enrich(fs)
+    # A fresh install importing on the plain path re-enriches the whole file:
+    # nothing is marked enriched from a payload that covers only chunk 1.
+    b = _store(tmp_path, "B.sqlite3")
+    assert ingest_cache.try_import(b, fs, "D1", "F", "vh2", PIN, mime=PDF) is True
+    assert [c[2] for c in _chunks(b)] == [0, 0]
+
+
+def test_whole_file_drain_payload_is_published(tmp_path, _home):
+    fs = LocalDirFleetStorage(tmp_path / "fleet")
+    p = _local(tmp_path, name="PW.sqlite3", unenriched=(0, 1))
+    _drain_unit(p, _home, "F", ["gdrive-F-0", "gdrive-F-1"], "the whole file")
+    assert ingest_cache.publish_file(p, fs, "D1", "F", "vh2", PIN) is True
+    assert _artifact_enrich(fs)["extraction"]["summary"] == "the whole file"
+
+
+def test_fully_carried_reflow_keeps_a_whole_file_payload(tmp_path):
+    from mcpbrain import reflow
+    from mcpbrain.sync.normalise import Chunk
+    fs = LocalDirFleetStorage(tmp_path / "fleet")
+    p = _local(tmp_path, name="PC.sqlite3")
+    p.set_enrich_payload("F", json.dumps({"thread_id": "F", "summary": "whole old"}),
+                         ENRICH_LOGIC_VERSION)
+    new = [Chunk("gdrive-F-0", "alpha beta gamma\ndelta epsilon", "n0",
+                 {"source_type": "gdrive", "file_id": "F", "chunk_index": 0,
+                  "chunk_total": 1, "drive_id": "D1", "mime_type": PDF,
+                  "modified": M, "extraction_version": 1},
+                 ["alpha beta gamma\ndelta epsilon"])]
+    p.apply_reflow("F", "drive", reflow.plan(p.owner_chunks(["gdrive-F-"]), new), [V])
+    assert ingest_cache.publish_file(p, fs, "D1", "F", "vh2", PIN) is True
+    assert _artifact_enrich(fs)["extraction"]["summary"] == "whole old"

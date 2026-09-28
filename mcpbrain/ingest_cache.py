@@ -583,11 +583,13 @@ def publish_file(store, fleet_storage, drive_id, file_id, content_hash, pin,
     chunks = collect_chunks(store, file_id)
     if not chunks:
         return False
-    if enrich is None and store.file_fully_enriched(file_id):
-        # Only a file whose every (non-cold) chunk is enriched: the payload is
-        # keyed by file_id and outlives a re-chunk, so after a reflow (new,
-        # never-extracted text) it would describe the OLD extraction, and a
-        # plain-path importer marks every row enriched from it.
+    if (enrich is None and store.file_fully_enriched(file_id)
+            and store.enrich_payload_covers_file(file_id)):
+        # Only a file whose every (non-cold) chunk is enriched AND whose payload
+        # was made from every one of those chunks: a plain-path importer marks
+        # every row enriched from it. After a reflow, re-enrichment extracts
+        # only the uncovered rows and drain's payload describes just those, so
+        # "fully enriched" alone would publish a partial extraction.
         floor = max(int(pin.enrich_logic_floor), int(ENRICH_LOGIC_VERSION))
         row = store.get_enrich_payload(file_id)
         if row and int(row["logic_version"]) >= floor:

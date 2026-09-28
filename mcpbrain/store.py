@@ -1818,7 +1818,8 @@ class Store:
                 file_id       TEXT PRIMARY KEY,
                 payload       TEXT NOT NULL,
                 logic_version INTEGER DEFAULT 0,
-                at            TEXT DEFAULT CURRENT_TIMESTAMP){_S}""")
+                at            TEXT DEFAULT CURRENT_TIMESTAMP,
+                covers        TEXT){_S}""")
             # A store written before the re-key is keyed per chunk doc_id. Move
             # it aside -- metadata-only, so init() stays instant -- and let the
             # enrich_payload_migration cadence drain it in the background.
@@ -1840,7 +1841,16 @@ class Store:
                     file_id       TEXT PRIMARY KEY,
                     payload       TEXT NOT NULL,
                     logic_version INTEGER DEFAULT 0,
-                    at            TEXT DEFAULT CURRENT_TIMESTAMP){_S}""")
+                    at            TEXT DEFAULT CURRENT_TIMESTAMP,
+                    covers        TEXT){_S}""")
+            # `covers`: the JSON list of chunk doc_ids the payload's extraction
+            # was actually made from. NULL = a payload written before this
+            # column existed, trusted as whole-file (the pre-reflow behaviour);
+            # apply_reflow replaces it with an explicit list. publish_file
+            # attaches a payload only when it covers every non-cold chunk.
+            if "covers" not in {row["name"] for row in
+                                db.execute("PRAGMA table_info(enrich_payloads)")}:
+                db.execute("ALTER TABLE enrich_payloads ADD COLUMN covers TEXT")
 
             # One-time baseline stats. _connect's write-close PRAGMA optimize
             # (below) is opportunistic and NOT guaranteed to create sqlite_stat1
@@ -3549,6 +3559,7 @@ class Store:
         with self._connect(write=True) as db:
             tables = {r[0] for r in db.execute(
                 "SELECT name FROM sqlite_master WHERE type='table'")}
+            payload_covers = self._reflowed_payload_covers(db, tables, rows, old_ids)
             for row, vec in zip(rows, vectors):
                 c = row.chunk
                 self._write_cached_chunk_row(
@@ -3633,12 +3644,53 @@ class Store:
                     f"reflow {owner}: {dangling} dangling reference(s), "
                     f"{len(missing_targets)} remap target(s) with no chunk "
                     f"{missing_targets[:5]}")
+            for fid, covers in payload_covers.items():
+                db.execute("UPDATE enrich_payloads SET covers=? WHERE file_id=?",
+                           (json.dumps(covers), fid))
             db.execute("INSERT OR REPLACE INTO reflow_owners(owner, source, at, chunks_new,"
                        " carried, reenrich, outcome) VALUES(?,?,?,?,?,?,'carried')",
                        (owner, source, now, len(rows), carried, reenrich))
             db.execute("DROP TABLE reflow_tmp")
         return {"written": len(rows), "carried": carried, "reenrich": reenrich,
                 "deleted": len(plan.deletes), "remapped": remapped}
+
+    @staticmethod
+    def _reflowed_payload_covers(db, tables, rows, old_ids) -> dict[str, list[str]]:
+        """The `covers` each of this owner's Drive enrich payloads has after
+        the reflow, computed BEFORE the new rows overwrite the old ones.
+
+        A payload survives a re-chunk only for text it was made from: a
+        whole-file payload (NULL covers, or covers holding every non-cold old
+        chunk) now covers exactly the CARRIED rows -- covered text whose
+        enrichment survived. A payload that already covered only part of the
+        file covers nothing. Uncovered (re-enrich) rows are never in covers,
+        so publish_file withholds the payload until one extraction covers the
+        whole file again."""
+        if "enrich_payloads" not in tables:
+            return {}
+        by_file: dict[str, list] = {}
+        for r in rows:
+            fid = _file_key_from_doc_id(r.chunk.doc_id)
+            if fid:
+                by_file.setdefault(fid, []).append(r)
+        out: dict[str, list[str]] = {}
+        for fid, frows in by_file.items():
+            prow = db.execute("SELECT covers FROM enrich_payloads WHERE file_id=?",
+                              (fid,)).fetchone()
+            if prow is None:
+                continue
+            olds = [o for o in old_ids if _file_key_from_doc_id(o) == fid]
+            if olds:
+                ph = ",".join("?" * len(olds))
+                hot_old = {x[0] for x in db.execute(
+                    f"SELECT doc_id FROM chunks WHERE doc_id IN ({ph}) "
+                    "AND COALESCE(enrich_state,'')!='cold'", olds)}
+            else:
+                hot_old = set()
+            whole = prow[0] is None or hot_old <= set(json.loads(prow[0]))
+            out[fid] = sorted(r.chunk.doc_id for r in frows
+                              if whole and r.covered and r.enriched)
+        return out
 
     @staticmethod
     def _merge_chunk_quality(db, remap: dict[str, str]) -> None:
@@ -4555,15 +4607,40 @@ class Store:
                 "(thread_id, signature, triggered_at) VALUES(?,?,?)",
                 (thread_id, signature, triggered_at))
 
-    def set_enrich_payload(self, file_id: str, payload: str, logic_version: int) -> None:
+    def set_enrich_payload(self, file_id: str, payload: str, logic_version: int,
+                           covers: list[str] | None = None) -> None:
         """Persist the validated extraction (JSON string) a Drive FILE produced,
         so its shared-drive cache artifact can carry it and importers skip
-        re-enrich. One row per file: every chunk of a Drive doc shares the one
-        unit extraction, and publish_file reads exactly one."""
+        re-enrich. One row per file, and publish_file reads exactly one.
+
+        `covers` is the chunk doc_ids the extraction was made from. drain
+        always passes it: after a reflow (or across seam-split units) one
+        unit's extraction describes only part of the file, and a payload is
+        attached to a cache artifact only when it covers every non-cold chunk
+        (`enrich_payload_covers_file`). None means "whole file" and exists for
+        rows written before the column (and callers that write a whole-file
+        payload directly)."""
         with self._connect(write=True) as db:
             db.execute("INSERT OR REPLACE INTO enrich_payloads"
-                       "(file_id, payload, logic_version) VALUES(?,?,?)",
-                       (file_id, payload, int(logic_version)))
+                       "(file_id, payload, logic_version, covers) VALUES(?,?,?,?)",
+                       (file_id, payload, int(logic_version),
+                        None if covers is None else json.dumps(sorted(set(covers)))))
+
+    def enrich_payload_covers_file(self, file_id: str) -> bool:
+        """True when the file's payload was made from every chunk of the file
+        that is not cold (a NULL `covers` is a whole-file payload). False when
+        there is no payload."""
+        with self._connect() as db:
+            r = db.execute("SELECT covers FROM enrich_payloads WHERE file_id=?",
+                           (file_id,)).fetchone()
+            if r is None:
+                return False
+            if r["covers"] is None:
+                return True
+            need = {x[0] for x in db.execute(
+                f"SELECT doc_id FROM chunks WHERE {_meta_extract('$.file_id')}=? "
+                "AND COALESCE(enrich_state,'')!='cold'", (file_id,))}
+        return need <= set(json.loads(r["covers"]))
 
     def get_enrich_payload(self, file_id: str) -> dict | None:
         with self._connect() as db:

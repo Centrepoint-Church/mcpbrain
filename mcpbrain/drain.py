@@ -399,6 +399,27 @@ def _resolve_doc_ids(store, extraction: dict, unit_messages_by_thread: dict) -> 
     return store.drop_cold(doc_ids) if doc_ids else []
 
 
+def _payload_covers(store, extraction: dict, doc_ids: list[str],
+                    unit_messages_by_thread: dict) -> list[str]:
+    """The chunks an extraction's text was made from (system-owned, never the
+    model's echo): its part_doc_ids when the unit was seam-split (doc_ids are
+    exactly those), else the unit's per-message chunk_doc_ids -- reassemble_thread
+    stamps them on every message and prepare keeps them in the unit file.
+    Nothing known -> covers nothing, so the payload is never published as the
+    whole file's."""
+    if extraction.get("part_doc_ids"):
+        return list(doc_ids)
+    msgs = unit_messages_by_thread.get(extraction.get("thread_id")) or []
+    ids = [d for m in msgs for d in (m.get("chunk_doc_ids") or [])]
+    if not ids:
+        return []
+    resolve = getattr(store, "resolve_reflowed_ids", None)
+    if resolve is not None:
+        ids = resolve(ids)
+    keep = set(ids)
+    return [d for d in doc_ids if d in keep]
+
+
 def drain(store, *, home=None, apply=None, embedder=None, budget=None,
          bulk_section=None) -> dict:
     """Process every inbox file. Returns a summary dict.
@@ -665,11 +686,21 @@ def drain(store, *, home=None, apply=None, embedder=None, budget=None,
                 # payload 6.1x on the live store. Drive-only: email payloads
                 # never enter a shared cache. `extraction` here has already
                 # passed sanitize_batch + validate_extraction + grounding.
+                #
+                # `covers` records which chunks this extraction was actually made
+                # from, so publish_file never ships a partial one as the file's:
+                # a file-wide resolve marks EVERY chunk of the file, but after a
+                # reflow (or across seam-split units) the unit held only some.
                 _file_ids = {k for k in (_file_key_from_doc_id(d) for d in doc_ids) if k}
                 if _file_ids:
                     _payload = json.dumps(extraction, sort_keys=True)
+                    _covered = _payload_covers(store, extraction, doc_ids,
+                                               unit_messages_by_thread)
                     for _f in _file_ids:
-                        store.set_enrich_payload(_f, _payload, ENRICH_LOGIC_VERSION)
+                        store.set_enrich_payload(
+                            _f, _payload, ENRICH_LOGIC_VERSION,
+                            covers=[d for d in _covered
+                                    if _file_key_from_doc_id(d) == _f])
 
             try:
                 _merge_result = review_apply.apply_duplicate_verdicts(
