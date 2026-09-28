@@ -335,3 +335,33 @@ nothing (the 2026-09-10 lesson).
 
 Estimated backlog on the author's store: ~7,000 owners, hours to a day of
 background cycles; OCR-heavy PDFs dominate because scanned pages are re-OCR'd.
+
+## Known limitations / next extraction_version
+
+Recorded 2026-09-28, after 0.7.132 shipped. The reflow is live across the fleet,
+so none of these was fixed in the post-release cleanup: each one changes chunk
+text or boundaries, rendered block output, extraction output, or the reflow
+selector's matching, and a fix without a version bump would make fresh ingests
+disagree with already-reflowed owners, while a fix WITH a bump re-queues every
+owner of the affected MIMEs fleet-wide. Batch them into the next deliberate bump
+and dry-run that bump the same way (§ Rollout, `bin/reflow_dryrun.py`).
+
+| Limitation | Why it was left | What fixes it |
+|---|---|---|
+| **Word-level overlap is lost inside an over-long sentence** (Task 1). `split_long_paragraph` falls back line → sentence → word; inside a single sentence longer than the budget the pieces are pre-packed word groups, so the outer seed repeats a whole group or nothing, not the last ~50 words v0 carried. | Changes chunk boundaries and text for every over-budget paragraph. | Re-seed overlap per word inside the word fallback; bump `chunking.SPLIT_VERSION` to 2. |
+| **Leading/trailing `"\n"` on pieces around preserved blank units** (Task 1), visible with `overlap=0`. Cosmetic. | Changes chunk text (whitespace) of every such split. | Strip piece edges in `split_long_paragraph`; same `SPLIT_VERSION` 2 bump. |
+| **A table caption longer than half the budget is truncated, and the tail is dropped** (Task 2). No producer sets `caption=` today, so nothing ships with it. | `render` is shared by every block MIME; changing it changes their chunk text. | Emit the lost caption tail as its own piece (as lost cells are); bump every `EXTRACTION_VERSIONS` entry. Do it in the same change that first gives a producer a caption. |
+| **"Claimed" is a substring test** (Task 2): a short cell value dropped from its row sentence is not re-emitted when the same characters appear anywhere else in the chunk, so its span can rest on a coincidental match. | Re-emitting changes rendered output for every table that hits it. | Track claimed values by position, not substring; bump every `EXTRACTION_VERSIONS` entry. |
+| **A Google Docs export fallback is stamped `extraction_version` 1** (Task 7). When the DOCX export exceeds Drive's 10 MB cap the Markdown / plain-text fallback is chunked and stamped current, so it is never retried with the DOCX extractor; a partial extraction is stamped current too. | Stamping these below current puts them back in the reflow selector: changes selector matching for already-stamped owners. | Stamp fallbacks and partials `extraction_version` 0 (or a `extraction_fallback` flag the selector reads) together with the next `application/vnd.google-apps.document` bump. |
+| **`text/rtf` is not an accepted Gmail attachment MIME** (Task 7); only `application/rtf` is. | Adding it changes which attachments extract. | Add the alias alongside an `application/rtf` bump. |
+| **Import carry-over deletes only positional ids** (Task 13): `_reflow_rows` reads `owner_chunks(["gdrive-<fid>-"])`, while the plain path sweeps by `metadata.file_id`. Unreachable today — every Drive chunk id is positional — but a non-positional row carrying the file id would survive a carry-over. | Changes the chunk set importers hold. | Sweep by `metadata.file_id` in the carry-over too, with the next PDF/DOCX/PPTX bump. |
+| **The PDF extractor is dense** (Task 3: `_page_blocks` / `extract_blocks_from_pdf`). | A refactor of the extractor during a live reflow risks an output change with nothing to gain. | Refactor in the same change as the next `application/pdf` bump, with the byte-identity fixtures as the net. |
+| **One OCR-heavy PDF can overrun the per-cycle 15 s cap** (dry runs: 106 s, 288 s; the cap is checked between items). Below `STALL_S` (1800 s), so no watchdog loop. | Skipping or truncating OCR during a reflow changes extraction output. | Run OCR pages under their own budget (defer the item mid-document); needs a resumable extractor, not a version bump. |
+| **A vertically merged DOCX cell repeats its text on every row it spans** (pinned by `test_vertically_merged_cell_repeats_per_row`). | Changes DOCX table rendering. | De-duplicate vertical continuations with the next DOCX bump, if repeated values prove noisy in retrieval. |
+
+Not limitations of this kind, and fixed in the cleanup (no output change):
+text our own normaliser drops inside a surviving Gmail chunk is still carried
+by `nearest` (§3), but is now counted — `reflow_owners.unequal_lineages`,
+`reflow_stats()["owners_text_differed"]`, and a doctor clause; and the seed's
+`REFLOW_WINDOW` counts only rows that are due, so rows deferred with a delay
+during a long outage can no longer hold the window full.
