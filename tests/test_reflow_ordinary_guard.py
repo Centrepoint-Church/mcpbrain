@@ -263,3 +263,51 @@ def test_calendar_window_backfill_hands_off_unchanged_stale_events(tmp_path, mon
                                       time_max="2026-12-31T00:00:00Z")
     assert [(r["doc_id"], r["text"], r["enriched"]) for r in s.owner_chunks(["cal-E"])] == before
     assert ("reflow:calendar", "E", "1970-01-01T00:00:00") in _queued(s)
+
+
+# -- residual R6: a stamped, unchanged owner still gets its metadata refreshed
+
+def _meta(s, fid="F"):
+    return [r["metadata"] for r in s.owner_chunks([f"gdrive-{fid}-"])]
+
+
+def test_stamped_unchanged_file_gets_renamed_and_moved_metadata(tmp_path, monkeypatch):
+    """A rename/move is a metadata-only Drive event: the re-chunk is skipped
+    (stamped owner) but file_name and folder_path must still follow it, as the
+    ordinary path's patch_chunk_metadata does for any content-unchanged file."""
+    from mcpbrain.sync import drive
+    s = _store(tmp_path)
+    _seed_pdf(s, extra={"extraction_version": 1, "split_version": 1,
+                        "reflow_skipped": "gave_up", "file_name": "old.pdf",
+                        "folder_path": "Old"})
+    before = _state(s)
+    _no_fetch(monkeypatch)
+    monkeypatch.setattr(drive, "folder_path", lambda *a, **k: "Finance/Budgets")
+    drive.handle_drive_item(_Svc(M), s, {"ref_id": "F", "event": "upsert"})
+    assert _state(s) == before and not _queued(s)
+    for m in _meta(s):
+        assert (m["file_name"], m["folder_path"], m["modified"]) == ("r.pdf", "Finance/Budgets", M)
+        assert m["reflow_skipped"] == "gave_up"
+
+
+def test_backfill_refreshes_a_stamped_owners_metadata(tmp_path, monkeypatch):
+    from mcpbrain.sync import drive
+    s = _store(tmp_path)
+    _seed_pdf(s, extra={"extraction_version": 1, "split_version": 1,
+                        "reflow_skipped": "unsupported", "file_name": "old.pdf"})
+    _no_fetch(monkeypatch)
+    monkeypatch.setattr(drive, "folder_path", lambda *a, **k: "Board")
+
+    class _List:
+        def files(self):
+            return self
+
+        def list(self, **kw):
+            class R:
+                def execute(self, num_retries=0):
+                    return {"files": [{"id": "F", "name": "new.pdf", "mimeType": PDF,
+                                       "modifiedTime": M, "parents": ["P"]}]}
+            return R()
+
+    assert drive.backfill_drive(_List(), s, "2000-01-01T00:00:00Z") == 0
+    assert {(m["file_name"], m.get("folder_path")) for m in _meta(s)} == {("new.pdf", "Board")}

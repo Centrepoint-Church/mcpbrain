@@ -682,7 +682,8 @@ def _cache_first_extract_one(
                                contextual_retrieval=contextual_retrieval,
                                mime=fmeta.get("mimeType", "")):
         return True, None
-    if unchanged_reflow_owner(store, fmeta):
+    if unchanged_reflow_owner(store, fmeta,
+                              folder=lambda: folder_path(service, fmeta, folder_cache)):
         # Unchanged and stale: the reflow re-extracts it with carry-over and
         # records the pending publish itself once apply_reflow commits.
         return True, None
@@ -863,7 +864,7 @@ def discover_shared_drives(service, store, *, pin, budget=None) -> dict:
 _REFLOW_EPOCH = "1970-01-01T00:00:00"
 
 
-def unchanged_reflow_owner(store, fmeta: dict) -> bool:
+def unchanged_reflow_owner(store, fmeta: dict, *, folder=None) -> bool:
     """True when the ordinary path must NOT re-chunk this file (final review
     I2): its stored chunks carry this exact Drive `modifiedTime` -- the source
     is unchanged, the event metadata-only (share/move/star) or a backfill
@@ -872,7 +873,14 @@ def unchanged_reflow_owner(store, fmeta: dict) -> bool:
     already stamped by the reflow (gave_up/unsupported/source_gone: nothing to
     gain, and an upsert over reused positional ids would reset enrichment and
     delete the tail without invalidating its relations). A changed file
-    (different modifiedTime) always takes the ordinary path."""
+    (different modifiedTime) always takes the ordinary path.
+
+    A stamped owner still gets the metadata refresh the ordinary path gives
+    every content-unchanged file (upsert_file_chunks -> patch_chunk_metadata):
+    file_name, modified and -- when `folder` (a zero-arg callable returning
+    the folder chain, called only here) yields one -- folder_path. A
+    rename/move is exactly the metadata-only event this path sees, and
+    contextual_prefix renders both into the FTS text."""
     from mcpbrain import reflow
     fid = fmeta.get("id")
     modified = fmeta.get("modifiedTime") or ""
@@ -885,7 +893,17 @@ def unchanged_reflow_owner(store, fmeta: dict) -> bool:
         store.enqueue_items([{"ref_id": fid, "event": "reflow",
                               "modified_at": _REFLOW_EPOCH}], source="reflow:drive")
         return True
-    return any((r["metadata"] or {}).get("reflow_skipped") for r in old)
+    if not any((r["metadata"] or {}).get("reflow_skipped") for r in old):
+        return False
+    patch = {"file_name": (fmeta.get("name") or "")[:200], "modified": modified}
+    path = folder() if folder is not None else None
+    if path:
+        patch["folder_path"] = path[:300]
+    for r in old:
+        md = r["metadata"] or {}
+        if any(md.get(k) != v for k, v in patch.items()):
+            store.patch_chunk_metadata(r["doc_id"], **patch)
+    return True
 
 
 def handle_drive_item(service, store, item, *, folder_cache=None,
@@ -904,7 +922,8 @@ def handle_drive_item(service, store, item, *, folder_cache=None,
         fileId=fid, supportsAllDrives=True,
         fields="id,name,mimeType,modifiedTime,version,parents").execute(
             num_retries=_NUM_RETRIES)
-    if unchanged_reflow_owner(store, fmeta):
+    _fc = folder_cache if folder_cache is not None else {}
+    if unchanged_reflow_owner(store, fmeta, folder=lambda: folder_path(service, fmeta, _fc)):
         return                      # the reflow owns it (or already stamped it)
     content = fetch_content(service, fmeta, store=store, report=report)
     if content is None or (not content.text and not content.tables):
@@ -1019,7 +1038,8 @@ def backfill_drive(service, store, modified_after: str,
             if max_files is not None and processed >= max_files:
                 flush_skip_report(store, skip_report)
                 return processed
-            if unchanged_reflow_owner(store, f):
+            if unchanged_reflow_owner(
+                    store, f, folder=lambda f=f: folder_path(service, f, folder_cache)):
                 continue
             content = fetch_content(service, f, store=store, report=skip_report)
             if content is None or (not content.text and not content.tables):
