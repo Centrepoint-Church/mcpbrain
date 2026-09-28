@@ -24,6 +24,7 @@ import json
 import logging
 import time
 from contextlib import closing, nullcontext
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 from googleapiclient.errors import HttpError
@@ -31,13 +32,20 @@ from googleapiclient.errors import HttpError
 from mcpbrain import config, reflow
 from mcpbrain.chunking import SPLIT_VERSION
 from mcpbrain.embed import contextual_prefix
-from mcpbrain.store import ReflowOrphanError
+from mcpbrain.store import REFLOW_HALT_CURSOR, ReflowOrphanError
 from mcpbrain.sync import queue
 from mcpbrain.sync.blocks import extraction_version
 
 log = logging.getLogger("mcpbrain.sync.reflow")
 
-HALT_CURSOR = "reflow:halted"
+# Set by Store.apply_reflow itself when its orphan guard fires (every carry-over
+# path, not just this handler); re-exported here for callers and tests.
+HALT_CURSOR = REFLOW_HALT_CURSOR
+# How long a row waits after a delayed DEFER (halted, no service, in-flight
+# enrichment unit). Every reflow row shares the epoch modified_at, so an
+# undelayed DEFER is re-selected at the head of the reflow rows every cycle and
+# starves the rows behind it; the per-cycle-cap DEFER stays immediate.
+DEFER_DELAY_S = 600
 _GIVE_UP_ATTEMPTS = 5
 _EPOCH = "1970-01-01T00:00:00"
 
@@ -89,18 +97,21 @@ class ReflowContext:
     def __init__(self, store, embedder, home, *, drive_service=None, gmail_service=None,
                  calendar_service=None, anarlog_db=None, max_items: int = 10,
                  max_seconds: float = 15.0, clock=time.monotonic,
-                 normal_handlers: dict | None = None, bulk_section=None):
+                 normal_handlers: dict | None = None, bulk_section=None,
+                 defer_delay_s: float = DEFER_DELAY_S):
         self.store, self.embedder, self.home = store, embedder, str(home)
         self.drive, self.gmail, self.calendar, self.anarlog_db = (
             drive_service, gmail_service, calendar_service, anarlog_db)
         self.max_items, self.max_seconds, self.clock = max_items, max_seconds, clock
         self.normal_handlers = normal_handlers
         self.bulk_section = bulk_section or nullcontext
+        self.defer_delay_s = defer_delay_s
         self._done = 0
         self._started = None
         self._unit_refs: set[str] | None = None
         self._unit_stamp = None
         self._folder_cache: dict = {}
+        self._pending_publish: tuple | None = None
 
     # ---- guards -----------------------------------------------------------
     def _queue_stamp(self):
@@ -151,30 +162,46 @@ class ReflowContext:
         return {"drive": self.drive, "gmail": self.gmail, "calendar": self.calendar,
                 "anarlog": self.anarlog_db}.get(kind) is None
 
+    def _defer_later(self, item):
+        """DEFER with a delay: next_attempt_at moves, attempts do not."""
+        until = (datetime.now(timezone.utc).replace(tzinfo=None)
+                 + timedelta(seconds=self.defer_delay_s)).isoformat()
+        self.store.defer_sync_item(item["source"], item["ref_id"], until)
+        return queue.DEFER
+
     # ---- entry ------------------------------------------------------------
     def handle(self, item):
         if self.store.get_cursor(HALT_CURSOR):
-            return queue.DEFER
+            return self._defer_later(item)
         if self._over_cap():
-            return queue.DEFER
+            return queue.DEFER            # immediate: next cycle, same place
         kind = item["source"].split(":", 1)[1].split(":", 1)[0]
         if kind not in ("drive", "gmail", "anarlog", "calendar"):
             raise ValueError(f"reflow: unknown source {item['source']!r}")
-        if self._service_missing(kind):
-            return queue.DEFER            # not authed / not enabled this cycle
         owner = item["ref_id"]
+        if kind == "anarlog" and self.anarlog_db is None:
+            # anarlog is opt-in; disabled means its sessions are not to be read
+            # at all. Stamp and complete so the row leaves the seed window and
+            # the selector (split_version now current) never re-selects it.
+            old = self.store.owner_chunks(self._prefixes(kind, owner))
+            if old:
+                self._stamp(old, "source_disabled")
+            return None
+        if self._service_missing(kind):
+            return self._defer_later(item)   # not authed this cycle
         old = self.store.owner_chunks(self._prefixes(kind, owner))
         if not old:
             return None                   # nothing left to reflow
         refs = self._pending_unit_refs()
         if owner in refs or any(r["doc_id"] in refs for r in old):
-            return queue.DEFER
+            return self._defer_later(item)
         self._done += 1
         if int(item.get("attempts") or 0) >= _GIVE_UP_ATTEMPTS:
             log.warning("reflow: giving up on %s %s after %s attempts (%s)", kind,
                         owner, item.get("attempts"), item.get("last_error") or "")
             self._stamp(old, "gave_up")
             return None
+        self._pending_publish = None
         new = getattr(self, f"_new_{kind}")(owner, old)
         if new is None:
             return None                   # routed to the ordinary path, or stamped
@@ -185,6 +212,7 @@ class ReflowContext:
             # These sources' prose extraction is unchanged, so differing text
             # means the SOURCE changed: take the ordinary path.
             self._normal(kind, owner, old)
+            self._drop_stale_tail(kind, old, new)
             return None
         vectors = self._embed([r.chunk for r in p.rows])
         try:
@@ -192,11 +220,38 @@ class ReflowContext:
                 stats = self.store.apply_reflow(owner, kind, p, vectors,
                                                 home=self.home)
         except ReflowOrphanError as exc:
-            self.store.set_cursor(HALT_CURSOR, str(exc)[:500])
+            # apply_reflow has already rolled back AND set the halt cursor.
             log.error("reflow halted: %s", exc)
             raise
+        if self._pending_publish is not None:
+            # Only now: had embed or apply_reflow raised, a pending row would
+            # publish the OLD chunks fleet-wide under the new fingerprint.
+            self.store.record_pending_publish(*self._pending_publish)
         log.info("reflow: %s %s -> %s", kind, owner, stats)
         return None
+
+    def _drop_stale_tail(self, kind: str, old, new) -> None:
+        """The ordinary Gmail/Calendar handlers only UPSERT, so a changed
+        source that now yields fewer chunks leaves its old positional tail
+        (e.g. body-1, body-2 at the old split_version), which the selector
+        re-queues forever. Delete old ids missing from the new set -- only
+        within lineages the new extraction produced, so an attachment whose
+        re-fetch failed is never deleted by this -- invalidating their local
+        relations first, as the ordinary change path does. (anarlog's handler
+        already sweeps its own stale ids; Drive's upsert_file_chunks does.)"""
+        if kind not in ("gmail", "calendar"):
+            return
+        new_ids = {c.doc_id for c in new}
+        new_keys = {reflow.lineage_key(c.doc_id, c.metadata or {}) for c in new}
+        stale = [r["doc_id"] for r in old
+                 if r["doc_id"] not in new_ids
+                 and reflow.lineage_key(r["doc_id"], r["metadata"] or {}) in new_keys]
+        if not stale:
+            return
+        with self.bulk_section():
+            self.store.invalidate_local_relations_for_docs(
+                stale, reason="reflow_source_changed")
+            self.store.delete_chunks(stale)
 
     # ---- helpers ----------------------------------------------------------
     @staticmethod
@@ -328,8 +383,9 @@ class ReflowContext:
             raise RuntimeError(f"reflow {fid}: re-extraction produced no chunks")
         if drive_id:
             # The shared-drive ingest cache republishes the file under the new
-            # extraction fingerprint once it is embedded (apply_reflow embeds).
-            self.store.record_pending_publish(drive_id, fid, drive._file_content_hash(fmeta))
+            # extraction fingerprint -- recorded by handle() only AFTER
+            # apply_reflow commits (see there).
+            self._pending_publish = (drive_id, fid, drive._file_content_hash(fmeta))
         return chunks
 
     def _new_gmail(self, mid, old):

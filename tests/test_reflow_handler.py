@@ -317,18 +317,177 @@ def test_partial_drive_reextraction_raises_without_deleting(tmp_path, monkeypatc
     assert len(s.owner_chunks(["gdrive-F-"])) == 2
 
 
+def _late_ref_trigger(s, doc_id):
+    """The test_store_reflow technique: a reference to an id the reflow deletes,
+    written AFTER the remap ran, so apply_reflow's own orphan guard fires."""
+    with s._connect(write=True) as db:
+        db.execute("CREATE TRIGGER late_ref AFTER INSERT ON reflow_map BEGIN "
+                   f"INSERT INTO recall_feedback(doc_id, event_type) VALUES('{doc_id}', 'late'); END")
+
+
 def test_orphan_error_halts_the_cadence(tmp_path, monkeypatch):
     s = _store(tmp_path); _seed_drive(s); _seed_drive(s, "G")
     _drive_blocks(monkeypatch)
-
-    def _boom(*a, **k):
-        raise ReflowOrphanError("reflow F: 1 dangling reference(s)")
-    monkeypatch.setattr(s, "apply_reflow", _boom)
+    _late_ref_trigger(s, "gdrive-F-1")
     ctx = _ctx(s, tmp_path, drive_service=_DriveSvc("2026-01-01T00:00:00Z"))
     with pytest.raises(ReflowOrphanError):
         ctx.handle({"source": "reflow:drive", "ref_id": "F", "attempts": 0})
-    assert "dangling" in s.get_cursor(HALT_CURSOR)
+    assert "dangling" in s.get_cursor(HALT_CURSOR)          # set by apply_reflow
+    assert len(s.owner_chunks(["gdrive-F-"])) == 2          # rolled back
     assert ctx.handle({"source": "reflow:drive", "ref_id": "G", "attempts": 0}) is queue.DEFER
+
+
+def test_store_apply_reflow_orphan_sets_the_halt_cursor_on_any_path(tmp_path):
+    """The halt lives in Store.apply_reflow itself, so the ingest-cache import
+    path (which calls apply_reflow directly) halts too."""
+    from mcpbrain import reflow
+    s = _store(tmp_path); _seed_drive(s)
+    _late_ref_trigger(s, "gdrive-F-1")
+    new = [Chunk("gdrive-F-0", "Budget Line one Line two", "n",
+                 {"source_type": "gdrive", "file_id": "F", "chunk_index": 0, "chunk_total": 1})]
+    p = reflow.plan(s.owner_chunks(["gdrive-F-"]), new)
+    with pytest.raises(ReflowOrphanError):
+        s.apply_reflow("F", "drive_import", p, [[0.1, 0.2, 0.3, 0.4]])
+    assert s.get_cursor("reflow:halted")
+
+
+def test_shared_drive_pending_publish_only_after_apply_succeeds(tmp_path, monkeypatch):
+    from mcpbrain.org_contracts import DRIVE_ID_META_KEY
+    s = _store(tmp_path); _seed_drive(s, extra={DRIVE_ID_META_KEY: "D1"})
+    _drive_blocks(monkeypatch)
+    _late_ref_trigger(s, "gdrive-F-1")
+    ctx = _ctx(s, tmp_path, drive_service=_DriveSvc("2026-01-01T00:00:00Z"))
+    with pytest.raises(ReflowOrphanError):
+        ctx.handle({"source": "reflow:drive", "ref_id": "F", "attempts": 0})
+    assert s.pending_publishes("D1") == []
+
+    s2 = Store(tmp_path / "b.sqlite3", dim=4); s2.init()
+    _seed_drive(s2, extra={DRIVE_ID_META_KEY: "D1"})
+    ctx = ReflowContext(s2, _Emb(), str(tmp_path),
+                        drive_service=_DriveSvc("2026-01-01T00:00:00Z"))
+    monkeypatch.setattr(ctx, "_embed", lambda chunks: (_ for _ in ()).throw(RuntimeError("embed")))
+    with pytest.raises(RuntimeError, match="embed"):
+        ctx.handle({"source": "reflow:drive", "ref_id": "F", "attempts": 0})
+    assert s2.pending_publishes("D1") == []
+
+
+def test_deferred_rows_are_delayed_so_rows_behind_them_progress(tmp_path, monkeypatch):
+    """Head-of-line probe: 60 rows that must wait (an in-flight enrichment unit
+    names them) queued before 60 workable drive rows, limit=50. Without a delay
+    the same 50 waiting rows are served every call and no drive row ever runs."""
+    s = _store(tmp_path)
+    q = tmp_path / "enrich_queue" / "units"; os.makedirs(q)
+    blocked = [f"B{i:02d}" for i in range(60)]
+    (q / "u.json").write_text(json.dumps({"unit_id": "u", "kind": "thread", "threads": [
+        {"thread_id": b, "messages": []} for b in blocked]}))
+    for b in blocked:
+        _seed_drive(s, b)
+    s.enqueue_items([{"ref_id": b, "event": "reflow", "modified_at": "1970-01-01T00:00:00"}
+                     for b in blocked], source="reflow:drive")
+    todo = [f"W{i:02d}" for i in range(60)]
+    for w in todo:
+        _seed_drive(s, w)
+    s.enqueue_items([{"ref_id": w, "event": "reflow", "modified_at": "1970-01-01T00:00:00"}
+                     for w in todo], source="reflow:drive")
+    _drive_blocks(monkeypatch)
+    done = 0
+    for _ in range(3):
+        ctx = _ctx(s, tmp_path, drive_service=_DriveSvc("2026-01-01T00:00:00Z"),
+                   max_items=1000, max_seconds=1e9)
+        done += queue.work_queue(s, handlers={"reflow": ctx.handle}, limit=50)["processed"]
+    assert done == 60                                     # every drive row progressed
+    rows = {r["ref_id"]: r for r in s.due_sync_items(limit=500, now="2999-01-01T00:00:00")}
+    assert set(rows) == set(blocked)
+    assert all(r["attempts"] == 0 and r["next_attempt_at"] for r in rows.values())
+
+
+def test_cap_defer_stays_immediate(tmp_path):
+    s = _store(tmp_path)
+    s.enqueue_items([{"ref_id": "F", "event": "reflow", "modified_at": "1970-01-01T00:00:00"}],
+                    source="reflow:drive")
+    ctx = _ctx(s, tmp_path, max_items=0)
+    queue.work_queue(s, handlers={"reflow": ctx.handle}, limit=5)
+    row = s.due_sync_items(limit=5, now="2000-01-01T00:00:00")[0]
+    assert row["next_attempt_at"] is None and row["attempts"] == 0
+
+
+def test_missing_service_and_halt_defer_with_delay_not_attempts(tmp_path):
+    s = _store(tmp_path); _seed_drive(s)
+    s.enqueue_items([{"ref_id": "F", "event": "reflow", "modified_at": "1970-01-01T00:00:00"}],
+                    source="reflow:drive")
+    queue.work_queue(s, handlers={"reflow": _ctx(s, tmp_path).handle}, limit=5)
+    assert s.due_sync_items(limit=5, now="2000-01-01T00:00:00") == []     # delayed
+    row = s.due_sync_items(limit=5, now="2999-01-01T00:00:00")[0]
+    assert row["attempts"] == 0 and not row["last_error"]
+    s.set_cursor(HALT_CURSOR, "x")
+    s.defer_sync_item("reflow:drive", "F", "1999-01-01T00:00:00")
+    queue.work_queue(s, handlers={"reflow": _ctx(s, tmp_path).handle}, limit=5)
+    row = s.due_sync_items(limit=5, now="2999-01-01T00:00:00")[0]
+    assert row["next_attempt_at"] > "2000" and row["attempts"] == 0
+
+
+def test_anarlog_disabled_row_is_stamped_and_completed(tmp_path):
+    s = _store(tmp_path)
+    md = {"source_type": "anarlog", "session_id": "S1", "content_subtype": "transcript"}
+    for i in range(2):
+        s.upsert_chunk(f"anarlog-S1-transcript-{i}", f"part {i}", f"t{i}",
+                       {**md, "chunk_index": i, "chunk_total": 2})
+    s.enqueue_items([{"ref_id": "S1", "event": "reflow", "modified_at": "1970-01-01T00:00:00"}],
+                    source="reflow:anarlog")
+    out = queue.work_queue(s, handlers={"reflow": _ctx(s, tmp_path).handle}, limit=5)
+    assert out == {"processed": 1, "failed": 0}
+    assert s.reflow_stats()["queued"] == 0
+    rows = s.owner_chunks(["anarlog-S1-"])
+    assert all(r["metadata"]["reflow_skipped"] == "source_disabled"
+               and r["metadata"]["split_version"] == 1 for r in rows)
+    assert ("reflow:anarlog", "S1") not in s.reflow_candidates(50)
+
+
+def test_changed_gmail_body_drops_its_stale_tail_and_stops_matching(tmp_path, monkeypatch):
+    """3 old body chunks; the message re-normalises differently into 1 chunk.
+    The ordinary handler only upserts body-0, so body-1/body-2 must be removed
+    (relations invalidated first) or the selector re-queues the message forever."""
+    from mcpbrain.sync import gmail
+    import mcpbrain.sync.normalise as nm
+    s = _store(tmp_path)
+    md = {"source_type": "gmail", "message_id": "M", "content_type": "email_body"}
+    for i in range(3):
+        s.upsert_chunk(f"gmail-M-body-{i}", f"old words part {i}", f"b{i}",
+                       {**md, "chunk_index": i, "chunk_total": 3})
+    new = Chunk("gmail-M-body-0", "a different body now", "n",
+                {**md, "split_version": 1, "chunk_index": 0, "chunk_total": 1})
+    monkeypatch.setattr(gmail, "_fetch_one", lambda *a, **k: ({"id": "M"}, []))
+    monkeypatch.setattr(nm, "normalise_gmail", lambda raw, **k: [new])
+
+    def _ordinary(svc, store, item, **k):
+        store.upsert_chunk(new.doc_id, new.text, new.content_hash, new.metadata)
+    monkeypatch.setattr(gmail, "handle_gmail_item", _ordinary)
+    invalidated = []
+    real_inv = s.invalidate_local_relations_for_docs
+    monkeypatch.setattr(s, "invalidate_local_relations_for_docs",
+                        lambda ids, **k: invalidated.append((sorted(ids), k)) or real_inv(ids, **k))
+    assert ("reflow:gmail", "M") in s.reflow_candidates(50)
+    ctx = _ctx(s, tmp_path, gmail_service=object())
+    assert ctx.handle({"source": "reflow:gmail", "ref_id": "M", "attempts": 0}) is None
+    assert [r["doc_id"] for r in s.owner_chunks(["gmail-M-"])] == ["gmail-M-body-0"]
+    assert invalidated == [(["gmail-M-body-1", "gmail-M-body-2"],
+                            {"reason": "reflow_source_changed"})]
+    assert ("reflow:gmail", "M") not in s.reflow_candidates(50)
+
+
+def test_changed_gmail_body_keeps_a_gone_attachment(tmp_path, monkeypatch):
+    """The stale-tail sweep is lineage-scoped: an attachment whose re-fetch
+    failed (absent from the new set) is never deleted by it."""
+    from mcpbrain.sync import gmail
+    import mcpbrain.sync.normalise as nm
+    s = _store(tmp_path); _seed_gmail_with_pdf(s)
+    body = _gmail_body(); body.text = "entirely different words"
+    monkeypatch.setattr(gmail, "_fetch_one", lambda *a, **k: ({"id": "M"}, []))
+    monkeypatch.setattr(nm, "normalise_gmail", lambda raw, **k: [body])
+    monkeypatch.setattr(gmail, "handle_gmail_item", lambda *a, **k: None)
+    _ctx(s, tmp_path, gmail_service=object()).handle(
+        {"source": "reflow:gmail", "ref_id": "M", "attempts": 0})
+    assert s.get_chunk("gmail-M-att-0-0") is not None
 
 
 def test_drive_404_stamps_source_gone(tmp_path):
@@ -426,9 +585,13 @@ def test_calendar_changed_event_takes_ordinary_path(tmp_path, monkeypatch):
     md = {"source_type": "calendar", "event_id": "E"}
     s.upsert_chunk("cal-E-0", "old agenda", "c0", {**md, "chunk_index": 0, "chunk_total": 2})
     s.upsert_chunk("cal-E-1", "old part", "c1", {**md, "chunk_index": 1, "chunk_total": 2})
-    monkeypatch.setattr(calendar, "normalise_calendar", lambda ev: [
-        Chunk("cal-E", "moved to Friday", "c", {**md, "chunk_index": 0, "chunk_total": 1})])
+    fresh = Chunk("cal-E", "moved to Friday", "c", {**md, "chunk_index": 0, "chunk_total": 1})
+    monkeypatch.setattr(calendar, "normalise_calendar", lambda ev: [fresh])
     seen = []
+
+    def _ordinary(item):        # what handle_calendar_item does: upsert only
+        seen.append(item)
+        s.upsert_chunk(fresh.doc_id, fresh.text, fresh.content_hash, fresh.metadata)
 
     class _Cal:
         def events(self):
@@ -438,10 +601,12 @@ def test_calendar_changed_event_takes_ordinary_path(tmp_path, monkeypatch):
                 def execute(self, num_retries=0):
                     return {"id": "E"}
             return R()
-    ctx = _ctx(s, tmp_path, calendar_service=_Cal(), normal_handlers={"calendar": seen.append})
+    monkeypatch.setattr(s, "apply_reflow", lambda *a, **k: pytest.fail("reached apply_reflow"))
+    ctx = _ctx(s, tmp_path, calendar_service=_Cal(), normal_handlers={"calendar": _ordinary})
     assert ctx.handle({"source": "reflow:calendar", "ref_id": "E", "attempts": 0}) is None
     assert seen and seen[0]["ref_id"] == "E"
-    assert len(s.owner_chunks(["cal-E"])) == 2        # untouched by reflow
+    # the ordinary handler only upserts; the old split tail is swept
+    assert [r["doc_id"] for r in s.owner_chunks(["cal-E"])] == ["cal-E"]
 
 
 def test_anarlog_session_reflows_and_gone_session_stamps(tmp_path, monkeypatch):

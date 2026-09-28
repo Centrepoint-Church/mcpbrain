@@ -698,6 +698,11 @@ def _begin_immediate(db, *, retries: int = _BEGIN_RETRIES) -> None:
             _time.sleep(_BEGIN_BASE_SLEEP_S * (2 ** attempt) * (0.5 + random.random()))
 
 
+# Set (non-empty) when apply_reflow's orphan guard fires; every reflow path
+# DEFERs while it is set. Cleared only by an attended `bin/reflow.py resume`.
+REFLOW_HALT_CURSOR = "reflow:halted"
+
+
 class ReflowOrphanError(RuntimeError):
     """apply_reflow found a reference to one of the owner's doc_ids with no
     chunk row; the transaction was rolled back (extraction-fidelity §3)."""
@@ -3479,6 +3484,19 @@ class Store:
         now = datetime.now(timezone.utc).isoformat()
         carried = sum(1 for r in rows if r.covered)
         reenrich = sum(1 for r in rows if not r.enriched)
+        try:
+            return self._apply_reflow_txn(owner, source, plan, vectors, rows, new_ids,
+                                          old_ids, now, carried, reenrich, home)
+        except ReflowOrphanError as exc:
+            # A wrong remap on ANY carry-over path (the reflow queue handler or
+            # the ingest-cache import) halts the reflow cadence: the
+            # transaction has already rolled back, and this separate small
+            # write is what doctor and `bin/reflow.py resume` act on.
+            self.set_cursor(REFLOW_HALT_CURSOR, str(exc)[:500])
+            raise
+
+    def _apply_reflow_txn(self, owner, source, plan, vectors, rows, new_ids, old_ids,
+                          now, carried, reenrich, home) -> dict:
         with self._connect(write=True) as db:
             tables = {r[0] for r in db.execute(
                 "SELECT name FROM sqlite_master WHERE type='table'")}
@@ -3831,6 +3849,19 @@ class Store:
                        "last_error=? WHERE source=? AND ref_id=?",
                        (attempts, nxt, str(error)[:200], source, ref_id))
         return attempts
+
+    def defer_sync_item(self, source: str, ref_id: str, until: str) -> bool:
+        """Push a queue row's next_attempt_at to `until` WITHOUT counting a
+        failed attempt (attempts and last_error untouched). For a handler that
+        cannot work an item yet for a reason that is not the item's fault (an
+        in-flight enrichment unit names it, its service is unavailable, the
+        reflow cadence is halted): without a delay such rows are re-selected
+        every cycle and, sharing one modified_at, hold the head of the queue.
+        Returns False if the row does not exist."""
+        with self._connect(write=True) as db:
+            return db.execute("UPDATE sync_queue SET next_attempt_at=? "
+                              "WHERE source=? AND ref_id=?",
+                              (until, source, ref_id)).rowcount > 0
 
     def sync_queue_stats(self) -> dict:
         """Backlog as a fact, for doctor. `failing` is advisory, not terminal --
