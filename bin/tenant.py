@@ -183,11 +183,17 @@ def remap_gold(gold_path: Path, store, *, dry_run: bool = False, from_start: boo
 
 
 def _open_gold_store():
-    """The live store, read-only (remap-gold never writes it)."""
+    """The live store, read-only (remap-gold never writes it). Its dimension
+    comes from the store's own meta row; the embedder is loaded only for a
+    store that never recorded one."""
     from mcpbrain import config
-    from mcpbrain.embed import get_embedder
     from mcpbrain.store import Store
-    return Store(config.store_path(), dim=get_embedder("bge-small").dim, read_only=True)
+    path = config.store_path()
+    dim = Store.stored_dim(path)
+    if dim is None:
+        from mcpbrain.embed import get_embedder
+        dim = get_embedder("bge-small").dim
+    return Store(path, dim=dim, read_only=True)
 
 
 def main(argv=None) -> int:

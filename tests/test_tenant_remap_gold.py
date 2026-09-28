@@ -227,3 +227,18 @@ def test_cli_from_start_with_a_watermark_exits_non_zero(tmp_path, monkeypatch, c
     err = capsys.readouterr().err
     assert "--from-start" in err and "watermark" in err
     assert gold.read_text() == text
+
+
+def test_open_gold_store_reads_dim_from_the_store_not_the_embedder(tmp_path, monkeypatch):
+    """remap-gold only reads reflow_map; loading the embedding model just to
+    learn the store's dimension made it slow and needed the model cache."""
+    import mcpbrain.embed as embed_mod
+    s = Store(tmp_path / "brain.sqlite3", dim=4)
+    s.init()
+    monkeypatch.setenv("MCPBRAIN_HOME", str(tmp_path))
+
+    def no_model(*a, **k):
+        raise AssertionError("embedder loaded")
+    monkeypatch.setattr(embed_mod, "get_embedder", no_model)
+    opened = tenant._open_gold_store()
+    assert opened.dim == 4 and opened.read_only
