@@ -579,3 +579,17 @@ def test_a_failed_halt_write_never_masks_the_orphan_error(tmp_path, monkeypatch)
     p = plan(s.owner_chunks(["gdrive-F-"]), _new("F", ["alpha beta gamma\ndelta epsilon"]))
     with pytest.raises(ReflowOrphanError):
         s.apply_reflow("F", "drive", p, [V])
+
+
+def test_a_plan_whose_old_chunks_changed_underneath_is_refused(tmp_path):
+    """apply_reflow re-checks, inside its transaction, that every old id the
+    plan was made from still exists: a plan built on rows another writer has
+    since removed must not be applied (nothing written)."""
+    s = _store(tmp_path)
+    _seed(s)
+    p = plan(s.owner_chunks(["gdrive-F-"]), _new("F", ["alpha beta gamma\ndelta epsilon"]))
+    s.delete_chunks(["gdrive-F-1"])
+    before = _snapshot(s)
+    with pytest.raises(ValueError, match="stale plan"):
+        s.apply_reflow("F", "drive", p, [V])
+    assert _snapshot(s) == before

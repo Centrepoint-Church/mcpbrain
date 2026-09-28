@@ -3741,6 +3741,18 @@ class Store:
     def _apply_reflow_txn(self, owner, source, plan, vectors, rows, new_ids, old_ids,
                           now, counts, home) -> dict:
         with self._connect(write=True) as db:
+            # The plan was built from rows read BEFORE this transaction; under
+            # BEGIN IMMEDIATE, re-check that every old id still exists so a plan
+            # made on rows another writer has since removed is never applied.
+            present = 0
+            for i in range(0, len(old_ids), 500):
+                batch = old_ids[i:i + 500]
+                present += db.execute(
+                    f"SELECT count(*) FROM chunks WHERE doc_id IN ({','.join('?' * len(batch))})",
+                    batch).fetchone()[0]
+            if present != len(old_ids):
+                raise ValueError(f"apply_reflow {owner}: stale plan -- "
+                                 f"{len(old_ids) - present} old chunk(s) no longer exist")
             tables = {r[0] for r in db.execute(
                 "SELECT name FROM sqlite_master WHERE type='table'")}
             payload_covers = self._reflowed_payload_covers(db, tables, rows, old_ids)
