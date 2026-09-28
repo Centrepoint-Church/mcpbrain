@@ -20,12 +20,10 @@ drain applies a unit's extraction to the doc_ids the unit named, and through
 the reflow_map fallback it would otherwise mark enriched a re-chunked chunk
 containing text the extraction never saw.
 """
-import json
 import logging
 import time
 from contextlib import closing, nullcontext
 from datetime import datetime, timedelta, timezone
-from pathlib import Path
 
 from googleapiclient.errors import HttpError
 
@@ -48,35 +46,6 @@ HALT_CURSOR = REFLOW_HALT_CURSOR
 DEFER_DELAY_S = 600
 _GIVE_UP_ATTEMPTS = 5
 _EPOCH = "1970-01-01T00:00:00"
-
-# Unit-file keys naming chunk owners / chunks (see prepare.write_units and
-# thread_enrich.reassemble_thread). Anything that names an id is collected; a
-# false positive only defers an item, which is the safe direction.
-_REF_KEYS = frozenset({"thread_id", "message_id", "doc_id", "file_id",
-                       "event_id", "session_id"})
-_REF_LIST_KEYS = frozenset({"part_doc_ids", "chunk_doc_ids", "doc_ids"})
-
-
-def _collect_refs(node, out: set[str]) -> None:
-    if isinstance(node, dict):
-        for k, v in node.items():
-            if k in _REF_KEYS and isinstance(v, (str, int)) and v != "":
-                out.add(str(v))
-            elif k in _REF_LIST_KEYS:
-                if isinstance(v, list):
-                    for d in v:
-                        if isinstance(d, (str, int)) and d != "":
-                            out.add(str(d))
-                        else:
-                            _collect_refs(d, out)
-                else:
-                    _collect_refs(v, out)
-            elif isinstance(v, (dict, list)):
-                _collect_refs(v, out)
-    elif isinstance(node, list):
-        for v in node:
-            _collect_refs(v, out)
-
 
 def _http_status(exc) -> int | None:
     resp = getattr(exc, "resp", None)
@@ -108,50 +77,10 @@ class ReflowContext:
         self.defer_delay_s = defer_delay_s
         self._done = 0
         self._started = None
-        self._unit_refs: set[str] | None = None
-        self._unit_stamp = None
         self._folder_cache: dict = {}
         self._pending_publish: tuple | None = None
 
     # ---- guards -----------------------------------------------------------
-    def _queue_stamp(self):
-        q = Path(self.home) / "enrich_queue"
-        out = []
-        for d in (q / "units", q / "claims"):
-            try:
-                out.append(d.stat().st_mtime_ns)
-            except OSError:
-                out.append(None)
-        return tuple(out)
-
-    def _pending_unit_refs(self) -> set[str]:
-        """Every id named by an enrichment unit that is pending (units/) or
-        claimed (claims/<uid> -> units/<uid>.json). Re-scanned whenever either
-        directory changes, so a unit written mid-cycle is still seen."""
-        stamp = self._queue_stamp()
-        if self._unit_refs is not None and stamp == self._unit_stamp:
-            return self._unit_refs
-        q = Path(self.home) / "enrich_queue"
-        paths: set[Path] = set()
-        try:
-            paths.update((q / "units").glob("*.json"))
-        except OSError:
-            pass
-        try:
-            for claim in (q / "claims").iterdir():
-                uid = claim.name[:-5] if claim.name.endswith(".json") else claim.name
-                paths.add(q / "units" / f"{uid}.json")
-        except OSError:
-            pass
-        refs: set[str] = set()
-        for p in paths:
-            try:
-                _collect_refs(json.loads(p.read_text(encoding="utf-8")), refs)
-            except (OSError, ValueError):
-                continue
-        self._unit_refs, self._unit_stamp = refs, stamp
-        return refs
-
     def _over_cap(self) -> bool:
         if self._started is None:
             self._started = self.clock()
@@ -192,7 +121,7 @@ class ReflowContext:
         old = self.store.owner_chunks(self._prefixes(kind, owner))
         if not old:
             return None                   # nothing left to reflow
-        refs = self._pending_unit_refs()
+        refs = reflow.pending_unit_refs(self.home)
         if owner in refs or any(r["doc_id"] in refs for r in old):
             return self._defer_later(item)
         self._done += 1

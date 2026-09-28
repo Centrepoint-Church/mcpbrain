@@ -362,3 +362,33 @@ def test_repeated_header_partial_maps_to_its_body():
     assert p.remap == {"gdrive-F-0": "gdrive-F-0", "gdrive-F-1": "gdrive-F-1",
                        "gdrive-F-2": "gdrive-F-2"}
     assert set(p.reasons.values()) == {"exact"}
+
+
+# -- final review: ONE pending-unit scanner, the handler's superset of keys ----
+
+def test_pending_unit_refs_covers_every_id_key_and_rescans_on_change(tmp_path):
+    import json
+    import os
+    import time
+
+    from mcpbrain import reflow
+    q = tmp_path / "enrich_queue"
+    (q / "units").mkdir(parents=True)
+    (q / "units" / "u1.json").write_text(json.dumps({"threads": [
+        {"thread_id": "T", "doc_id": "D", "file_id": "FI", "event_id": "EV",
+         "session_id": "SE", "doc_ids": ["X0", {"doc_id": "X1"}],
+         "messages": [{"message_id": "M", "part_doc_ids": ["P0"],
+                       "chunk_doc_ids": ["C0"]}]}]}))
+    assert reflow.pending_unit_refs(tmp_path) >= {
+        "T", "D", "FI", "EV", "SE", "X0", "X1", "M", "P0", "C0"}
+    (q / "units" / "u2.json").write_text(json.dumps({"thread_id": "NEW"}))
+    st = (q / "units").stat()
+    os.utime(q / "units", ns=(st.st_atime_ns, st.st_mtime_ns + 10_000_000))
+    time.sleep(0)
+    assert "NEW" in reflow.pending_unit_refs(tmp_path)
+
+
+def test_handler_uses_the_shared_scanner():
+    from mcpbrain.sync import reflow_handler
+    assert not hasattr(reflow_handler, "_collect_refs")
+    assert not hasattr(reflow_handler.ReflowContext, "_pending_unit_refs")

@@ -267,8 +267,12 @@ def plan(old: list[dict], new: list[Chunk]) -> ReflowPlan:
     return p
 
 
-_UNIT_REF_KEYS = ("thread_id", "message_id")
-_UNIT_REF_LISTS = ("part_doc_ids", "chunk_doc_ids")
+# Unit-file keys naming chunk owners / chunks (see prepare.write_units and
+# thread_enrich.reassemble_thread). Anything that names an id is collected; a
+# false positive only defers an item, which is the safe direction.
+_UNIT_REF_KEYS = frozenset({"thread_id", "message_id", "doc_id", "file_id",
+                            "event_id", "session_id"})
+_UNIT_REF_LISTS = frozenset({"part_doc_ids", "chunk_doc_ids", "doc_ids"})
 
 
 def _collect_unit_refs(node, out: set[str]) -> None:
@@ -276,25 +280,55 @@ def _collect_unit_refs(node, out: set[str]) -> None:
         for k, v in node.items():
             if k in _UNIT_REF_KEYS and isinstance(v, (str, int)) and v != "":
                 out.add(str(v))
-            elif k in _UNIT_REF_LISTS and isinstance(v, list):
-                out.update(str(d) for d in v if isinstance(d, (str, int)) and d != "")
-            else:
+            elif k in _UNIT_REF_LISTS:
+                if isinstance(v, list):
+                    for d in v:
+                        if isinstance(d, (str, int)) and d != "":
+                            out.add(str(d))
+                        else:
+                            _collect_unit_refs(d, out)
+                else:
+                    _collect_unit_refs(v, out)
+            elif isinstance(v, (dict, list)):
                 _collect_unit_refs(v, out)
     elif isinstance(node, list):
         for v in node:
             _collect_unit_refs(v, out)
 
 
+# home -> (directory-mtime stamp, refs): re-scanned whenever units/ or claims/
+# changes, so a unit written mid-cycle is still seen, while repeated calls
+# (one per reflow item or import) do not re-read hundreds of unit files.
+_REFS_CACHE: dict[str, tuple[tuple, set[str]]] = {}
+
+
+def _queue_stamp(queue) -> tuple:
+    out = []
+    for d in (queue / "units", queue / "claims"):
+        try:
+            out.append(d.stat().st_mtime_ns)
+        except OSError:
+            out.append(None)
+    return tuple(out)
+
+
 def pending_unit_refs(home) -> set[str]:
-    """Every thread_id, message_id, part_doc_ids and chunk_doc_ids entry named by
-    an enrichment unit still pending or claimed under <home>/enrich_queue (spec §3
-    guard: an owner with an in-flight unit must not be reflowed, or drain would
-    later mark re-chunked, never-extracted text enriched). Unreadable or
-    malformed unit files are ignored. A claim's unit is read from units/<uid>.json;
-    a claim with no readable unit file contributes nothing."""
+    """Every id (thread_id, message_id, doc_id, file_id, event_id, session_id,
+    and every part_doc_ids / chunk_doc_ids / doc_ids entry) named by an
+    enrichment unit still pending or claimed under <home>/enrich_queue (spec
+    §3 guard: an owner with an in-flight unit must not be reflowed, or drain
+    would later mark re-chunked, never-extracted text enriched). The single
+    scanner for every reflow path (queue handler and ingest-cache import).
+    Unreadable or malformed unit files are ignored. A claim's unit is read
+    from units/<uid>.json; a claim with no readable unit file contributes
+    nothing. The returned set is shared -- do not mutate it."""
     import json
     from pathlib import Path
     queue = Path(home) / "enrich_queue"
+    stamp = _queue_stamp(queue)
+    hit = _REFS_CACHE.get(str(queue))
+    if hit is not None and hit[0] == stamp:
+        return hit[1]
     paths: set[Path] = set()
     try:
         paths.update((queue / "units").glob("*.json"))
@@ -312,4 +346,5 @@ def pending_unit_refs(home) -> set[str]:
             _collect_unit_refs(json.loads(p.read_text(encoding="utf-8")), out)
         except (OSError, ValueError):
             continue
+    _REFS_CACHE[str(queue)] = (stamp, out)
     return out
