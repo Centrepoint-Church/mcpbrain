@@ -381,3 +381,50 @@ def pending_unit_refs(home) -> set[str]:
             continue
     _REFS_CACHE[str(queue)] = (stamp, out)
     return out
+
+
+# -- which reflow sources this install can work --------------------------------
+
+REFLOW_SOURCES = ("reflow:drive", "reflow:gmail", "reflow:calendar", "reflow:anarlog")
+REFLOW_SOURCE_SERVICES = {"reflow:drive": "drive_service",
+                          "reflow:gmail": "gmail_service",
+                          "reflow:calendar": "calendar_service"}
+
+
+def workable_reflow_sources(home, services: dict | None = None) -> set[str]:
+    """Reflow sources this install can work as configured -- the ONE set the
+    seed restricts `remaining` to, frees queued rows outside of, and records
+    in `reflow:last_seed` for doctor / `bin/reflow.py status` to count against.
+
+    anarlog only while it is enabled (config.anarlog_db_path). A Google source
+    is workable when its service is built, or -- when it is not -- unless that
+    absence is PERMANENT: no stored token at all (not configured), or a token
+    whose stored scopes lack the service's scope (auth.build_google_services
+    omits such a service by design). Any other absence (the token could not
+    be refreshed, a build failed) is transient: the source stays workable, so
+    its queued rows are kept and `remaining` still counts it."""
+    from pathlib import Path
+
+    from mcpbrain import config
+    out: set[str] = set()
+    if config.anarlog_db_path(home):
+        out.add("reflow:anarlog")
+    services = services or {}
+    missing = [s for s, key in REFLOW_SOURCE_SERVICES.items() if services.get(key) is None]
+    out |= set(REFLOW_SOURCE_SERVICES) - set(missing)
+    if not missing:
+        return out
+    from mcpbrain import auth
+    token = Path(home) / auth.token_path().name
+    if not token.exists():
+        return out
+    try:
+        import json
+        stored = json.loads(token.read_text()).get("scopes")
+    except (OSError, ValueError, AttributeError):
+        stored = None
+    scope_of = {key: scope for key, _api, _v, scope in auth._SERVICE_SPECS}
+    for src in missing:
+        if not stored or scope_of[REFLOW_SOURCE_SERVICES[src]] in stored:
+            out.add(src)
+    return out

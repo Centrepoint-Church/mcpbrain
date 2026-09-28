@@ -3796,7 +3796,7 @@ class Store:
                        (owner, source, now, outcome))
 
     def reflow_stats(self, *, live_remaining: bool = False,
-                     remaining_cap: int = 5000) -> dict:
+                     remaining_cap: int = 5000, sources=None) -> dict:
         """{owners_done, by_outcome, chunks_carried, chunks_reenrich, queued,
         remaining, total, last_seed}.
 
@@ -3809,7 +3809,13 @@ class Store:
         live_remaining, else the figure the last seed recorded (None before the
         first seed). total = owners_done + queued + remaining (None when
         remaining is unknown). last_seed = the seed's last recorded status
-        dict ({status, at, enqueued?, remaining?}) or None."""
+        dict ({status, at, enqueued?, remaining?, sources?}) or None.
+
+        A live `remaining` counts only `sources` -- by default the workable
+        set the seed last recorded (reflow.workable_reflow_sources), so an
+        owner of a source this install can never work (scope not granted,
+        anarlog disabled) never holds doctor off ✅. Before the first seed
+        records one, every source counts."""
         with self._connect() as db:
             by = {r["outcome"]: r["n"] for r in db.execute(
                 "SELECT outcome, count(*) n FROM reflow_owners GROUP BY outcome")}
@@ -3825,7 +3831,9 @@ class Store:
             except ValueError:
                 last_seed = {"status": str(raw)}
         if live_remaining:
-            remaining = len(self.reflow_candidates(remaining_cap))
+            if sources is None and (last_seed or {}).get("sources") is not None:
+                sources = set(last_seed["sources"])
+            remaining = len(self.reflow_candidates(remaining_cap, sources=sources))
         else:
             remaining = (last_seed or {}).get("remaining")
         total = (o["n"] + q + remaining) if remaining is not None else None

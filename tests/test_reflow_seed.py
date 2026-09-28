@@ -276,3 +276,106 @@ def test_end_to_end_seed_work_queue_handler_converges(tmp_path, monkeypatch):
     assert d._run_reflow_seed() == {"reflow_seed": "ok", "enqueued": 0}
     assert calls and s.get_cursor("reflow:integrity_checked") == "ok"
     assert doctor_mod.reflow_line(s).startswith("✅")
+
+
+# -- residual R3: every seed branch records remaining (never reads as idle) ---
+
+def _blocked_daemon(tmp_path, monkeypatch, s):
+    _c(s, "gmail-N-body-0", source_type="gmail", message_id="N", chunk_total=2)
+    return _seed_daemon(tmp_path, monkeypatch, s)
+
+
+def test_disabled_seed_records_remaining(tmp_path, monkeypatch):
+    from mcpbrain import daemon as dmod
+    s = _store(tmp_path)
+    d = _blocked_daemon(tmp_path, monkeypatch, s)
+    monkeypatch.setattr(dmod.config, "reflow_enabled", lambda home: False)
+    assert d._run_reflow_seed() == {"reflow_seed": "disabled"}
+    last = json.loads(s.get_cursor("reflow:last_seed"))
+    assert last["status"] == "disabled" and last["remaining"] == 1
+
+
+def test_halted_seed_records_remaining(tmp_path, monkeypatch):
+    s = _store(tmp_path)
+    s.set_cursor("reflow:halted", "reflow F: 1 dangling reference(s)")
+    d = _blocked_daemon(tmp_path, monkeypatch, s)
+    d._run_reflow_seed()
+    last = json.loads(s.get_cursor("reflow:last_seed"))
+    assert last["status"] == "halted" and last["remaining"] == 1
+
+
+def test_error_seed_records_remaining(tmp_path, monkeypatch):
+    s = _store(tmp_path)
+    (tmp_path / "backup_state.json").write_text(json.dumps({"last_success": time.time()}))
+    d = _blocked_daemon(tmp_path, monkeypatch, s)
+
+    def boom(*_a, **_k):
+        raise RuntimeError("disk full")
+
+    monkeypatch.setattr(s, "enqueue_items", boom)
+    assert d._run_reflow_seed()["reflow_seed"] is False
+    last = json.loads(s.get_cursor("reflow:last_seed"))
+    assert last["status"] == "error" and last["remaining"] == 1
+    assert "disk full" in last["error"]
+
+
+# -- residual R4: live remaining is restricted to the sources the seed works --
+
+def test_live_remaining_uses_the_seeds_workable_sources(tmp_path, monkeypatch):
+    """No calendar scope granted: the calendar owner is never seedable, so it
+    must not keep doctor's remaining above zero forever."""
+    from mcpbrain.doctor import reflow_line
+    s = _store(tmp_path)
+    _c(s, "cal-E-0", source_type="calendar", event_id="E", chunk_total=2)
+    (tmp_path / "backup_state.json").write_text(json.dumps({"last_success": time.time()}))
+    d = _seed_daemon(tmp_path, monkeypatch, s)
+    d._services = {"gmail_service": object(), "drive_service": object()}
+    monkeypatch.setattr("mcpbrain.doctor._run_integrity_check", lambda home: [])
+    assert d._run_reflow_seed()["enqueued"] == 0
+    assert s.reflow_stats(live_remaining=True)["remaining"] == 0
+    assert reflow_line(s).startswith("✅")
+
+
+# -- residual R5: a transient service failure never frees queued rows --------
+
+_SCOPES = ["https://www.googleapis.com/auth/gmail.readonly",
+           "https://www.googleapis.com/auth/calendar.readonly",
+           "https://www.googleapis.com/auth/drive.readonly"]
+
+
+def _queued(s):
+    with s._connect() as db:
+        return {(r[0], r[1], r[2]) for r in db.execute(
+            "SELECT source, ref_id, attempts FROM sync_queue")}
+
+
+def test_transient_service_failure_leaves_queued_rows(tmp_path, monkeypatch):
+    s = _store(tmp_path)
+    _c(s, "cal-E-0", source_type="calendar", event_id="E", chunk_total=2)
+    s.enqueue_items([{"ref_id": "OLD", "event": "reflow",
+                      "modified_at": "1970-01-01T00:00:00"}], source="reflow:calendar")
+    with s._connect(write=True) as db:
+        db.execute("UPDATE sync_queue SET attempts=2 WHERE ref_id='OLD'")
+    (tmp_path / "google_token.json").write_text(json.dumps({"scopes": _SCOPES}))
+    (tmp_path / "backup_state.json").write_text(json.dumps({"last_success": time.time()}))
+    d = _seed_daemon(tmp_path, monkeypatch, s)
+    d._services = {}                          # ensure_services could not build them now
+    out = d._run_reflow_seed()
+    assert out["enqueued"] == 0               # nothing seeded it cannot work now ...
+    assert _queued(s) == {("reflow:calendar", "OLD", 2)}   # ... and nothing freed
+    last = json.loads(s.get_cursor("reflow:last_seed"))
+    assert "reflow:calendar" in last["sources"]
+
+
+def test_scope_not_granted_frees_queued_rows(tmp_path, monkeypatch):
+    s = _store(tmp_path)
+    s.enqueue_items([{"ref_id": "OLD", "event": "reflow",
+                      "modified_at": "1970-01-01T00:00:00"}], source="reflow:calendar")
+    (tmp_path / "google_token.json").write_text(json.dumps({"scopes": _SCOPES[:1]}))
+    (tmp_path / "backup_state.json").write_text(json.dumps({"last_success": time.time()}))
+    d = _seed_daemon(tmp_path, monkeypatch, s)
+    d._services = {"gmail_service": object()}
+    d._run_reflow_seed()
+    assert _queued(s) == set()
+    last = json.loads(s.get_cursor("reflow:last_seed"))
+    assert "reflow:calendar" not in last["sources"]

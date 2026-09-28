@@ -3153,26 +3153,24 @@ class Daemon:
                      summary["actions_archived"], summary["actions_deduped"])
         return summary
 
-    _REFLOW_SOURCE_SERVICES = {"reflow:drive": "drive_service",
-                               "reflow:gmail": "gmail_service",
-                               "reflow:calendar": "calendar_service"}
-
-    def _reflow_sources(self, home) -> set[str]:
-        """Reflow sources this install can work: a Google source only when its
-        service was built (auth.build_google_services omits one whose scope
-        the token lacks), anarlog only while it is enabled
-        (config.anarlog_db_path) -- the same facts run_sync_cycle uses. A
-        source outside this set is not seeded: its rows would only defer
-        forever and hold REFLOW_WINDOW, so the backlog never reached 0."""
+    def _reflow_source_sets(self, home) -> tuple[set[str], set[str]]:
+        """(workable_now, workable). `workable` is reflow.workable_reflow_sources
+        -- what this install can work as configured. `workable_now` is the part
+        of it whose service is built right now: the only sources seeded, since
+        a queued row with no service would only defer and hold REFLOW_WINDOW.
+        A source outside `workable` is permanently unavailable (scope not
+        granted, not configured, anarlog disabled) and its queued rows are
+        freed; one in `workable` but not `workable_now` failed transiently and
+        its rows are left alone."""
+        from mcpbrain.reflow import REFLOW_SOURCE_SERVICES, workable_reflow_sources
         try:
             services = self.ensure_services() or {}
-        except Exception:  # noqa: BLE001 — no services means nothing Google to seed
+        except Exception:  # noqa: BLE001 — treated as a transient build failure
             services = {}
-        out = {src for src, key in self._REFLOW_SOURCE_SERVICES.items()
+        workable = workable_reflow_sources(home, services)
+        now = {src for src, key in REFLOW_SOURCE_SERVICES.items()
                if services.get(key) is not None}
-        if config.anarlog_db_path(home):
-            out.add("reflow:anarlog")
-        return out
+        return (now | {"reflow:anarlog"}) & workable, workable
 
     def _run_reflow_seed(self):
         """Top the reflow queue up to REFLOW_WINDOW (spec §4). Gated on the
@@ -3192,31 +3190,43 @@ class Daemon:
             return None
         home = str(app_dir())
         self._last_reflow_seed = self._clock()
-        out = self._reflow_seed_once(home)
+        try:
+            now, workable = self._reflow_source_sets(home)
+        except Exception as exc:  # noqa: BLE001 — a cadence pass must never kill the cycle
+            log.warning("reflow_seed: could not resolve sources: %s", exc)
+            now, workable = set(), None
+        out = self._reflow_seed_once(home, now, workable or set())
         try:
             import datetime as _dt
             rec = {"status": out.get("reflow_seed") if out.get("reflow_seed") is not False
                    else "error", "at": _dt.datetime.now(_dt.timezone.utc).isoformat()}
-            for k in ("enqueued", "remaining", "error"):
+            for k in ("enqueued", "error"):
                 if k in out:
                     rec[k] = out[k]
+            # Every branch -- gated, halted or failed included -- records what
+            # is left, so the dashboard/doctor never read a blocked seed as idle.
+            rec["remaining"] = (out["remaining"] if "remaining" in out
+                                else self._reflow_remaining(workable))
+            if workable is not None:
+                rec["sources"] = sorted(workable)
             self._store.set_cursor("reflow:last_seed", json.dumps(rec))
         except Exception as exc:  # noqa: BLE001 — visibility must never kill the cycle
             log.debug("reflow_seed: could not record last status: %s", exc)
         return {k: v for k, v in out.items() if k != "remaining"}
 
     def _reflow_remaining(self, sources) -> int | None:
+        if sources is None:
+            return None
         try:
             return len(self._store.reflow_candidates(REFLOW_REMAINING_CAP, sources=sources))
         except Exception:  # noqa: BLE001
             return None
 
-    def _reflow_seed_once(self, home) -> dict:
+    def _reflow_seed_once(self, home, now: set[str], workable: set[str]) -> dict:
         if not config.reflow_enabled(home):
             return {"reflow_seed": "disabled"}
         if self._store.get_cursor("reflow:halted"):
             return {"reflow_seed": "halted"}
-        sources = self._reflow_sources(home)
         from mcpbrain.probes import _read_backup_state
         st = _read_backup_state(home) or {}
         try:
@@ -3224,31 +3234,36 @@ class Daemon:
         except (TypeError, ValueError):
             fresh = False
         if not fresh:
-            return {"reflow_seed": "no_recent_backup",
-                    "remaining": self._reflow_remaining(sources)}
+            return {"reflow_seed": "no_recent_backup"}
         try:
-            unavailable = set(self._REFLOW_SOURCE_SERVICES) | {"reflow:anarlog"}
-            dropped = self._store.drop_queued_reflow_rows(unavailable - sources)
+            from mcpbrain.reflow import REFLOW_SOURCES
+            # Only a PERMANENTLY unavailable source's rows are freed; a source
+            # whose service failed to build just now keeps its rows (and their
+            # attempts) queued for when it comes back.
+            gone = set(REFLOW_SOURCES) - workable
+            dropped = self._store.drop_queued_reflow_rows(gone)
             if dropped:
                 log.info("reflow_seed: freed %d queued row(s) of unavailable source(s) %s",
-                         dropped, sorted(unavailable - sources))
+                         dropped, sorted(gone))
             room = REFLOW_WINDOW - self._store.reflow_stats()["queued"]
             if room <= 0:
                 return {"reflow_seed": "window_full", "enqueued": 0,
-                        "remaining": self._reflow_remaining(sources)}
+                        "remaining": self._reflow_remaining(workable)}
             by_src: dict[str, list[dict]] = {}
-            for src, owner in self._store.reflow_candidates(room, sources=sources):
+            for src, owner in self._store.reflow_candidates(room, sources=now):
                 by_src.setdefault(src, []).append(
                     {"ref_id": owner, "event": "reflow", "modified_at": "1970-01-01T00:00:00"})
             n = sum(self._store.enqueue_items(items, source=src) for src, items in by_src.items())
+            remaining = self._reflow_remaining(workable)
             if n:
                 # New work: the backlog's end must be integrity-checked again
                 # (e.g. after a future EXTRACTION_VERSIONS bump).
                 self._store.set_cursor("reflow:integrity_checked", "")
-            elif self._store.reflow_stats()["queued"] == 0:
+            elif self._store.reflow_stats()["queued"] == 0 and not remaining:
+                # Truly done: nothing queued and nothing left for any workable
+                # source (a source that failed transiently still counts).
                 self._reflow_backlog_empty()
-            return {"reflow_seed": "ok", "enqueued": n,
-                    "remaining": self._reflow_remaining(sources)}
+            return {"reflow_seed": "ok", "enqueued": n, "remaining": remaining}
         except Exception as exc:  # noqa: BLE001 — a cadence pass must never kill the cycle
             log.warning("reflow_seed failed: %s", exc, exc_info=True)
             return {"reflow_seed": False, "error": str(exc)}
