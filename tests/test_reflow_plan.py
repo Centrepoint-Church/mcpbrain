@@ -392,3 +392,16 @@ def test_handler_uses_the_shared_scanner():
     from mcpbrain.sync import reflow_handler
     assert not hasattr(reflow_handler, "_collect_refs")
     assert not hasattr(reflow_handler.ReflowContext, "_pending_unit_refs")
+
+
+def test_duplicate_old_text_maps_to_the_new_chunk_holding_it():
+    """Dry run #2 D1/D2: an old chunk whose text duplicates another old
+    chunk's (a legacy positional tail) gets no placed new chunk on its own
+    region; it maps 'exact' onto the new chunk holding that text, never
+    'nearest' by position."""
+    old = [_old(0, "alpha beta gamma", 2), _old(1, "delta epsilon zeta", 2),
+           _old(2, "alpha beta", 2)]
+    p = plan(old, [_new(0, "alpha beta gamma"), _new(1, "delta epsilon zeta")])
+    assert p.remap["gdrive-F-2"] == "gdrive-F-0"
+    assert p.reasons["gdrive-F-2"] == "exact"
+    assert p.deletes == ["gdrive-F-2"]

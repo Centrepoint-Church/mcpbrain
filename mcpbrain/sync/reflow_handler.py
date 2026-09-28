@@ -137,7 +137,13 @@ class ReflowContext:
         if any((c.metadata or {}).get("extraction_partial") for c in new):
             raise RuntimeError(f"reflow {kind} {owner}: partial re-extraction")
         p = reflow.plan(old, new)
-        if kind in ("gmail", "anarlog", "calendar") and self._source_changed(p, old, new):
+        # A Gmail message is immutable per id (spec §3): differing text is
+        # always the store's own history -- a legacy positional tail an older
+        # chunker left behind, an ambiguous seam overlap -- never an edit, so
+        # Gmail ALWAYS applies the plan (covered rows carry, uncovered ones
+        # re-enrich, legacy ids are deletes remapped onto their text). Only
+        # calendar and anarlog, whose sources can change, are tested.
+        if kind in ("anarlog", "calendar") and self._source_changed(p, old, new):
             # These sources' prose extraction is unchanged, so differing text
             # means the SOURCE changed: take the ordinary path.
             self._normal(kind, owner, old)

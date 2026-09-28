@@ -268,23 +268,29 @@ def test_gmail_lineage_gone_backs_off_through_work_queue_then_gives_up(tmp_path,
     assert s.reflow_stats()["queued"] == 0
 
 
-def test_gmail_body_text_changed_takes_ordinary_path(tmp_path, monkeypatch):
+def test_gmail_body_text_differs_still_applies_the_plan(tmp_path, monkeypatch):
+    """Dry run #2 D1: a Gmail message is immutable, so differing body text is
+    never read as a source change. The plan is applied: the uncovered body
+    re-enriches, the unchanged attachment carries, the ordinary handler is
+    never called."""
     from mcpbrain.sync import gmail
     import mcpbrain.sync.normalise as nm
     s = _store(tmp_path); _seed_gmail_with_pdf(s)
-    body = _gmail_body(); body.text = "entirely different words"
+    body = _gmail_body(); body.text = "entirely different words"; body.spans = [body.text]
     att = Chunk("gmail-M-att-0-0", "Item Cost Chairs 120", "a0",
                 {"source_type": "gmail", "message_id": "M", "attachment_mime": PDF,
                  "chunk_index": 0, "chunk_total": 1}, ["Item Cost Chairs 120"])
     monkeypatch.setattr(gmail, "_fetch_one", lambda *a, **k: ({"id": "M"}, [att]))
     monkeypatch.setattr(nm, "normalise_gmail", lambda raw, **k: [body])
-    called = {}
     monkeypatch.setattr(gmail, "handle_gmail_item",
-                        lambda svc, st, item, **k: called.update(item=item, **k))
-    monkeypatch.setattr(s, "apply_reflow", lambda *a, **k: pytest.fail("reached apply_reflow"))
+                        lambda *a, **k: pytest.fail("took the ordinary path"))
     ctx = _ctx(s, tmp_path, gmail_service=object())
     assert ctx.handle({"source": "reflow:gmail", "ref_id": "M", "attempts": 0}) is None
-    assert called["item"]["ref_id"] == "M" and called["fetch_attachments"] is True
+    rows = {r["doc_id"]: r for r in s.owner_chunks(["gmail-M-"])}
+    assert rows["gmail-M-body-0"]["text"] == "entirely different words"
+    assert rows["gmail-M-body-0"]["enriched"] == 0            # uncovered: re-enrich
+    assert rows["gmail-M-att-0-0"]["enriched"] == 1           # covered: carried
+    assert _outcomes(s)["M"] == "carried"
 
 
 def test_partial_attachment_reextraction_raises(tmp_path, monkeypatch):
@@ -444,10 +450,10 @@ def test_anarlog_disabled_row_is_deferred_not_stamped(tmp_path):
     assert s.reflow_stats()["queued"] == 1
 
 
-def test_changed_gmail_body_drops_its_stale_tail_and_stops_matching(tmp_path, monkeypatch):
+def test_gmail_differing_body_replaces_its_old_tail_through_the_plan(tmp_path, monkeypatch):
     """3 old body chunks; the message re-normalises differently into 1 chunk.
-    The ordinary handler only upserts body-0, so body-1/body-2 must be removed
-    (relations invalidated first) or the selector re-queues the message forever."""
+    The plan deletes body-1/body-2 and remaps them (never invalidating their
+    relations), so the selector stops matching the message."""
     from mcpbrain.sync import gmail
     import mcpbrain.sync.normalise as nm
     s = _store(tmp_path)
@@ -459,36 +465,35 @@ def test_changed_gmail_body_drops_its_stale_tail_and_stops_matching(tmp_path, mo
                 {**md, "split_version": 1, "chunk_index": 0, "chunk_total": 1})
     monkeypatch.setattr(gmail, "_fetch_one", lambda *a, **k: ({"id": "M"}, []))
     monkeypatch.setattr(nm, "normalise_gmail", lambda raw, **k: [new])
-
-    def _ordinary(svc, store, item, **k):
-        store.upsert_chunk(new.doc_id, new.text, new.content_hash, new.metadata)
-    monkeypatch.setattr(gmail, "handle_gmail_item", _ordinary)
-    invalidated = []
-    real_inv = s.invalidate_local_relations_for_docs
+    monkeypatch.setattr(gmail, "handle_gmail_item",
+                        lambda *a, **k: pytest.fail("took the ordinary path"))
     monkeypatch.setattr(s, "invalidate_local_relations_for_docs",
-                        lambda ids, **k: invalidated.append((sorted(ids), k)) or real_inv(ids, **k))
+                        lambda *a, **k: pytest.fail("invalidated relations"))
     assert ("reflow:gmail", "M") in s.reflow_candidates(50)
     ctx = _ctx(s, tmp_path, gmail_service=object())
     assert ctx.handle({"source": "reflow:gmail", "ref_id": "M", "attempts": 0}) is None
     assert [r["doc_id"] for r in s.owner_chunks(["gmail-M-"])] == ["gmail-M-body-0"]
-    assert invalidated == [(["gmail-M-body-1", "gmail-M-body-2"],
-                            {"reason": "reflow_source_changed"})]
+    assert s.latest_reflow_target("gmail-M-body-2") == "gmail-M-body-0"
     assert ("reflow:gmail", "M") not in s.reflow_candidates(50)
 
 
-def test_changed_gmail_body_keeps_a_gone_attachment(tmp_path, monkeypatch):
-    """The stale-tail sweep is lineage-scoped: an attachment whose re-fetch
-    failed (absent from the new set) is never deleted by it."""
+def test_gmail_differing_body_with_a_gone_attachment_refuses(tmp_path, monkeypatch):
+    """The attachment's re-fetch failed (its lineage is absent from the new
+    set): apply_reflow's lineage_gone refusal still holds, whatever the body
+    text, and nothing is deleted."""
     from mcpbrain.sync import gmail
     import mcpbrain.sync.normalise as nm
     s = _store(tmp_path); _seed_gmail_with_pdf(s)
     body = _gmail_body(); body.text = "entirely different words"
     monkeypatch.setattr(gmail, "_fetch_one", lambda *a, **k: ({"id": "M"}, []))
     monkeypatch.setattr(nm, "normalise_gmail", lambda raw, **k: [body])
-    monkeypatch.setattr(gmail, "handle_gmail_item", lambda *a, **k: None)
-    _ctx(s, tmp_path, gmail_service=object()).handle(
-        {"source": "reflow:gmail", "ref_id": "M", "attempts": 0})
+    monkeypatch.setattr(gmail, "handle_gmail_item",
+                        lambda *a, **k: pytest.fail("took the ordinary path"))
+    with pytest.raises(ValueError, match="lineage"):
+        _ctx(s, tmp_path, gmail_service=object()).handle(
+            {"source": "reflow:gmail", "ref_id": "M", "attempts": 0})
     assert s.get_chunk("gmail-M-att-0-0") is not None
+    assert s.get_chunk("gmail-M-body-0")["text"] == "hello there friend"
 
 
 def test_drive_404_stamps_source_gone(tmp_path):
@@ -659,37 +664,11 @@ def test_run_sync_cycle_registers_reflow_and_kill_switch_defers(tmp_path, monkey
 
 
 # ---- round 2: the sweep only removes what the ordinary handler rewrote ------
-
-def _raw_message(body_text):
-    import base64
-    data = base64.urlsafe_b64encode(body_text.encode()).decode()
-    return {"id": "M", "threadId": "T", "labelIds": [],
-            "payload": {"mimeType": "multipart/mixed",
-                        "headers": [{"name": "Subject", "value": "Invoice"}],
-                        "parts": [
-                            {"mimeType": "text/plain", "filename": "", "body": {"data": data}},
-                            {"mimeType": PDF, "filename": "i.pdf",
-                             "body": {"attachmentId": "A0", "size": 10}}]}}
-
-
-class _GmailSvc:
-    def __init__(self, raw):
-        self.raw = raw
-    def users(self):
-        return self
-    def messages(self):
-        return self
-    def get(self, **k):
-        raw = self.raw
-        class R:
-            def execute(self, num_retries=0):
-                return raw
-        return R()
-
+# (Gmail never reaches the ordinary path since dry run #2 D1; calendar does.)
 
 def _seed_changed_message_with_attachment(s):
-    """3 old body chunks + a 2-chunk PDF attachment, all enriched; the body has
-    since changed (so the reflow routes to the ordinary handler)."""
+    """3 old body chunks + a 2-chunk PDF attachment, all enriched; the body
+    re-normalises differently."""
     md = {"source_type": "gmail", "message_id": "M", "content_type": "email_body"}
     for i in range(3):
         s.upsert_chunk(f"gmail-M-body-{i}", f"old words part {i}", f"b{i}",
@@ -702,71 +681,56 @@ def _seed_changed_message_with_attachment(s):
     _enrich(s, *[f"gmail-M-body-{i}" for i in range(3)], "gmail-M-att-0-0", "gmail-M-att-0-1")
 
 
-def _run_ordinary_reflow(s, tmp_path, monkeypatch, *, handler_fetches_attachments):
-    from mcpbrain.sync import gmail
-    raw = _raw_message("A new body for the invoice email")
-    svc = _GmailSvc(raw)
-    # The reflow's OWN fetch sees the attachment (re-extracted as one chunk).
-    new_att = Chunk("gmail-M-att-0-0", "Invoice\n\nline 0 line 1 total", "a-new",
-                    {"source_type": "gmail", "message_id": "M", "attachment_mime": PDF,
-                     "content_type": "email_attachment", "extraction_version": 1,
-                     "chunk_index": 0, "chunk_total": 1}, ["Invoice", "line 0 line 1 total"])
-    monkeypatch.setattr(gmail, "_fetch_one", lambda *a, **k: (raw, [new_att]))
-    invalidated = []
-    real_inv = s.invalidate_local_relations_for_docs
-    monkeypatch.setattr(s, "invalidate_local_relations_for_docs",
-                        lambda ids, **k: invalidated.append(sorted(ids)) or real_inv(ids, **k))
-    ctx = _ctx(s, tmp_path, gmail_service=svc, normal_handlers={
-        "gmail": lambda it: gmail.handle_gmail_item(
-            svc, s, it, fetch_attachments=handler_fetches_attachments)})
-    assert ctx.handle({"source": "reflow:gmail", "ref_id": "M", "attempts": 0}) is None
-    return invalidated
-
-
-def test_attachments_setting_off_never_sweeps_attachment_chunks(tmp_path, monkeypatch):
-    """(a) The cycle's gmail handler runs with the user's attachments setting
-    (off), so it writes no attachment chunks even though the reflow's own fetch
-    included one. The attachment lineage was not rewritten: keep all of it."""
-    s = _store(tmp_path); _seed_changed_message_with_attachment(s)
-    invalidated = _run_ordinary_reflow(s, tmp_path, monkeypatch,
-                                       handler_fetches_attachments=False)
-    ids = sorted(r["doc_id"] for r in s.owner_chunks(["gmail-M-"]))
-    assert ids == ["gmail-M-att-0-0", "gmail-M-att-0-1", "gmail-M-body-0"]
-    assert s.get_chunk("gmail-M-att-0-0")["content_hash"] == "a0"      # untouched
-    assert invalidated == [["gmail-M-body-1", "gmail-M-body-2"]]
-
-
-def test_handler_side_attachment_failure_keeps_the_attachment(tmp_path, monkeypatch):
-    """(b) The handler fetches attachments but its fetch is swallowed-failed
-    (fetch_and_normalise drops it): again the attachment lineage is kept."""
-    from mcpbrain.sync import attachments
-    s = _store(tmp_path); _seed_changed_message_with_attachment(s)
-    monkeypatch.setattr(attachments, "fetch_and_normalise", lambda *a, **k: [])
-    invalidated = _run_ordinary_reflow(s, tmp_path, monkeypatch,
-                                       handler_fetches_attachments=True)
-    ids = sorted(r["doc_id"] for r in s.owner_chunks(["gmail-M-"]))
-    assert ids == ["gmail-M-att-0-0", "gmail-M-att-0-1", "gmail-M-body-0"]
-    assert all("att" not in d for batch in invalidated for d in batch)
-
-
-def test_handler_that_wrote_nothing_sweeps_nothing(tmp_path, monkeypatch):
-    """A message gone (or changed again) by the time the ordinary handler
-    re-fetches: nothing it wrote matches the reflow's chunks, so nothing goes."""
+def test_gmail_with_attachment_never_takes_the_ordinary_handler(tmp_path, monkeypatch):
+    """Even with the cycle's own gmail handler registered, a message whose body
+    text differs is reflowed by the plan: the re-extracted attachment carries
+    (its text was all extracted), the body tail is deleted and remapped."""
     from mcpbrain.sync import gmail
     import mcpbrain.sync.normalise as nm
+    s = _store(tmp_path); _seed_changed_message_with_attachment(s)
+    body = Chunk("gmail-M-body-0", "A new body for the invoice email", "n",
+                 {"source_type": "gmail", "message_id": "M", "content_type": "email_body",
+                  "split_version": 1, "chunk_index": 0, "chunk_total": 1})
+    new_att = Chunk("gmail-M-att-0-0", "Invoice\n\nline 0 line 1", "a-new",
+                    {"source_type": "gmail", "message_id": "M", "attachment_mime": PDF,
+                     "content_type": "email_attachment", "extraction_version": 1,
+                     "chunk_index": 0, "chunk_total": 1}, ["Invoice line 0", "line 1"])
+    monkeypatch.setattr(gmail, "_fetch_one", lambda *a, **k: ({"id": "M"}, [new_att]))
+    monkeypatch.setattr(nm, "normalise_gmail", lambda raw, **k: [body])
+    ctx = _ctx(s, tmp_path, gmail_service=object(), normal_handlers={
+        "gmail": lambda it: pytest.fail("took the ordinary path")})
+    assert ctx.handle({"source": "reflow:gmail", "ref_id": "M", "attempts": 0}) is None
+    rows = {r["doc_id"]: r for r in s.owner_chunks(["gmail-M-"])}
+    assert sorted(rows) == ["gmail-M-att-0-0", "gmail-M-body-0"]
+    assert rows["gmail-M-att-0-0"]["enriched"] == 1
+    assert s.latest_reflow_target("gmail-M-att-0-1") == "gmail-M-att-0-0"
+
+
+class _OneEventCal:
+    def events(self):
+        return self
+    def get(self, **k):
+        class R:
+            def execute(self, num_retries=0):
+                return {"id": "E"}
+        return R()
+
+
+def test_calendar_handler_that_wrote_nothing_sweeps_nothing(tmp_path, monkeypatch):
+    """An event gone (or changed again) by the time the ordinary handler
+    re-fetches: nothing it wrote matches the reflow's chunks, so nothing goes."""
+    from mcpbrain.sync import calendar
     s = _store(tmp_path)
-    md = {"source_type": "gmail", "message_id": "M", "content_type": "email_body"}
+    md = {"source_type": "calendar", "event_id": "E"}
     for i in range(3):
-        s.upsert_chunk(f"gmail-M-body-{i}", f"old words part {i}", f"b{i}",
+        s.upsert_chunk(f"cal-E-{i}", f"old agenda part {i}", f"c{i}",
                        {**md, "chunk_index": i, "chunk_total": 3})
-    new = Chunk("gmail-M-body-0", "a different body now", "n",
-                {**md, "split_version": 1, "chunk_index": 0, "chunk_total": 1})
-    monkeypatch.setattr(gmail, "_fetch_one", lambda *a, **k: ({"id": "M"}, []))
-    monkeypatch.setattr(nm, "normalise_gmail", lambda raw, **k: [new])
-    monkeypatch.setattr(gmail, "handle_gmail_item", lambda *a, **k: None)   # 404: no write
-    _ctx(s, tmp_path, gmail_service=object()).handle(
-        {"source": "reflow:gmail", "ref_id": "M", "attempts": 0})
-    assert len(s.owner_chunks(["gmail-M-"])) == 3
+    fresh = Chunk("cal-E", "moved to Friday", "c", {**md, "chunk_index": 0, "chunk_total": 1})
+    monkeypatch.setattr(calendar, "normalise_calendar", lambda ev: [fresh])
+    ctx = _ctx(s, tmp_path, calendar_service=_OneEventCal(),
+               normal_handlers={"calendar": lambda it: None})       # 404: no write
+    assert ctx.handle({"source": "reflow:calendar", "ref_id": "E", "attempts": 0}) is None
+    assert len(s.owner_chunks(["cal-E"])) == 3
 
 
 # -- final review I5: every terminal outcome is recorded per owner -------------

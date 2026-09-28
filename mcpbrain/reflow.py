@@ -170,6 +170,22 @@ def _overlaps(intervals: list[tuple[int, int]], offs: list[tuple[int, int]],
     return out
 
 
+def _holder(text: str, n_text: str, n_offs: list[tuple[int, int]],
+            n_starts: list[int]) -> int | None:
+    """Index of the new chunk holding most of `text` inside the stitched new
+    text (word-boundary match, first occurrence), or None when `text` is empty
+    or not there."""
+    if not text:
+        return None
+    at = _find_word(n_text, text, 0)
+    if at < 0:
+        return None
+    hits = _overlaps([(at, at + len(text))], n_offs, n_starts)
+    if not hits:
+        return None
+    return max(hits, key=lambda j: (hits[j], -j))
+
+
 def _majority(overlapped: list[tuple[int, int]], old: list[dict], key: str):
     """Overlap-weighted majority of old[i][key]; ties go to the value of the
     old chunk with the largest overlap (``overlapped`` is sorted that way)."""
@@ -185,7 +201,8 @@ def _majority(overlapped: list[tuple[int, int]], old: list[dict], key: str):
 def _plan_lineage(key: str, old: list[dict], new: list[Chunk], plan_: ReflowPlan) -> None:
     old = sorted(old, key=lambda r: int((r["metadata"] or {}).get("chunk_index", 0)))
     o, offs = stitch([r["text"] for r in old])
-    n_text, _ = stitch([c.text for c in new])
+    n_text, n_offs = stitch([c.text for c in new])
+    n_starts = [a for a, _b in n_offs]
     starts = [s for s, _e in offs]
     # per old chunk: {new index: overlap chars}
     old_hits: list[dict[int, int]] = [{} for _ in old]
@@ -219,6 +236,13 @@ def _plan_lineage(key: str, old: list[dict], new: list[Chunk], plan_: ReflowPlan
             def contains_start(j):
                 return any(a <= s < b for jj, iv in placed if jj == j for a, b in iv)
             j = max(hits, key=lambda j: (hits[j], contains_start(j), -j))
+            target, reason = new[j].doc_id, "exact"
+        elif (j := _holder(norm(r["text"]), n_text, n_offs, n_starts)) is not None:
+            # No new chunk was placed on this old chunk's region -- its text is
+            # a DUPLICATE of text another old chunk holds (a legacy positional
+            # tail, a pre-split row kept beside its split), so the new chunks
+            # were placed on the other copy. Its text still exists: map it to
+            # the new chunk holding it, not to whatever is positionally near.
             target, reason = new[j].doc_id, "exact"
         elif placed:
             def dist(item):
