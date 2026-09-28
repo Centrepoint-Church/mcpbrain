@@ -4,6 +4,8 @@
   python bin/reflow_dryrun.py --store <copy.sqlite3>                    # plan only
   python bin/reflow_dryrun.py --store <copy.sqlite3> --limit 200 --per-mime \\
       --out <summary.json> --yes
+  python bin/reflow_dryrun.py --store <copy.sqlite3> --source reflow:gmail \\
+      --source reflow:calendar --yes   # restrict to given reflow sources
 
 Runs the real reflow handler (ReflowContext.handle) over up to --limit
 reflow_candidates of the COPY, with the real Google services and embedder
@@ -132,10 +134,18 @@ def _select(store, limit: int, sources, per_mime: bool) -> list[tuple[str, str, 
     if not per_mime:
         return [(s, o, _classify(store, s, o))
                 for s, o in store.reflow_candidates(limit, sources=sources)]
-    pool = store.reflow_candidates(min(max(limit * 10, limit), 20000), sources=sources)
+    # store.reflow_candidates evaluates its rules IN ORDER and returns as soon
+    # as its own `limit` is filled (see its docstring/rule loop) -- rule 1 is
+    # always Drive. A single combined call across every source can therefore
+    # fill the whole pool from Drive alone and never even run the Gmail/
+    # calendar/anarlog rules, no matter how large the pool multiplier is.
+    # Query each source SEPARATELY, each with its own pool budget, so every
+    # source gets a chance to contribute before round-robin trims to `limit`.
+    pool_limit = min(max(limit * 10, limit), 20000)
     by: dict[str, list] = {}
-    for s, o in pool:
-        by.setdefault(_classify(store, s, o), []).append((s, o))
+    for src in sorted(sources or ()):
+        for s, o in store.reflow_candidates(pool_limit, sources=[src]):
+            by.setdefault(_classify(store, s, o), []).append((s, o))
     out: list[tuple[str, str, str]] = []
     while len(out) < limit and any(by.values()):
         for cls in sorted(by):
@@ -184,7 +194,8 @@ def _dist(xs: list[float]) -> dict:
 
 # -- the run --------------------------------------------------------------------
 
-def run(store, *, home, services: dict, embedder, limit: int, per_mime: bool) -> dict:
+def run(store, *, home, services: dict, embedder, limit: int, per_mime: bool,
+        sources_filter=None) -> dict:
     from mcpbrain.reflow import REFLOW_SOURCE_SERVICES, workable_reflow_sources
     from mcpbrain.store import ReflowOrphanError
     from mcpbrain.sync import queue
@@ -194,6 +205,8 @@ def run(store, *, home, services: dict, embedder, limit: int, per_mime: bool) ->
     workable = workable_reflow_sources(home, services)
     now = {s for s, k in REFLOW_SOURCE_SERVICES.items() if services.get(k) is not None}
     sources = (now | {"reflow:anarlog"}) & workable
+    if sources_filter:
+        sources &= set(sources_filter)
     orphans_before = _orphan_refs(store)
     publishes_before = _pending_publish_rows(store)
 
@@ -347,6 +360,9 @@ def main(argv=None) -> int:
     ap.add_argument("--limit", type=int, default=200)
     ap.add_argument("--per-mime", action="store_true",
                     help="sample round-robin across MIME/source classes")
+    ap.add_argument("--source", action="append", dest="sources", default=None,
+                    help="restrict to this reflow source, e.g. reflow:gmail "
+                         "(repeatable; default: every workable source)")
     ap.add_argument("--out", help="write the JSON summary here")
     ap.add_argument("--strict-orphans", action="store_true",
                     help="fail on ANY orphan reference, not only new ones")
@@ -379,7 +395,7 @@ def main(argv=None) -> int:
     store.init()                    # the copy gets exactly the migrations a release runs
     home = str(config.app_dir())
     summary = run(store, home=home, services=_build_services() or {}, embedder=embedder,
-                  limit=ns.limit, per_mime=ns.per_mime)
+                  limit=ns.limit, per_mime=ns.per_mime, sources_filter=ns.sources)
     summary["store"] = str(path)
     problems = verdict(summary, strict_orphans=ns.strict_orphans)
     summary["problems"] = problems

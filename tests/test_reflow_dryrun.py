@@ -183,6 +183,63 @@ def test_a_new_orphan_is_caught_even_when_an_old_one_is_resolved(tmp_path, home,
     assert summary["orphans_new_values"] == {"recall_feedback.doc_id": ["gdrive-GONE-9"]}
 
 
+# -- per-mime source representation ------------------------------------------
+
+def test_per_mime_represents_every_source_even_when_drive_alone_exceeds_the_limit(
+        tmp_path, home):
+    """store.reflow_candidates' rules are order-dependent and it returns as
+    soon as its OWN limit is reached -- so a single combined call whose pool
+    is filled entirely by Drive (rule 1) never reaches the Gmail rule at all.
+    --per-mime must query each source separately so Gmail still gets a
+    chance even when Drive alone dwarfs the pool."""
+    path = tmp_path / "copy.sqlite3"
+    s = Store(path, dim=4)
+    s.init()
+    # 60 distinct Drive owners: enough alone to fill reflow_candidates' pool
+    # LIMIT (50, for --limit 5) before the query ever reaches the gmail rule.
+    for i in range(60):
+        s.upsert_chunk(f"gdrive-F{i}-0", f"Drive doc {i}", f"h{i}",
+                       {"source_type": "gdrive", "file_id": f"F{i}", "mime_type": PDF,
+                        "modified": M, "chunk_index": 0, DRIVE_ID_META_KEY: "D1"})
+    for i, t in enumerate(("Hi", "There")):
+        s.upsert_chunk(f"gmail-G-{i}", t, f"gh{i}",
+                       {"source_type": "gmail", "message_id": "G",
+                        "chunk_index": i, "chunk_total": 2})
+    with s._connect(write=True) as db:
+        db.execute("UPDATE chunks SET enriched=1")
+    sources = {"reflow:drive", "reflow:gmail"}
+    picked = dryrun._select(s, 5, sources, per_mime=True)
+    assert len(picked) == 5
+    classes = {cls for _, _, cls in picked}
+    assert "gmail" in classes
+    assert any(c.startswith("drive:") for c in classes)
+
+
+def test_source_filter_restricts_to_the_given_reflow_sources(tmp_path, home, monkeypatch):
+    path = _copy(tmp_path)
+    with Store(path, dim=4)._connect(write=True) as db:
+        db.execute("INSERT INTO chunks(doc_id, text, content_hash, metadata, enriched) "
+                   "VALUES('gmail-G-0','Hi','gh0',"
+                   "'{\"source_type\":\"gmail\",\"message_id\":\"G\",\"chunk_index\":0,"
+                   "\"chunk_total\":2}',1)")
+        db.execute("INSERT INTO chunks(doc_id, text, content_hash, metadata, enriched) "
+                   "VALUES('gmail-G-1','There','gh1',"
+                   "'{\"source_type\":\"gmail\",\"message_id\":\"G\",\"chunk_index\":1,"
+                   "\"chunk_total\":2}',1)")
+    _fakes(monkeypatch)
+    # workable_reflow_sources only counts gmail as workable when a
+    # gmail_service is present -- give it one so --source reflow:gmail has
+    # something to restrict TO, not an already-empty set.
+    monkeypatch.setattr(dryrun, "_build_services",
+                         lambda: {"drive_service": _DriveSvc(), "gmail_service": object()})
+    out = tmp_path / "summary.json"
+    assert dryrun.main(["--store", str(path), "--source", "reflow:gmail",
+                        "--out", str(out), "--yes"]) == 0
+    summary = json.loads(out.read_text())
+    assert summary["sources_seeded"] == ["reflow:gmail"]
+    assert set(summary["by_class"]) <= {"gmail"}
+
+
 def test_pre_existing_pending_publishes_are_not_counted_as_recorded(tmp_path, home, monkeypatch):
     path = _copy(tmp_path)
     Store(path, dim=4).record_pending_publish("D1", "OTHER", "h")
