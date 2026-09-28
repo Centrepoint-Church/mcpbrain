@@ -75,3 +75,18 @@ def test_old_pptx_text_covers_every_new_slide_chunk():
     p = reflow.plan(old, new)
     assert all(r.covered and r.enriched for r in p.rows)
     assert new[0].text.startswith("Slide 1: Topic 0")
+
+
+def test_slide_without_a_title_gets_a_label_only_heading():
+    from mcpbrain.sync.blocks import render
+    prs = Presentation()
+    s = prs.slides.add_slide(prs.slide_layouts[6])          # blank: no title placeholder
+    s.shapes.add_textbox(Inches(1), Inches(1), Inches(3), Inches(1)).text_frame.text = \
+        "Untitled body"
+    buf = io.BytesIO()
+    prs.save(buf)
+    blocks = extract_blocks_from_pptx(buf.getvalue())
+    assert blocks == [Heading(2, "", label="Slide 1"), Paragraph("Untitled body")]
+    (r,) = render(blocks)
+    assert r.text == "Slide 1\n\nUntitled body"
+    assert r.spans == ["Untitled body"]                     # the label is never a span

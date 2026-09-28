@@ -46,3 +46,44 @@ def test_empty_cells_kept_and_merged_cells_once():
 
 def test_garbage_input_returns_empty_list():
     assert extract_blocks_from_docx(b"nope") == []
+
+
+def _docx_with_text_box_and_vmerge() -> bytes:
+    from docx.oxml import parse_xml
+    from docx.oxml.ns import nsdecls
+    doc = Document()
+    t = doc.add_table(rows=3, cols=2)
+    t.cell(0, 0).merge(t.cell(1, 0)).text = "Campus North"
+    t.cell(0, 1).text, t.cell(1, 1).text = "Sunday", "Wednesday"
+    t.cell(2, 0).text, t.cell(2, 1).text = "South", "Friday"
+    p = doc.add_paragraph("Anchor paragraph.")
+    p._p.append(parse_xml(
+        '<w:r %s><w:drawing><wp:inline xmlns:wp="http://schemas.openxmlformats.org/'
+        'drawingml/2006/wordprocessingDrawing"><a:graphic xmlns:a="http://schemas.'
+        'openxmlformats.org/drawingml/2006/main"><a:graphicData uri="x"><wps:wsp '
+        'xmlns:wps="http://schemas.microsoft.com/office/word/2010/wordprocessingShape">'
+        '<wps:txbx><w:txbxContent><w:p><w:r><w:t>Box line one</w:t></w:r></w:p>'
+        '<w:p><w:r><w:t>Box line two</w:t></w:r></w:p></w:txbxContent></wps:txbx>'
+        '</wps:wsp></a:graphicData></a:graphic></wp:inline></w:drawing></w:r>'
+        % nsdecls("w")))
+    doc.add_paragraph("After the box.")
+    buf = io.BytesIO()
+    doc.save(buf)
+    return buf.getvalue()
+
+
+def test_text_box_follows_its_anchor_paragraph():
+    blocks = extract_blocks_from_docx(_docx_with_text_box_and_vmerge())
+    i = blocks.index(Paragraph("Anchor paragraph."))
+    assert blocks[i + 1] == Paragraph("Box line one\nBox line two")
+    assert blocks[i + 2] == Paragraph("After the box.")
+
+
+def test_vertically_merged_cell_repeats_per_row():
+    """Pins extraction_version 1: python-docx resolves each row's vertical-merge
+    continuation to the origin cell, so its text repeats on every row it spans
+    (horizontal merges are de-duplicated within a row). Changing this changes chunk text."""
+    t = next(b for b in extract_blocks_from_docx(_docx_with_text_box_and_vmerge())
+             if isinstance(b, TableBlock))
+    assert t.rows == [["Campus North", "Sunday"], ["Campus North", "Wednesday"],
+                      ["South", "Friday"]]
