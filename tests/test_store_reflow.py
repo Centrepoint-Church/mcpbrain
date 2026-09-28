@@ -288,10 +288,10 @@ def test_org_provenance_falls_back_to_reflow_target(tmp_path):
     from mcpbrain.org_contrib import _chunk_provenance
     s = _store(tmp_path)
     _seed(s)
-    assert _chunk_provenance(s, "gdrive-F-1") == (True, "unknown")   # source_type gdrive
+    assert _chunk_provenance(s, "gdrive-F-1") == (True, "drive")   # source_type gdrive
     p = plan(s.owner_chunks(["gdrive-F-"]), _new("F", ["alpha beta gamma\ndelta epsilon"]))
     s.apply_reflow("F", "drive", p, [V])
-    assert _chunk_provenance(s, "gdrive-F-1") == (True, "unknown")
+    assert _chunk_provenance(s, "gdrive-F-1") == (True, "drive")
     assert _chunk_provenance(s, "gdrive-G-1") == (False, "unknown")
 
 
