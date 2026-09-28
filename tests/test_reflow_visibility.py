@@ -477,3 +477,24 @@ def test_bin_reflow_labels_only_a_missing_table_as_never_initialized():
         sqlite3.OperationalError("no such table: reflow_owners"), "db")
     locked = mod._describe_store_error(sqlite3.OperationalError("database is locked"), "db")
     assert "never been initialized" not in locked and "database is locked" in locked
+
+
+def test_stored_dim_reads_the_store_not_the_embedder(tmp_path):
+    s = _store(tmp_path)
+    assert Store.stored_dim(s.path) == 4
+    assert Store.stored_dim(tmp_path / "missing.sqlite3") is None
+
+
+def test_bin_reflow_status_does_not_load_the_embedder_for_dim(tmp_path, monkeypatch, capsys):
+    """The CLI only needs the store's dimension to construct a Store; loading
+    the embedding model for it made `status` slow and needed the model cache."""
+    s = Store(tmp_path / "brain.sqlite3", dim=4)
+    s.init()
+    monkeypatch.setenv("MCPBRAIN_HOME", str(tmp_path))
+    mod = _load_bin_reflow()
+
+    def no_model(*a, **k):
+        raise AssertionError("embedder loaded")
+    monkeypatch.setattr(mod, "get_embedder", no_model)
+    assert mod.main(["status"]) == 0
+    assert "queued" in capsys.readouterr().out

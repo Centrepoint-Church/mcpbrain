@@ -49,10 +49,11 @@ def main(argv=None) -> int:
         print(f"no store at {db_path}", file=sys.stderr)
         return 2
 
-    # Dim comes from the embedder, exactly as bin/repair.py/bin/consolidate.py
-    # do it -- there is no config.embed_dim; the org pin's `dim` is a
+    # The store's own recorded dimension (meta 'dim', read-only); only a store
+    # that never recorded one falls back to the embedder, as bin/repair.py
+    # does -- there is no config.embed_dim, and the org pin's `dim` is a
     # fleet-baseline field, not this install's live dimension.
-    dim = get_embedder("bge-small").dim
+    dim = Store.stored_dim(db_path) or get_embedder("bge-small").dim
     store = Store(db_path, dim=dim, read_only=(ns.cmd == "status"))
     try:
         halted = store.get_cursor("reflow:halted") or ""

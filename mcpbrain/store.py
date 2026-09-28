@@ -2,7 +2,7 @@ import hashlib
 import json
 import re
 import sqlite3
-from contextlib import contextmanager
+from contextlib import closing, contextmanager
 from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
 from typing import Iterator
@@ -755,6 +755,22 @@ class Store:
     # Phase C: bump when the FTS contextual-text format changes so
     # reindex_fts_batch() knows which embedded chunks are stale.
     FTS_CONTEXT_VERSION = 1
+
+    @staticmethod
+    def stored_dim(path) -> int | None:
+        """The embedding dimension this store was initialised with (the
+        `meta` row init() writes), read-only; None when the file or the row is
+        absent. Lets an attended CLI open an existing store without loading
+        the embedding model just to learn its dimension."""
+        p = Path(path)
+        if not p.exists():
+            return None
+        try:
+            with closing(_open_db(p, read_only=True)) as db:
+                row = db.execute("SELECT v FROM meta WHERE k='dim'").fetchone()
+            return int(row[0]) if row else None
+        except (sqlite3.Error, TypeError, ValueError):
+            return None
 
     def __init__(self, path: Path, dim: int, read_only: bool = False):
         self.path = Path(path)
