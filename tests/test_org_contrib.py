@@ -391,3 +391,42 @@ def test_real_person_name_and_org_name_still_contribute(tmp_path):
     s = _store(tmp_path)
     # default delta: person "Marcus Reyes" + org "Acme" — both must survive.
     assert org_contrib.collect_from_drain(s, _delta(), _pin(), "alice@x.org") == 3
+
+
+def test_reflow_remap_does_not_change_a_relations_source_ref(tmp_path):
+    """Final-review investigation: a reflow remaps source_doc_id in place; a
+    re-observed relation (last_seen bumped, source_doc_id kept) is re-collected,
+    and a source_ref derived from the NEW id reads as a second independent
+    source to the curator -- corroborating a single-source claim. The first
+    pre-remap id is kept for contribution."""
+    from mcpbrain.reflow import plan
+    from mcpbrain.sync.normalise import Chunk
+    s = _store(tmp_path)
+    for i, t in enumerate(("alpha beta", "gamma delta")):
+        s.upsert_chunk(f"gmail-M-body-{i}", t, f"h{i}",
+                       {"source_type": "gmail", "message_id": "M", "chunk_index": i,
+                        "chunk_total": 2})
+    with s._connect(write=True) as db:
+        db.execute("UPDATE chunks SET enriched=1")
+        db.execute("INSERT INTO entities(id, name, type, email_addr) "
+                   "VALUES('dana','Dana Okafor','person','dana@northgate.org')")
+        db.execute("INSERT INTO entities(id, name, type) VALUES('ngt','Northgate Trust','org')")
+        db.execute("INSERT INTO entity_relations(entity_a, relation, entity_b, source_doc_id,"
+                   " valid_from, last_seen) VALUES('dana','works_at','ngt','gmail-M-body-1',"
+                   " '2026-01-01', '2026-01-01T00:00:00')")
+    delta, _wm = org_contrib._delta_since_watermark(s)
+    org_contrib.collect_from_drain(s, delta, _pin(), "alice@x.org")
+    first = {r["source_ref"] for r in _outbox(s)}
+    assert first == {source_ref("s3cret", "gmail-M-body-1")}
+
+    new = [Chunk("gmail-M-body-0", "alpha beta\ngamma delta", "n",
+                 {"source_type": "gmail", "message_id": "M", "chunk_index": 0,
+                  "chunk_total": 1}, ["alpha beta", "gamma delta"])]
+    s.apply_reflow("M", "gmail", plan(s.owner_chunks(["gmail-M-"]), new), [[0.1] * 4])
+    with s._connect(write=True) as db:
+        assert db.execute("SELECT source_doc_id FROM entity_relations").fetchone()[0] \
+            == "gmail-M-body-0"
+        db.execute("DELETE FROM org_contrib_outbox")
+    delta, _wm = org_contrib._delta_since_watermark(s)
+    org_contrib.collect_from_drain(s, delta, _pin(), "alice@x.org")
+    assert {r["source_ref"] for r in _outbox(s)} == first

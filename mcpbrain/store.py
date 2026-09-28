@@ -1146,6 +1146,12 @@ class Store:
                               db.execute("PRAGMA table_info(entity_relations)").fetchall()}
             if "origin" not in er_origin_cols:
                 db.execute("ALTER TABLE entity_relations ADD COLUMN origin TEXT DEFAULT 'local'")
+            # The source_doc_id a relation had BEFORE its first reflow remap
+            # (NULL = never remapped). org_contrib derives source_ref from it:
+            # a remapped id would otherwise read as a second independent
+            # source to the curator and corroborate a single-source claim.
+            if "contrib_doc_id" not in er_origin_cols:
+                db.execute("ALTER TABLE entity_relations ADD COLUMN contrib_doc_id TEXT")
             db.execute("CREATE INDEX IF NOT EXISTS idx_ent_origin ON entities(origin)")
             db.execute("CREATE INDEX IF NOT EXISTS idx_er_origin ON entity_relations(origin)")
 
@@ -3560,6 +3566,14 @@ class Store:
             db.execute("DELETE FROM reflow_tmp")
             db.executemany("INSERT INTO reflow_tmp(old, new) VALUES(?,?)",
                            list(plan.remap.items()))
+            if "entity_relations" in tables:
+                # Keep the pre-remap id for org contribution (first remap wins).
+                db.execute(
+                    "UPDATE entity_relations SET contrib_doc_id=source_doc_id "
+                    "WHERE contrib_doc_id IS NULL "
+                    "AND source_doc_id IN (SELECT old FROM reflow_tmp) "
+                    "AND source_doc_id != (SELECT new FROM reflow_tmp "
+                    "WHERE old=entity_relations.source_doc_id)")
             remapped = 0
             for table, col in _REFLOW_REF_COLUMNS:
                 if table not in tables:

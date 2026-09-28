@@ -198,7 +198,10 @@ def collect_from_drain(store, drain_delta, pin: FleetPin, contributor_email: str
         claim_b = _safe_entity_claim(b)
         if claim_a is None or claim_b is None:
             continue
-        sref = source_ref(pin.fleet_secret, doc_id)
+        # A reflow remaps source_doc_id in place; contrib_doc_id keeps the id
+        # this relation was first contributed under, so a re-observation
+        # after the remap is the SAME source to the curator, not a second one.
+        sref = source_ref(pin.fleet_secret, rel.get("contrib_doc_id") or doc_id)
         # skind already computed by _chunk_provenance above — no second lookup.
         vfrom = rel.get("valid_from") or ""
         raw_conf = rel.get("confidence")
@@ -281,7 +284,7 @@ def _delta_since_watermark(store) -> tuple[dict, dict]:
     with store._connect() as db:
         rel_rows = db.execute(
             "SELECT id, entity_a, relation, entity_b, valid_from, valid_to, "
-            "       confidence, origin, source_doc_id "
+            "       confidence, origin, source_doc_id, contrib_doc_id "
             "FROM entity_relations "
             "WHERE id > ? "
             "   OR (invalidated_at IS NOT NULL AND invalidated_at >= ?) "
