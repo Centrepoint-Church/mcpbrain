@@ -234,18 +234,35 @@ class ReflowContext:
         """The ordinary Gmail/Calendar handlers only UPSERT, so a changed
         source that now yields fewer chunks leaves its old positional tail
         (e.g. body-1, body-2 at the old split_version), which the selector
-        re-queues forever. Delete old ids missing from the new set -- only
-        within lineages the new extraction produced, so an attachment whose
-        re-fetch failed is never deleted by this -- invalidating their local
-        relations first, as the ordinary change path does. (anarlog's handler
-        already sweeps its own stale ids; Drive's upsert_file_chunks does.)"""
+        re-queues forever. Delete a lineage's old ids missing from the new set
+        -- invalidating their local relations first, as the ordinary change
+        path does -- but ONLY for a lineage the ordinary handler demonstrably
+        wrote: every new id of it is now in the store with the new chunk's
+        content_hash AND metadata. The handler does its own fetch, which can
+        differ from this reflow's (attachments setting off, a swallowed
+        transient attachment failure, a message changed or gone in between);
+        any lineage it did not write is left exactly as it was. (anarlog's
+        handler sweeps its own stale ids; Drive's upsert_file_chunks does.)"""
         if kind not in ("gmail", "calendar"):
             return
+        by_key: dict[str, list] = {}
+        for c in new:
+            by_key.setdefault(reflow.lineage_key(c.doc_id, c.metadata or {}), []).append(c)
+        written = set()
+        for key, chunks in by_key.items():
+            ok = True
+            for c in chunks:
+                row = self.store.get_chunk(c.doc_id)
+                if (row is None or row["content_hash"] != c.content_hash
+                        or (row["metadata"] or {}) != (c.metadata or {})):
+                    ok = False
+                    break
+            if ok:
+                written.add(key)
         new_ids = {c.doc_id for c in new}
-        new_keys = {reflow.lineage_key(c.doc_id, c.metadata or {}) for c in new}
         stale = [r["doc_id"] for r in old
                  if r["doc_id"] not in new_ids
-                 and reflow.lineage_key(r["doc_id"], r["metadata"] or {}) in new_keys]
+                 and reflow.lineage_key(r["doc_id"], r["metadata"] or {}) in written]
         if not stale:
             return
         with self.bulk_section():

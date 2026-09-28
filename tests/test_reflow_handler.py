@@ -655,3 +655,114 @@ def test_run_sync_cycle_registers_reflow_and_kill_switch_defers(tmp_path, monkey
     row = s.due_sync_items(limit=5, now="2099-01-01T00:00:00")[0]
     assert row["attempts"] == 0                            # deferred, not failed
     assert out["worked"]["failed"] == 0
+
+
+# ---- round 2: the sweep only removes what the ordinary handler rewrote ------
+
+def _raw_message(body_text):
+    import base64
+    data = base64.urlsafe_b64encode(body_text.encode()).decode()
+    return {"id": "M", "threadId": "T", "labelIds": [],
+            "payload": {"mimeType": "multipart/mixed",
+                        "headers": [{"name": "Subject", "value": "Invoice"}],
+                        "parts": [
+                            {"mimeType": "text/plain", "filename": "", "body": {"data": data}},
+                            {"mimeType": PDF, "filename": "i.pdf",
+                             "body": {"attachmentId": "A0", "size": 10}}]}}
+
+
+class _GmailSvc:
+    def __init__(self, raw):
+        self.raw = raw
+    def users(self):
+        return self
+    def messages(self):
+        return self
+    def get(self, **k):
+        raw = self.raw
+        class R:
+            def execute(self, num_retries=0):
+                return raw
+        return R()
+
+
+def _seed_changed_message_with_attachment(s):
+    """3 old body chunks + a 2-chunk PDF attachment, all enriched; the body has
+    since changed (so the reflow routes to the ordinary handler)."""
+    md = {"source_type": "gmail", "message_id": "M", "content_type": "email_body"}
+    for i in range(3):
+        s.upsert_chunk(f"gmail-M-body-{i}", f"old words part {i}", f"b{i}",
+                       {**md, "chunk_index": i, "chunk_total": 3})
+    amd = {"source_type": "gmail", "message_id": "M", "attachment_mime": PDF,
+           "content_type": "email_attachment"}
+    for i in range(2):
+        s.upsert_chunk(f"gmail-M-att-0-{i}", f"Invoice line {i}", f"a{i}",
+                       {**amd, "chunk_index": i, "chunk_total": 2})
+    _enrich(s, *[f"gmail-M-body-{i}" for i in range(3)], "gmail-M-att-0-0", "gmail-M-att-0-1")
+
+
+def _run_ordinary_reflow(s, tmp_path, monkeypatch, *, handler_fetches_attachments):
+    from mcpbrain.sync import gmail
+    raw = _raw_message("A new body for the invoice email")
+    svc = _GmailSvc(raw)
+    # The reflow's OWN fetch sees the attachment (re-extracted as one chunk).
+    new_att = Chunk("gmail-M-att-0-0", "Invoice\n\nline 0 line 1 total", "a-new",
+                    {"source_type": "gmail", "message_id": "M", "attachment_mime": PDF,
+                     "content_type": "email_attachment", "extraction_version": 1,
+                     "chunk_index": 0, "chunk_total": 1}, ["Invoice", "line 0 line 1 total"])
+    monkeypatch.setattr(gmail, "_fetch_one", lambda *a, **k: (raw, [new_att]))
+    invalidated = []
+    real_inv = s.invalidate_local_relations_for_docs
+    monkeypatch.setattr(s, "invalidate_local_relations_for_docs",
+                        lambda ids, **k: invalidated.append(sorted(ids)) or real_inv(ids, **k))
+    ctx = _ctx(s, tmp_path, gmail_service=svc, normal_handlers={
+        "gmail": lambda it: gmail.handle_gmail_item(
+            svc, s, it, fetch_attachments=handler_fetches_attachments)})
+    assert ctx.handle({"source": "reflow:gmail", "ref_id": "M", "attempts": 0}) is None
+    return invalidated
+
+
+def test_attachments_setting_off_never_sweeps_attachment_chunks(tmp_path, monkeypatch):
+    """(a) The cycle's gmail handler runs with the user's attachments setting
+    (off), so it writes no attachment chunks even though the reflow's own fetch
+    included one. The attachment lineage was not rewritten: keep all of it."""
+    s = _store(tmp_path); _seed_changed_message_with_attachment(s)
+    invalidated = _run_ordinary_reflow(s, tmp_path, monkeypatch,
+                                       handler_fetches_attachments=False)
+    ids = sorted(r["doc_id"] for r in s.owner_chunks(["gmail-M-"]))
+    assert ids == ["gmail-M-att-0-0", "gmail-M-att-0-1", "gmail-M-body-0"]
+    assert s.get_chunk("gmail-M-att-0-0")["content_hash"] == "a0"      # untouched
+    assert invalidated == [["gmail-M-body-1", "gmail-M-body-2"]]
+
+
+def test_handler_side_attachment_failure_keeps_the_attachment(tmp_path, monkeypatch):
+    """(b) The handler fetches attachments but its fetch is swallowed-failed
+    (fetch_and_normalise drops it): again the attachment lineage is kept."""
+    from mcpbrain.sync import attachments
+    s = _store(tmp_path); _seed_changed_message_with_attachment(s)
+    monkeypatch.setattr(attachments, "fetch_and_normalise", lambda *a, **k: [])
+    invalidated = _run_ordinary_reflow(s, tmp_path, monkeypatch,
+                                       handler_fetches_attachments=True)
+    ids = sorted(r["doc_id"] for r in s.owner_chunks(["gmail-M-"]))
+    assert ids == ["gmail-M-att-0-0", "gmail-M-att-0-1", "gmail-M-body-0"]
+    assert all("att" not in d for batch in invalidated for d in batch)
+
+
+def test_handler_that_wrote_nothing_sweeps_nothing(tmp_path, monkeypatch):
+    """A message gone (or changed again) by the time the ordinary handler
+    re-fetches: nothing it wrote matches the reflow's chunks, so nothing goes."""
+    from mcpbrain.sync import gmail
+    import mcpbrain.sync.normalise as nm
+    s = _store(tmp_path)
+    md = {"source_type": "gmail", "message_id": "M", "content_type": "email_body"}
+    for i in range(3):
+        s.upsert_chunk(f"gmail-M-body-{i}", f"old words part {i}", f"b{i}",
+                       {**md, "chunk_index": i, "chunk_total": 3})
+    new = Chunk("gmail-M-body-0", "a different body now", "n",
+                {**md, "split_version": 1, "chunk_index": 0, "chunk_total": 1})
+    monkeypatch.setattr(gmail, "_fetch_one", lambda *a, **k: ({"id": "M"}, []))
+    monkeypatch.setattr(nm, "normalise_gmail", lambda raw, **k: [new])
+    monkeypatch.setattr(gmail, "handle_gmail_item", lambda *a, **k: None)   # 404: no write
+    _ctx(s, tmp_path, gmail_service=object()).handle(
+        {"source": "reflow:gmail", "ref_id": "M", "attempts": 0})
+    assert len(s.owner_chunks(["gmail-M-"])) == 3

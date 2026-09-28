@@ -14,10 +14,10 @@ from datetime import datetime, timezone
 
 log = logging.getLogger("mcpbrain.sync.queue")
 
-# Handler return value: leave the row exactly as it is (neither completed nor
-# failed: attempts, backoff and last_error untouched) and try again next cycle.
-# Used by the reflow handler's per-cycle cap, its halt flag and its enrich-unit
-# guard. A deferred item counts as neither processed nor failed.
+# Handler return value: work_queue neither completes nor fails the row (attempts
+# and last_error untouched); a handler wanting a delay moves next_attempt_at
+# itself first (the reflow handler does, via Store.defer_sync_item, except for
+# its per-cycle cap). A deferred item counts as neither processed nor failed.
 DEFER = object()
 
 
@@ -31,7 +31,7 @@ def work_queue(store, *, handlers: dict, limit: int, budget=None,
 
     A handler that returns is a success (its row is deleted); one that raises
     is a failure (attempts+1, backoff, row retained); one that returns DEFER
-    leaves its row exactly as it was. Nothing is ever dropped.
+    is neither (work_queue does not touch its row). Nothing is ever dropped.
     """
     now = now or _utc_now_iso()
     processed = failed = 0
