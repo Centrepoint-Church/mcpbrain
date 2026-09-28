@@ -47,7 +47,7 @@ def _version_int(value) -> int:
     return int(m.group()) if m else 0
 
 
-def effective_chunker_version(pin) -> str:
+def effective_chunker_version(pin, mime: str = "") -> str:
     """The chunker version THIS install keys its cache artifacts on.
 
     The org pin's value, unless it LAGS the local code constant — then the local
@@ -69,20 +69,29 @@ def effective_chunker_version(pin) -> str:
     Every install on the same code version computes the same value, so cache
     artifacts stay shareable — installs on older code simply keep using their
     own, differently-fingerprinted path, and the two coexist without churn.
+
+    `mime` appends the file type's extraction_version so an extractor change
+    invalidates only that type's artifacts, never spreadsheets. Empty/unknown
+    mimes (extraction_version 0, e.g. spreadsheets or no mime known) leave the
+    base version untouched, so every existing caller that doesn't pass `mime`
+    keeps today's exact fingerprint.
     """
-    return (str(pin.chunker_version)
+    base = (str(pin.chunker_version)
             if _version_int(pin.chunker_version) >= CHUNKER_VERSION
             else str(CHUNKER_VERSION))
+    from mcpbrain.sync.blocks import extraction_version
+    xv = extraction_version(mime)
+    return f"{base}+x{xv}" if xv else base
 
 
-def _pf8(pin) -> str:
+def _pf8(pin, mime: str = "") -> str:
     return pipeline_fingerprint(
-        pin.embed_model, pin.dim, effective_chunker_version(pin))[:8]
+        pin.embed_model, pin.dim, effective_chunker_version(pin, mime))[:8]
 
 
-def _artifact_path(file_id: str, content_hash: str, pin) -> str:
+def _artifact_path(file_id: str, content_hash: str, pin, mime: str = "") -> str:
     return (f"{CACHE_DIR}/"
-            f"{artifact_filename(file_id, content_hash, pin.embed_model, pin.dim, effective_chunker_version(pin))}")
+            f"{artifact_filename(file_id, content_hash, pin.embed_model, pin.dim, effective_chunker_version(pin, mime))}")
 
 
 def _parse_name(name: str):
@@ -111,7 +120,7 @@ def _encode_vec(vector) -> str:
 # -- read path --------------------------------------------------------------
 
 def _import_artifact(store, drive_id: str, art: CacheArtifact, pin,
-                     contextual_retrieval: bool | None = None) -> bool:
+                     contextual_retrieval: bool | None = None, mime: str = "") -> bool:
     """Import a validated artifact's chunks into the store, atomically.
 
     All chunk vectors are decoded/validated UP FRONT, before anything is
@@ -125,9 +134,12 @@ def _import_artifact(store, drive_id: str, art: CacheArtifact, pin,
     treat False as a cache miss (fall back to local extraction).
 
     `contextual_retrieval`, when not None, must match the artifact's stamped
-    enrich["contextual_retrieval"] flag (when present) — see try_import."""
+    enrich["contextual_retrieval"] flag (when present) — see try_import.
+
+    `mime`, when passed, must match the pipeline fingerprint the artifact was
+    published under (see effective_chunker_version)."""
     if (art.embed_model != pin.embed_model or int(art.dim) != int(pin.dim)
-            or art.chunker_version != effective_chunker_version(pin)
+            or art.chunker_version != effective_chunker_version(pin, mime)
             or int(art.dim) != int(store.dim)):
         return False
     try:
@@ -265,7 +277,7 @@ def _load(fleet_storage, path) -> CacheArtifact | None:
 
 
 def try_import(store, fleet_storage, drive_id, file_id, content_hash, pin,
-               *, contextual_retrieval: bool | None = None) -> bool:
+               *, contextual_retrieval: bool | None = None, mime: str = "") -> bool:
     """Cache-first import for one shared-drive file version. Returns True iff the
     artifact was found, validated, and imported; False => caller extracts locally.
 
@@ -274,15 +286,20 @@ def try_import(store, fleet_storage, drive_id, file_id, content_hash, pin,
     `contextual_retrieval`, when passed, must match the artifact's stamped
     contextual-retrieval flag (see publish); a mismatch is treated as a
     pipeline mismatch and falls back to False. Default None = don't check
-    (backward compatible with callers unaware of the flag)."""
+    (backward compatible with callers unaware of the flag).
+
+    `mime`, when passed, selects the +x<N>-suffixed fingerprint for a
+    block-extracted MIME (see effective_chunker_version); default "" preserves
+    today's behaviour for callers unaware of the flag."""
     if not pin.is_pinned:
         return False
-    art = _load(fleet_storage, _artifact_path(file_id, content_hash, pin))
+    art = _load(fleet_storage, _artifact_path(file_id, content_hash, pin, mime))
     if art is None:
         return False
     if art.file_id != file_id or art.content_hash != content_hash:
         return False
-    return _import_artifact(store, drive_id, art, pin, contextual_retrieval=contextual_retrieval)
+    return _import_artifact(store, drive_id, art, pin,
+                            contextual_retrieval=contextual_retrieval, mime=mime)
 
 
 def collect_chunks(store, file_id) -> list[CacheChunk]:
@@ -305,7 +322,7 @@ def collect_chunks(store, file_id) -> list[CacheChunk]:
 
 def publish(store, fleet_storage, drive_id, file_id, content_hash, chunks, pin,
             *, enrich=None, published_by="", contextual_retrieval: bool = False,
-            skip_gc: bool = False) -> None:
+            skip_gc: bool = False, mime: str = "") -> None:
     """Write the gzip-JSON CacheArtifact for `chunks` (a sequence of CacheChunk),
     then best-effort GC older/stale artifacts for this file. No-op when unpinned
     or chunks is empty. Content-hash keying makes concurrent publishers idempotent
@@ -324,7 +341,11 @@ def publish(store, fleet_storage, drive_id, file_id, content_hash, chunks, pin,
     behaviour for every existing caller. Set True when the caller is about to
     (or already has) run `gc_superseded_batch` itself over the whole set of
     files being published this cycle — the per-file listing this call would
-    otherwise do is then pure redundant O(n) work on top of that O(1) batch."""
+    otherwise do is then pure redundant O(n) work on top of that O(1) batch.
+
+    `mime`, when passed, selects the +x<N>-suffixed fingerprint for a
+    block-extracted MIME (see effective_chunker_version); default "" preserves
+    today's fingerprint for callers unaware of the flag."""
     if not pin.is_pinned or not chunks:
         return
     chunks = tuple(chunks)
@@ -334,7 +355,7 @@ def publish(store, fleet_storage, drive_id, file_id, content_hash, chunks, pin,
     art = CacheArtifact(
         file_id=file_id, content_hash=content_hash,
         extraction_method=extraction_method,
-        chunker_version=effective_chunker_version(pin),
+        chunker_version=effective_chunker_version(pin, mime),
         embed_model=pin.embed_model, dim=int(pin.dim), chunks=chunks,
         enrich=enrich_block, published_by=published_by,
         published_at=datetime.now(timezone.utc).isoformat())
@@ -344,7 +365,7 @@ def publish(store, fleet_storage, drive_id, file_id, content_hash, chunks, pin,
     # otherwise emit different bytes for logically-identical content.
     data = gzip.compress(
         json.dumps(art.to_dict(), sort_keys=True, separators=(",", ":")).encode("utf-8"))
-    fleet_storage.put_bytes(_artifact_path(file_id, content_hash, pin), data)
+    fleet_storage.put_bytes(_artifact_path(file_id, content_hash, pin, mime), data)
     if not skip_gc:
         try:
             gc_superseded(fleet_storage, drive_id, file_id, content_hash, pin)
@@ -366,7 +387,12 @@ def publish_file(store, fleet_storage, drive_id, file_id, content_hash, pin,
     re-enrichment. One row per file — chunks share the unit's extraction.
     Falls back to unchanged behaviour (no payload) when nothing qualifies.
 
-    `skip_gc` is forwarded to `publish` — see its docstring."""
+    `skip_gc` is forwarded to `publish` — see its docstring.
+
+    `mime` is derived from the first collected chunk's `metadata["mime_type"]`
+    (all chunks of one file share the same source mime) and forwarded to
+    `publish`, so this file publishes under the MIME-appropriate fingerprint
+    with no caller change required."""
     if not pin.is_pinned:
         return False
     chunks = collect_chunks(store, file_id)
@@ -378,9 +404,10 @@ def publish_file(store, fleet_storage, drive_id, file_id, content_hash, pin,
         if row and int(row["logic_version"]) >= floor:
             enrich = {"logic_version": int(row["logic_version"]),
                       "extraction": json.loads(row["payload"])}
+    mime = (chunks[0].metadata or {}).get("mime_type", "")
     publish(store, fleet_storage, drive_id, file_id, content_hash, chunks, pin,
             enrich=enrich, published_by=published_by,
-            contextual_retrieval=contextual_retrieval, skip_gc=skip_gc)
+            contextual_retrieval=contextual_retrieval, skip_gc=skip_gc, mime=mime)
     return True
 
 
