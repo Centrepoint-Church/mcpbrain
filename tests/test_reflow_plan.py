@@ -243,3 +243,122 @@ def test_notes_on_odd_slides_only_keep_positions():
     assert p.remap["gdrive-F-3"] == "gdrive-F-3"
     assert p.remap == {f"gdrive-F-{i}": f"gdrive-F-{i}" for i in range(4)}
     assert set(p.reasons.values()) == {"exact"}
+
+
+# -- final review C1: remap on the UNION of a new chunk's span intervals -------
+
+def _moved_table_docx():
+    """A DOCX with a mid-document table, chunked the way the OLD extractor did
+    (paragraphs '\n'-joined, every table appended at the END) and the way the
+    new block extractor does (table in place)."""
+    import io
+    import random
+
+    from docx import Document
+
+    from mcpbrain.sync.blocks import render
+    from mcpbrain.sync.extract_office import extract_blocks_from_docx
+    from tests.oracles.chunking_v0 import chunk_text_v0
+    rnd = random.Random(1)
+    words = ("alpha beta gamma delta budget review staff campus report minutes "
+             "action item follow the plan approved").split()
+
+    def sent(n):
+        return " ".join(rnd.choice(words) for _ in range(n)).capitalize() + "."
+    doc = Document()
+    doc.add_heading("Annual Review", 1)
+    for s in range(6):
+        doc.add_heading(f"Section {s}", 2)
+        for _ in range(5):
+            doc.add_paragraph(" ".join(sent(rnd.randint(8, 20)) for _ in range(4)))
+        if s == 2:
+            t = doc.add_table(rows=4, cols=3)
+            for r in range(4):
+                for c in range(3):
+                    t.cell(r, c).text = f"cell{r}{c} {rnd.choice(words)}"
+    bio = io.BytesIO()
+    doc.save(bio)
+    data = bio.getvalue()
+    d2 = Document(io.BytesIO(data))
+    parts = [p.text for p in d2.paragraphs if p.text.strip()]
+    for table in d2.tables:
+        for row in table.rows:
+            cells = [c.text.strip() for c in row.cells if c.text.strip()]
+            if cells:
+                parts.append(" | ".join(cells))
+    old_texts = chunk_text_v0("\n".join(parts))
+    new = [Chunk(f"gdrive-F-{i}", r.text, "h", {"source_type": "gdrive", "file_id": "F",
+                                                   "chunk_index": i}, r.spans)
+           for i, r in enumerate(render(extract_blocks_from_docx(data)))]
+    return [_old(i, t, len(old_texts)) for i, t in enumerate(old_texts)], new
+
+
+def test_moved_table_docx_maps_each_old_id_to_the_chunk_holding_most_of_its_text():
+    import re
+    old, new = _moved_table_docx()
+    p = plan(old, new)
+    new_norm = {c.doc_id: norm(c.text) for c in new}
+    for o in old:
+        # ground truth: which new chunk holds the most of this old chunk's
+        # sentences (random sentences are unique in this fixture)
+        sents = [s for s in re.split(r"(?<=\.)\s+", norm(o["text"])) if len(s) > 30]
+        score = {d: sum(len(s) for s in sents if s in t) for d, t in new_norm.items()}
+        best = max(score.values())
+        assert best > 0
+        winners = {d for d, v in score.items() if v == best}
+        assert p.remap[o["doc_id"]] in winners, (o["doc_id"], p.remap[o["doc_id"]], score)
+    # the reviewer's probe collapsed old 4..7 onto new 3; they must spread out
+    assert len({p.remap[o["doc_id"]] for o in old[4:]}) > 1
+
+
+def test_remap_prefers_largest_union_overlap_over_first_hull():
+    """New chunk 0 holds text from old 0 AND a far-later old 2 (a moved
+    table); its hull swallows old 1, which must still map to new 1 where its
+    text now lives."""
+    old = [_old(0, "aa ab ac ad", 3), _old(1, "ba bb bc bd", 3), _old(2, "ca cb cc cd", 3)]
+    new = [_new(0, "aa ab ac ad\nca cb cc cd", ["aa ab ac ad", "ca cb cc cd"]),
+           _new(1, "ba bb bc bd")]
+    p = plan(old, new)
+    assert p.remap == {"gdrive-F-0": "gdrive-F-0", "gdrive-F-1": "gdrive-F-1",
+                       "gdrive-F-2": "gdrive-F-0"}
+    assert set(p.reasons.values()) == {"exact"}
+    # coverage uses the union too: new 0 overlaps old 0 and old 2, not old 1
+    old[1]["enriched"] = 0
+    p = plan(old, new)
+    assert p.rows[0].covered and p.rows[0].enriched == 1
+    assert p.rows[1].covered and p.rows[1].enriched == 0
+
+
+def test_coincidental_later_span_does_not_advance_the_cursor():
+    """Task 9 triage: a partial chunk whose only located span is a short word
+    that coincidentally occurs far later must not push the forward cursor past
+    repeated text -- the later identical chunks still map in order."""
+    boiler = "Confidential boiler text"
+    old = [_old(0, "Intro words here", 5), _old(1, f"{boiler} one", 5),
+           _old(2, "middle words", 5), _old(3, f"{boiler} one", 5), _old(4, "closing", 5)]
+    new = [_new(0, "Intro words here"),
+           _new(1, "Fresh notes\ncl", ["Fresh notes", "closing"]),   # coincidental hit
+           _new(2, f"{boiler} one"), _new(3, "middle words"),
+           _new(4, f"{boiler} one"), _new(5, "closing")]
+    p = plan(old, new)
+    assert p.remap["gdrive-F-1"] == "gdrive-F-2"
+    assert p.remap["gdrive-F-3"] == "gdrive-F-4"
+    assert p.reasons["gdrive-F-1"] == p.reasons["gdrive-F-3"] == "exact"
+
+
+def test_repeated_header_partial_maps_to_its_body():
+    """Task 9 triage: old chunks each began with a page header the new
+    extractor emits once; the old chunk's start sits on a header copy no new
+    chunk claims, but most of its text is in one new chunk -- map it there,
+    exactly, not to a neighbour by distance."""
+    hdr = "Northgate Trust board pack"
+    old = [_old(0, f"{hdr} alpha one two three", 3),
+           _old(1, f"{hdr} beta four five six seven eight", 3),
+           _old(2, f"{hdr} gamma nine ten eleven twelve", 3)]
+    new = [_new(0, f"{hdr}\nalpha one two three", [hdr, "alpha one two three"]),
+           _new(1, "beta four five six seven eight"),
+           _new(2, "gamma nine ten eleven twelve")]
+    p = plan(old, new)
+    assert p.remap == {"gdrive-F-0": "gdrive-F-0", "gdrive-F-1": "gdrive-F-1",
+                       "gdrive-F-2": "gdrive-F-2"}
+    assert set(p.reasons.values()) == {"exact"}

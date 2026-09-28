@@ -100,35 +100,74 @@ def _find_word(o: str, ns: str, pos: int) -> int:
     return -1
 
 
-def _locate(o: str, spans: list[str], cursor: int) -> tuple[int, int, bool] | None:
-    """(start, end, complete) of a new chunk's source spans inside `o`,
-    searching forward from `cursor` first so repeated text maps monotonically.
+def _locate(o: str, spans: list[str], cursor: int) -> tuple[list[tuple[int, int]], bool, int | None]:
+    """Where a new chunk's source spans sit inside `o`.
 
-    POSITION and COVERAGE are separate answers. (start, end) spans the spans
-    that WERE found -- a new chunk that is an old slide plus its new speaker
-    notes still sits where that slide's text is, and must stay the remap target
-    for the slide's old chunk. `complete` is whether EVERY non-empty span was
-    found; only a complete chunk can be covered. None when no span was found at
-    all (the chunk is entirely new text and has no position in `o`)."""
-    start = end = None
+    Returns (intervals, complete, advance):
+      - intervals: one [start, end) per span that WAS found, merged and
+        sorted. A chunk's position is the UNION of these, never their hull: a
+        chunk holding text from far-apart places in the old text (a table the
+        old extractor appended at the end, now back in place beside its prose)
+        must not claim every old chunk in between.
+      - complete: every non-empty span was found; only a complete chunk can be
+        covered. Position and coverage are separate answers -- a new chunk that
+        is an old slide plus its new speaker notes still sits where the slide's
+        text is and stays the remap target for the slide's old chunk.
+      - advance: where the forward cursor moves to -- the end of the chunk's
+        FIRST non-empty span, when that span was found searching forward from
+        `cursor`; otherwise None (the cursor stays). Advancing on any other
+        span lets a coincidental later match (a short word, a moved table's
+        cell) push the cursor past repeated text, so later identical chunks
+        would map out of order.
+    Each span is searched forward from the previous forward hit first, so
+    repeated text maps monotonically, then from 0 (moved content)."""
+    found: list[tuple[int, int]] = []
     complete = True
+    advance = None
+    first = True
     pos = cursor
     for s in spans:
         ns = norm(s)
         if not ns:
             continue
         at = _find_word(o, ns, pos)
+        forward = at >= 0
         if at < 0:
             at = _find_word(o, ns, 0)
         if at < 0:
             complete = False
+            first = False
             continue
-        start = at if start is None else min(start, at)
-        end = at + len(ns) if end is None else max(end, at + len(ns))
-        pos = at + len(ns)
-    if start is None:
-        return None
-    return start, end, complete
+        if first and forward:
+            advance = at + len(ns)
+        first = False
+        if forward:
+            pos = at + len(ns)
+        found.append((at, at + len(ns)))
+    found.sort()
+    merged: list[tuple[int, int]] = []
+    for a, b in found:
+        if merged and a <= merged[-1][1]:
+            merged[-1] = (merged[-1][0], max(merged[-1][1], b))
+        else:
+            merged.append((a, b))
+    return merged, complete, advance
+
+
+def _overlaps(intervals: list[tuple[int, int]], offs: list[tuple[int, int]],
+              starts: list[int]) -> dict[int, int]:
+    """{old index: characters of that old chunk's contributed span covered by
+    `intervals`} (merged, disjoint intervals; `offs` a partition)."""
+    out: dict[int, int] = {}
+    for a, b in intervals:
+        i = max(bisect_right(starts, a) - 1, 0)
+        while i < len(offs) and offs[i][0] < b:
+            s, e = offs[i]
+            w = min(b, e) - max(a, s)
+            if w > 0:
+                out[i] = out.get(i, 0) + w
+            i += 1
+    return out
 
 
 def _majority(overlapped: list[tuple[int, int]], old: list[dict], key: str):
@@ -147,26 +186,23 @@ def _plan_lineage(key: str, old: list[dict], new: list[Chunk], plan_: ReflowPlan
     old = sorted(old, key=lambda r: int((r["metadata"] or {}).get("chunk_index", 0)))
     o, offs = stitch([r["text"] for r in old])
     n_text, _ = stitch([c.text for c in new])
-    ends = [e for _s, e in offs]
-    positions: list[tuple[int, int] | None] = []
+    starts = [s for s, _e in offs]
+    # per old chunk: {new index: overlap chars}
+    old_hits: list[dict[int, int]] = [{} for _ in old]
+    placed: list[tuple[int, list[tuple[int, int]]]] = []
     cursor = 0
-    for c in new:
-        found = _locate(o, c.spans or [c.text], cursor)
-        loc = found[:2] if found is not None else None
-        positions.append(loc)
-        overlapped: list[tuple[int, int]] = []
-        if loc is not None:
-            cursor = max(cursor, loc[0])        # position advances the cursor
-        if found is not None and found[2]:      # only a complete chunk is covered
-            i = bisect_right(ends, loc[0])
-            while i < len(offs) and offs[i][0] < loc[1]:
-                w = min(loc[1], offs[i][1]) - max(loc[0], offs[i][0])
-                if w > 0:
-                    overlapped.append((i, w))
-                i += 1
+    for j, c in enumerate(new):
+        intervals, complete, advance = _locate(o, c.spans or [c.text], cursor)
+        if advance is not None:
+            cursor = max(cursor, advance)
+        hits = _overlaps(intervals, offs, starts) if intervals else {}
+        if intervals:
+            placed.append((j, intervals))
+        for i, w in hits.items():
+            old_hits[i][j] = w
+        overlapped = sorted(hits.items(), key=lambda p: -p[1]) if complete else []
         row = NewRow(chunk=c, covered=bool(overlapped))
         if row.covered:
-            overlapped.sort(key=lambda p: -p[1])        # stable: ties keep order
             row.enriched = 1 if all(old[i]["enriched"] == 1 for i, _ in overlapped) else 0
             # The oldest extraction logic that touched this text: a later
             # enrich_logic_floor bump must still re-enrich it.
@@ -175,19 +211,21 @@ def _plan_lineage(key: str, old: list[dict], new: list[Chunk], plan_: ReflowPlan
             for f in ("enrich_state", "salience", "memory_tier", "memory_type"):
                 setattr(row, f, _majority(overlapped, old, f))
         plan_.rows.append(row)
-    placed = [(i, p) for i, p in enumerate(positions) if p is not None]
-    for r, (s, e) in zip(old, offs):
-        e = max(e, s + 1)
-        target, reason, best = None, "exact", 0
-        for i, (ps, pe) in placed:
-            if ps <= s < pe:
-                w = min(pe, e) - s
-                if target is None or w > best:
-                    target, best = new[i].doc_id, w
-        if target is None and placed:
-            i, _ = min(placed, key=lambda ip: max(ip[1][0] - s, s - ip[1][1] + 1, 0))
-            target, reason = new[i].doc_id, "nearest"
-        if target is None:
+    for i, (r, (s, e)) in enumerate(zip(old, offs)):
+        hits = old_hits[i]
+        if hits:
+            # the new chunk now holding MOST of this old chunk's text; ties go
+            # to the one containing its start, then to reading order
+            def contains_start(j):
+                return any(a <= s < b for jj, iv in placed if jj == j for a, b in iv)
+            j = max(hits, key=lambda j: (hits[j], contains_start(j), -j))
+            target, reason = new[j].doc_id, "exact"
+        elif placed:
+            def dist(item):
+                return min(max(a - s, s - b + 1, 0) for a, b in item[1])
+            j, _iv = min(placed, key=dist)
+            target, reason = new[j].doc_id, "nearest"
+        else:
             target, reason = new[0].doc_id, "fallback"
         plan_.remap[r["doc_id"]] = target
         plan_.reasons[r["doc_id"]] = reason
