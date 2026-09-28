@@ -188,10 +188,16 @@ def probe_backup(home) -> dict:
     # the state file (pre-existing installs, or before the first attempt) fall
     # back to the mtime heuristic below.
     bstate = _read_backup_state(home)
+    if bstate is _CORRUPT:
+        # Present but unparseable: never degrade to the mtime heuristic below
+        # (a failed upload still refreshes snapshot.enc's mtime, so that would
+        # silently read a real, ongoing failure storm as "On"). Not fresh.
+        return _state("needs_action", "Backup state file is unreadable/corrupt")
     if bstate is not None:
         failures = bstate.get("consecutive_failures") or 0
-        # A hand-edited or half-written state file must degrade to the mtime
-        # heuristic below, never take the whole status endpoint down with it.
+        # A hand-edited or half-written-but-still-valid-JSON state file must
+        # degrade to the mtime heuristic below, never take the whole status
+        # endpoint down with it.
         try:
             last_success = float(bstate["last_success"])
         except (KeyError, TypeError, ValueError):
@@ -258,10 +264,15 @@ def last_backup_success(home) -> float | None:
 
     The same preference probe_backup applies: backup_state.json's recorded
     `last_success` when that file exists (a failed upload still refreshes
-    snapshot.enc, so its mtime would lie); only when the state file is absent,
-    a non-empty snapshot.enc's mtime. Public so the reflow seed's backup gate
-    need not reach into this module's private reader."""
+    snapshot.enc, so its mtime would lie); only when the state file is
+    ABSENT, a non-empty snapshot.enc's mtime. A file that EXISTS but is
+    corrupt/unparseable is never treated as absent -- it reads as "not
+    fresh" (None), the same as a state file recording no success at all.
+    Public so the reflow seed's backup gate need not reach into this
+    module's private reader."""
     state = _read_backup_state(home)
+    if state is _CORRUPT:
+        return None
     if state is not None:
         try:
             v = float(state.get("last_success") or 0)
@@ -276,19 +287,36 @@ def last_backup_success(home) -> float | None:
     return st.st_mtime if st.st_size > 0 else None
 
 
-def _read_backup_state(home) -> dict | None:
-    """The daemon's record of the last backup ATTEMPT, or None if absent.
+# Sentinel: backup_state.json EXISTS but could not be parsed as a JSON object
+# (truncated by a crash mid-write, hand-edited, disk corruption). Distinct
+# from "file absent" (a fresh install, or before the first backup attempt):
+# an absent file legitimately falls back to snapshot.enc's mtime, but a
+# present-and-corrupt one must not -- that mtime is refreshed by every FAILED
+# upload attempt too (the artifact is encrypted locally before the upload),
+# so silently treating "corrupt" the same as "absent" would let a corrupt
+# state file mask a real, ongoing upload failure storm as "On"/fresh.
+_CORRUPT = object()
 
-    Written by ``daemon.write_backup_state``. None means "no record yet" —
-    callers fall back to the older snapshot.enc-mtime heuristic rather than
-    treating a missing file as a failure.
+
+def _read_backup_state(home):
+    """The daemon's record of the last backup ATTEMPT.
+
+    Written by ``daemon.write_backup_state``. Returns None if the file is
+    absent (callers fall back to the older snapshot.enc-mtime heuristic), the
+    `_CORRUPT` sentinel if it exists but is not a parseable JSON object
+    (callers must NOT fall back to the mtime heuristic -- treat as not
+    fresh), or the parsed dict otherwise.
     """
     p = Path(home) / "backup_state.json"
     try:
-        state = json.loads(p.read_text())
-    except (OSError, ValueError):
+        text = p.read_text()
+    except OSError:
         return None
-    return state if isinstance(state, dict) else None
+    try:
+        state = json.loads(text)
+    except ValueError:
+        return _CORRUPT
+    return state if isinstance(state, dict) else _CORRUPT
 
 
 def _read_cache(home) -> dict:

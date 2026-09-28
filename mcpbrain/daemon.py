@@ -4467,8 +4467,26 @@ def write_backup_state(home, *, ok: bool, error: str | None = None) -> dict:
         "consecutive_failures": 0 if ok else prev_failures + 1,
         "last_error": None if ok else error,
     }
+    # Atomic write (temp file in the same dir + os.replace): a reader
+    # (probes._read_backup_state, last_backup_attempt_epoch) must never see a
+    # truncated or half-written file -- a crash or concurrent read mid-write
+    # over an in-place write_text would otherwise corrupt the ONLY durable
+    # record of whether a backup actually landed, and probes.py's own
+    # corrupt-file handling would then read it as "no recent backup" (see
+    # `_read_backup_state`).
     try:
-        path.write_text(json.dumps(state))
+        fd, tmp = tempfile.mkstemp(dir=str(path.parent), prefix=".backup_state.",
+                                   suffix=".tmp")
+        try:
+            with os.fdopen(fd, "w") as f:
+                f.write(json.dumps(state))
+            os.replace(tmp, path)
+        except OSError:
+            try:
+                os.unlink(tmp)
+            except OSError:
+                pass
+            raise
     except OSError as exc:
         log.warning("backup state write failed (continuing): %s", exc)
     return state

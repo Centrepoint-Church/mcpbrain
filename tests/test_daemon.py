@@ -1235,6 +1235,41 @@ def test_last_backup_attempt_epoch_reads_the_state_file(tmp_path):
     assert last_backup_attempt_epoch(str(tmp_path)) is None
 
 
+def test_write_backup_state_is_atomic(tmp_path, monkeypatch):
+    """backup_state.json is the ONLY durable record of whether a backup
+    actually landed (probes.probe_backup / last_backup_success key off it).
+    A crash mid-write must never leave a truncated or half-written file for a
+    reader to trip over -- write via a temp file in the same dir + os.replace,
+    never in place."""
+    from mcpbrain.daemon import write_backup_state
+    home = str(tmp_path)
+    good = {"last_attempt": 1.0, "last_success": 1.0,
+            "consecutive_failures": 0, "last_error": None}
+    (tmp_path / "backup_state.json").write_text(json.dumps(good))
+
+    real_replace = os.replace
+
+    def _boom(src, dst):
+        raise OSError("disk full")
+
+    monkeypatch.setattr(os, "replace", _boom)
+    write_backup_state(home, ok=False, error="simulated")
+    monkeypatch.setattr(os, "replace", real_replace)
+
+    # The pre-existing valid file must survive an interrupted write untouched
+    # -- never truncated, never left holding a partial temp write.
+    assert json.loads((tmp_path / "backup_state.json").read_text()) == good
+    # No leaked temp file.
+    assert not list(tmp_path.glob(".backup_state.*.tmp"))
+
+
+def test_write_backup_state_leaves_no_temp_file_on_success(tmp_path):
+    from mcpbrain.daemon import write_backup_state
+    write_backup_state(str(tmp_path), ok=True)
+    assert json.loads((tmp_path / "backup_state.json").read_text())["last_success"]
+    assert not list(tmp_path.glob(".backup_state.*.tmp"))
+
+
 def test_maybe_backup_records_a_failed_upload(tmp_path, monkeypatch):
     """A failing backup must leave a durable, countable trace.
 

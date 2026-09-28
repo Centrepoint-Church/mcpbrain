@@ -180,6 +180,37 @@ def test_backup_probe_tolerates_a_single_missed_interval(tmp_path):
     assert probes.probe_backup(home)["state"] == "ok"
 
 
+def test_backup_needs_action_when_state_file_is_corrupt(tmp_path):
+    """A backup_state.json that EXISTS but is unparseable must never degrade
+    to the snapshot.enc-mtime fallback -- that mtime is refreshed by every
+    FAILED upload too, so falling back would silently read an ongoing
+    failure storm as "On". A corrupt file is 'not fresh', full stop; only an
+    ABSENT file may fall back to the mtime heuristic."""
+    home = _home(tmp_path, _BACKUP_CFG)
+    snap = tmp_path / "snapshot.enc"
+    snap.write_bytes(b"data")  # fresh and non-empty: would read "ok" via mtime
+    (tmp_path / "backup_state.json").write_text("{not valid json")
+    r = probes.probe_backup(home)
+    assert r["state"] == "needs_action"
+
+
+def test_last_backup_success_none_when_state_file_is_corrupt(tmp_path):
+    home = _home(tmp_path, _BACKUP_CFG)
+    snap = tmp_path / "snapshot.enc"
+    snap.write_bytes(b"data")
+    (tmp_path / "backup_state.json").write_text("{not valid json")
+    assert probes.last_backup_success(home) is None
+
+
+def test_last_backup_success_falls_back_to_mtime_when_state_file_absent(tmp_path):
+    """The absent case, unlike the corrupt case, is still allowed to fall
+    back to snapshot.enc's mtime."""
+    home = _home(tmp_path, _BACKUP_CFG)
+    snap = tmp_path / "snapshot.enc"
+    snap.write_bytes(b"data")
+    assert probes.last_backup_success(home) is not None
+
+
 def test_backup_needs_action_stale_snapshot(tmp_path):
     """A snapshot older than the staleness window → needs_action."""
     import os

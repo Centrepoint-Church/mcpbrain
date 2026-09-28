@@ -489,6 +489,18 @@ def test_backup_gate_falls_back_to_snapshot_mtime_without_a_state_file(tmp_path,
     assert d._run_reflow_seed()["enqueued"] == 1
 
 
+def test_backup_gate_treats_a_corrupt_state_file_as_not_fresh(tmp_path, monkeypatch):
+    """A backup_state.json that EXISTS but is unparseable must not fall back
+    to a fresh snapshot.enc's mtime -- see probes._read_backup_state. The
+    reflow seed must refuse to run, the same as if no backup ever succeeded."""
+    s = _store(tmp_path)
+    _c(s, "gmail-N-body-0", source_type="gmail", message_id="N", chunk_total=2)
+    (tmp_path / "snapshot.enc").write_bytes(b"x" * 16)   # fresh; would read "ok" via mtime
+    (tmp_path / "backup_state.json").write_text("{not valid json")
+    d = _seed_daemon(tmp_path, monkeypatch, s)
+    assert d._run_reflow_seed() == {"reflow_seed": "no_recent_backup"}
+
+
 def test_backup_gate_state_file_wins_over_a_fresh_snapshot(tmp_path, monkeypatch):
     from mcpbrain import daemon as dmod
     s = _store(tmp_path)
