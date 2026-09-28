@@ -135,7 +135,7 @@ def run_sync_cycle(store, embedder, *, gmail_service=None,
     from mcpbrain.budget import Budget
     from mcpbrain.daemon import DISCOVERY_BUDGET_S
     from mcpbrain.index import index_pending
-    from mcpbrain.sync.queue import work_queue
+    from mcpbrain.sync.queue import DEFER, work_queue
 
     result = {"embedded": 0}
 
@@ -395,6 +395,25 @@ def run_sync_cycle(store, embedder, *, gmail_service=None,
     if anarlog_db:
         handlers["anarlog"] = lambda it: handle_anarlog_item(
             store, it, db_path=anarlog_db, bulk_section=bulk_section)
+    # Reflow (2026-09-24 extraction-fidelity): `reflow:<source>` rows re-chunk
+    # an already-ingested owner through the content-preserving carry-over. Its
+    # rows carry an epoch modified_at, so due_sync_items' newest-first order
+    # serves real sync work first, and ReflowContext caps itself per cycle
+    # (10 items / 15 s). A changed source is handed to the ordinary handler
+    # above (a snapshot of `handlers`, so reflow never recurses into itself).
+    # With the kill switch off the rows are DEFERRED, not failed: failing them
+    # would run up `attempts` and the handler gives up (stamps) at 5, so
+    # re-enabling would find every queued owner already abandoned.
+    if home and embedder is not None and config.reflow_enabled(home):
+        from mcpbrain.sync.reflow_handler import ReflowContext
+        _reflow = ReflowContext(store, embedder, home, drive_service=drive_service,
+                                gmail_service=gmail_service,
+                                calendar_service=calendar_service, anarlog_db=anarlog_db,
+                                normal_handlers=dict(handlers),
+                                bulk_section=bulk_section)
+        handlers["reflow"] = _reflow.handle
+    else:
+        handlers["reflow"] = lambda it: DEFER
     result["worked"] = work_queue(
         store, handlers=handlers,
         limit=config.sync_work_limit(home) if home else 50,

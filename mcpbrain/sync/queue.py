@@ -15,8 +15,9 @@ from datetime import datetime, timezone
 log = logging.getLogger("mcpbrain.sync.queue")
 
 # Handler return value: leave the row exactly as it is (neither completed nor
-# failed) and try again next cycle. Used by the reflow handler's per-cycle cap
-# and its enrich-unit guard. work_queue's handling is implemented by unit 2a.
+# failed: attempts, backoff and last_error untouched) and try again next cycle.
+# Used by the reflow handler's per-cycle cap, its halt flag and its enrich-unit
+# guard. A deferred item counts as neither processed nor failed.
 DEFER = object()
 
 
@@ -29,7 +30,8 @@ def work_queue(store, *, handlers: dict, limit: int, budget=None,
     """Work up to `limit` queued items, newest-first. Returns counts.
 
     A handler that returns is a success (its row is deleted); one that raises
-    is a failure (attempts+1, backoff, row retained). Nothing is ever dropped.
+    is a failure (attempts+1, backoff, row retained); one that returns DEFER
+    leaves its row exactly as it was. Nothing is ever dropped.
     """
     now = now or _utc_now_iso()
     processed = failed = 0
@@ -46,13 +48,15 @@ def work_queue(store, *, handlers: dict, limit: int, budget=None,
             failed += 1
             continue
         try:
-            handler(item)
+            result = handler(item)
         except Exception as exc:  # noqa: BLE001 — one item must not kill the loop
             attempts = store.fail_sync_item(source, item["ref_id"], str(exc),
                                             now=now)
             log.warning("sync: %s/%s failed (attempt %d), will retry: %s",
                         source, item["ref_id"], attempts, exc)
             failed += 1
+            continue
+        if result is DEFER:
             continue
         store.complete_sync_item(source, item["ref_id"])
         processed += 1

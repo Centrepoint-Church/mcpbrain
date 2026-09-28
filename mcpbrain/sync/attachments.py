@@ -42,6 +42,7 @@ from mcpbrain.sync.extractors import (
     extract_tables_from_xls,
     extract_tables_from_xlsx,
     extract_text_from_eml,
+    is_partial,
 )
 from mcpbrain.sync.normalise import Chunk, _is_bulk_or_auto, get_header
 
@@ -211,6 +212,11 @@ def normalise_attachment(raw_message: dict, part: dict, data: bytes) -> list[Chu
     }
     if blocks_mod.extraction_version(mime):
         base["extraction_version"] = blocks_mod.extraction_version(mime)
+    if is_partial(text) or is_partial(tables):
+        # The extractor died partway (PartialBlocks/PartialText/PartialTables).
+        # Recorded so the reflow handler refuses to re-chunk from it: a short
+        # re-extraction would otherwise delete the tail it never reached.
+        base["extraction_partial"] = True
     # I1: the parent's bulk signal has to reach the attachment too, or a
     # newsletter's attached flyer is graph-extracted while the body it arrived
     # with is cold-marked. Derived from the same headers by the same function
