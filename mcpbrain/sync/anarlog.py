@@ -18,7 +18,7 @@ import logging
 import sqlite3
 from contextlib import nullcontext
 
-from mcpbrain.chunking import CHUNKER_VERSION, chunk_text, content_hash
+from mcpbrain.chunking import CHUNKER_VERSION, SPLIT_VERSION, chunk_text, content_hash
 from mcpbrain.sync.normalise import Chunk
 
 log = logging.getLogger(__name__)
@@ -354,6 +354,7 @@ def normalise_session(session: dict) -> list[Chunk]:
         # spec's §4 shape — do not mistake it for wired-up recurrence linkage.
         "series_id": session.get("series_id") or "",
         "chunker_version": CHUNKER_VERSION,
+        "split_version": SPLIT_VERSION,
     }
     out: list[Chunk] = []
     bodies = [(k, prosemirror_to_markdown(session["documents"][k]))

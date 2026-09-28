@@ -96,6 +96,13 @@ def contextual_prefix(metadata: dict) -> str:
     # emitted by this product's sync layer and are intentionally omitted.
     # Add them here if new source_types are introduced.
 
+    # Block-rendered chunks (2026-09-24 extraction-fidelity) carry the heading
+    # path they sit under; a mid-document chunk otherwise names no section.
+    # Source-agnostic: Drive files and email attachments both stamp it.
+    trail = metadata.get("heading_trail", "")
+    if trail:
+        parts.append(f"section {trail}")
+
     if not parts:
         return ""
     return "[Context: " + ", ".join(parts) + "] "

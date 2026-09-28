@@ -25,15 +25,23 @@ import base64
 import logging
 
 from mcpbrain import config
-from mcpbrain.chunking import CHUNKER_VERSION, chunk_text, content_hash, has_content
+from mcpbrain.chunking import (
+    CHUNKER_VERSION,
+    SPLIT_VERSION,
+    chunk_text,
+    content_hash,
+    has_content,
+)
+from mcpbrain.sync import blocks as blocks_mod
 from mcpbrain.sync import ingest_report, tabular
 from mcpbrain.sync.extractors import (
+    extract_blocks_from_docx,
+    extract_blocks_from_pdf,
+    extract_blocks_from_pptx,
+    extract_blocks_from_rtf,
     extract_tables_from_xls,
     extract_tables_from_xlsx,
-    extract_text_from_docx,
     extract_text_from_eml,
-    extract_text_from_pdf,
-    extract_text_from_pptx,
 )
 from mcpbrain.sync.normalise import Chunk, _is_bulk_or_auto, get_header
 
@@ -61,14 +69,21 @@ _XLS = "application/vnd.ms-excel"          # legacy .xls
 # the byte-identical file in Drive is extracted normally"; supporting a format on
 # one side only reintroduces exactly that asymmetry on a narrower trigger.
 _EXTRACTORS = {
-    "application/pdf": extract_text_from_pdf,
-    "application/vnd.openxmlformats-officedocument.wordprocessingml.document":
-        extract_text_from_docx,
-    "application/vnd.openxmlformats-officedocument.presentationml.presentation":
-        extract_text_from_pptx,
     "message/rfc822": extract_text_from_eml,   # a forwarded .eml attachment
     "text/plain": lambda b: b.decode("utf-8", errors="replace"),
     "text/markdown": lambda b: b.decode("utf-8", errors="replace"),
+}
+
+# Structure-preserving formats yield Blocks (sync/blocks.py) and are rendered by
+# blocks.render, exactly as the Drive path does (2026-09-24 extraction-fidelity).
+# RTF is included for the same Drive/Gmail parity reason as above.
+_BLOCK_EXTRACTORS = {
+    "application/pdf": extract_blocks_from_pdf,
+    "application/vnd.openxmlformats-officedocument.wordprocessingml.document":
+        extract_blocks_from_docx,
+    "application/vnd.openxmlformats-officedocument.presentationml.presentation":
+        extract_blocks_from_pptx,
+    "application/rtf": extract_blocks_from_rtf,
 }
 
 # Tabular attachments yield Tables, not text, so they get the row-group chunker
@@ -85,6 +100,7 @@ _EXTRACTION_METHOD = {
     _XLSX: "spreadsheet",
     _XLS: "spreadsheet",
     "message/rfc822": "eml",
+    "application/rtf": "text",
     "application/vnd.openxmlformats-officedocument.presentationml.presentation": "slides",
 }
 
@@ -105,7 +121,8 @@ _SILENT_SKIP_MIMES = ("text/calendar", "application/ics")
 
 
 def _supported(mime: str) -> bool:
-    return mime in _EXTRACTORS or mime in _TABLE_EXTRACTORS or mime in _CSV_MIMES
+    return (mime in _EXTRACTORS or mime in _BLOCK_EXTRACTORS
+            or mime in _TABLE_EXTRACTORS or mime in _CSV_MIMES)
 
 
 def iter_attachment_parts(payload: dict) -> list[dict]:
@@ -152,6 +169,7 @@ def normalise_attachment(raw_message: dict, part: dict, data: bytes) -> list[Chu
     mime = part["mime"]
     budget = config.sheet_char_budget(str(config.app_dir()))
     tables = None
+    blocks = None
     text = ""
     try:
         if mime in _TABLE_EXTRACTORS:
@@ -161,6 +179,9 @@ def normalise_attachment(raw_message: dict, part: dict, data: bytes) -> list[Chu
                 data.decode("utf-8", errors="replace"),
                 sheet=part["filename"], char_budget=budget,
                 delimiter=tabular.delimiter_for_mime(mime))
+        elif mime in _BLOCK_EXTRACTORS:
+            blocks = _BLOCK_EXTRACTORS[mime](data)
+            text = blocks_mod.to_text(blocks)
         elif mime in _EXTRACTORS:
             text = _EXTRACTORS[mime](data)
         else:
@@ -186,7 +207,10 @@ def normalise_attachment(raw_message: dict, part: dict, data: bytes) -> list[Chu
         "attachment_name": part["filename"][:200],
         "attachment_mime": mime[:100],
         "extraction_method": _EXTRACTION_METHOD.get(mime, "text"),
+        "split_version": SPLIT_VERSION,
     }
+    if blocks_mod.extraction_version(mime):
+        base["extraction_version"] = blocks_mod.extraction_version(mime)
     # I1: the parent's bulk signal has to reach the attachment too, or a
     # newsletter's attached flyer is graph-extracted while the body it arrived
     # with is cold-marked. Derived from the same headers by the same function
@@ -195,14 +219,16 @@ def normalise_attachment(raw_message: dict, part: dict, data: bytes) -> list[Chu
         base["bulk"] = True
 
     if tables:
-        rendered = tabular.render_chunks(tables, file_name=part["filename"],
-                                         max_chars=tabular.CHUNK_CHARS)
+        rendered = [(t, extra, [t]) for t, extra in tabular.render_chunks(
+            tables, file_name=part["filename"], max_chars=tabular.CHUNK_CHARS)]
+    elif blocks:
+        rendered = [(r.text, r.meta, r.spans) for r in blocks_mod.render(blocks)]
     else:
-        rendered = [(t, {}) for t in chunk_text(text)]
-    kept = [(t, extra) for t, extra in rendered if has_content(t)]
+        rendered = [(t, {}, [t]) for t in chunk_text(text)]
+    kept = [(t, extra, spans) for t, extra, spans in rendered if has_content(t)]
 
     out = []
-    for i, (t, extra) in enumerate(kept):
+    for i, (t, extra, spans) in enumerate(kept):
         meta = {**base, **extra, "chunk_index": i, "chunk_total": len(kept)}
         # I1: prepare.should_enrich's (now source-agnostic) tabular gate reads
         # content_subtype, which normalise_drive stamps per-MIME but this module
@@ -212,7 +238,8 @@ def normalise_attachment(raw_message: dict, part: dict, data: bytes) -> list[Chu
         if "table_role" in extra:
             meta["content_subtype"] = "table"
         out.append(Chunk(doc_id=f"gmail-{msg_id}-att-{part['index']}-{i}", text=t,
-                         content_hash=content_hash(t), metadata=meta))
+                         content_hash=content_hash(t), metadata=meta,
+                         spans=list(spans)))
     return out
 
 

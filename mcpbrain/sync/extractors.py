@@ -25,6 +25,16 @@ import shutil
 import subprocess
 import tempfile
 
+from mcpbrain.sync.blocks import to_text
+# Structure-preserving extractors (2026-09-24) live in their own modules and are
+# re-exported here. extract_pdf imports this module's OCR helpers INSIDE its
+# function, so importing it at module top here does not cycle.
+from mcpbrain.sync.extract_office import (  # noqa: F401  (re-export)
+    extract_blocks_from_docx,
+    extract_blocks_from_pptx,
+)
+from mcpbrain.sync.extract_pdf import extract_blocks_from_pdf  # noqa: F401
+from mcpbrain.sync.rtf import extract_blocks_from_rtf  # noqa: F401
 from mcpbrain.sync.tabular import Table, normalise_rows
 
 log = logging.getLogger(__name__)
@@ -114,57 +124,11 @@ def is_scanned_pdf(content_bytes: bytes, *, chars_per_page_threshold: int = 50,
 
 
 def extract_text_from_pdf(content_bytes: bytes) -> str:
-    """PDF text via pymupdf; per-page OCR fallback (tesseract CLI) for scanned pages.
-
-    Every path that yields less than the document contains now says so (A5).
-    Previously a scanned PDF with tesseract absent returned '' in silence, and a
-    per-page OCR timeout (120 s) fell back to an empty page_text unlogged — so
-    the file simply had no chunks and nothing recorded why.
-
-    `is_scanned_pdf` is now the single gate. It was dead code sitting beside a
-    second, DIFFERENT inline heuristic (avg < 50 chars/page here, avg < 20
-    inline), and two heuristics that can disagree — one of them unreachable —
-    is worse than either alone. The new gate is slightly more willing to attempt
-    OCR, which is the intended direction: a page with 30 characters is a scan
-    with a caption.
-    """
-    try:
-        import fitz  # pymupdf
-        doc = fitz.open(stream=content_bytes, filetype="pdf")
-    except Exception as exc:
-        log.warning("pdf: open failed: %s", exc)
-        return ""
-    try:
-        pages = [page.get_text() for page in doc]
-        # `pages=` so the gate reuses the text we just extracted instead of
-        # re-opening and re-parsing the whole document (I7).
-        if not is_scanned_pdf(content_bytes, pages=pages):
-            return "\n\n".join(pages)
-        if not _tesseract_available():
-            log.warning("pdf: looks scanned (%d pages, %d text chars) and "
-                        "tesseract is unavailable — returning the text layer only",
-                        len(pages), sum(len(p or "") for p in pages))
-            return "\n\n".join(pages)
-        out, ocr_failures = [], 0
-        for i, page in enumerate(doc):
-            page_text = (pages[i] if i < len(pages) else page.get_text()).strip()
-            if len(page_text) >= _OCR_MIN_PAGE_CHARS:
-                out.append(page_text)
-                continue
-            ocr = _ocr_page(page)
-            if not ocr:
-                ocr_failures += 1
-            out.append(ocr or page_text)
-        if ocr_failures:
-            log.warning("pdf: OCR produced nothing for %d of %d pages "
-                        "(timeout or render failure) — those pages are empty",
-                        ocr_failures, len(out))
-        return "\n\n".join(out)
-    except Exception as exc:
-        log.warning("pdf: extraction failed: %s", exc)
-        return ""
-    finally:
-        doc.close()  # guaranteed close on every path once the doc is open
+    """PDF as flat text: `to_text` over the structure-preserving block extractor
+    (sync/extract_pdf.py, 2026-09-24). Reading order, headings, ruled tables and
+    the per-page OCR fallback all live there now; this is the flat-string view
+    for callers that want text only. PartialBlocks -> PartialText."""
+    return to_text(extract_blocks_from_pdf(content_bytes))
 
 
 def _ocr_page(page) -> str:
@@ -254,20 +218,9 @@ def _tesseract_available() -> bool:
 # ---------------------------------------------------------------------------
 
 def extract_text_from_docx(content_bytes: bytes) -> str:
-    """Extract text from DOCX bytes, including table content."""
-    try:
-        from docx import Document
-        doc = Document(io.BytesIO(content_bytes))
-        parts = [p.text for p in doc.paragraphs if p.text.strip()]
-        for table in doc.tables:
-            for row in table.rows:
-                cells = [c.text.strip() for c in row.cells if c.text.strip()]
-                if cells:
-                    parts.append(" | ".join(cells))
-        return "\n".join(parts)
-    except Exception as exc:
-        log.warning("docx: extraction failed: %s", exc)
-        return ""
+    """DOCX as flat text: `to_text` over extract_blocks_from_docx (tables in
+    place, merged cells once, headers/footers and text boxes included)."""
+    return to_text(extract_blocks_from_docx(content_bytes))
 
 
 # ---------------------------------------------------------------------------
@@ -427,35 +380,6 @@ def extract_text_from_eml(content_bytes: bytes) -> str:
 
 
 def extract_text_from_pptx(content_bytes: bytes) -> str:
-    """Extract slide text from PPTX bytes: titles, body frames and table cells.
-
-    Slides are separated by a labelled heading so chunk_text's paragraph split
-    keeps slide boundaries, and so a recalled chunk says which slide it is from.
-    """
-    try:
-        from pptx import Presentation
-        prs = Presentation(io.BytesIO(content_bytes))
-    except Exception as exc:
-        log.warning("pptx: presentation open failed: %s", exc)
-        return ""
-    parts: list[str] = []
-    try:
-        for n, slide in enumerate(prs.slides, start=1):
-            lines: list[str] = []
-            for shape in slide.shapes:
-                if shape.has_text_frame:
-                    for para in shape.text_frame.paragraphs:
-                        text = "".join(run.text for run in para.runs).strip()
-                        if text:
-                            lines.append(text)
-                if getattr(shape, "has_table", False):
-                    for row in shape.table.rows:
-                        cells = [c.text.strip() for c in row.cells if c.text.strip()]
-                        if cells:
-                            lines.append(" | ".join(cells))
-            if lines:
-                parts.append(f"Slide {n}\n" + "\n".join(lines))
-    except Exception as exc:
-        log.warning("pptx: extraction failed after %d slides: %s", len(parts), exc)
-        return PartialText("\n\n".join(parts))   # I9 — see PartialTables
-    return "\n\n".join(parts)
+    """PPTX as flat text: `to_text` over extract_blocks_from_pptx (one
+    'Slide N[: title]' heading per slide, grouped shapes, tables, notes)."""
+    return to_text(extract_blocks_from_pptx(content_bytes))

@@ -6,6 +6,7 @@ from mcpbrain.store import Store
 from mcpbrain.sync.drive import (
     backfill_drive, discover_drive, handle_drive_item, normalise_drive, _fetch_text,
 )
+from tests.helpers.drive_export import as_export
 
 
 # ---------------------------------------------------------------------------
@@ -83,7 +84,7 @@ class _Files:
         self.export_calls[fileId] = self.export_calls.get(fileId, 0) + 1
         if fileId in self._raise:
             return _Req(raise_exc=self._raise[fileId])
-        return _Req(self._exports.get(fileId, b""))
+        return _Req(as_export(self._exports.get(fileId, b""), mimeType))
 
     def get_media(self, fileId, supportsAllDrives=None):
         assert supportsAllDrives is True, (
@@ -352,10 +353,13 @@ def test_pagination_processes_all(tmp_path):
 
 
 def test_fetch_text_google_doc():
-    """_fetch_text routes Google Doc to export and returns decoded text."""
+    """A Google Doc is exported (as DOCX since 2026-09-24, via the block
+    extractor) and yields its text; _fetch_text itself no longer handles it."""
+    from mcpbrain.sync.drive import fetch_content
     meta = {"id": "x1", "mimeType": "application/vnd.google-apps.document"}
     svc = FakeDriveService(exports={"x1": b"Hello world"})
-    assert _fetch_text(svc, meta) == "Hello world"
+    assert fetch_content(svc, meta).text == "Hello world"
+    assert _fetch_text(svc, meta) is None
 
 
 def test_fetch_text_plain_via_get_media():
@@ -420,10 +424,12 @@ def test_fetch_text_docx_via_get_media(tmp_path):
     docx_bytes = _make_docx_bytes()
     DOCX_MIME = "application/vnd.openxmlformats-officedocument.wordprocessingml.document"
 
-    # _fetch_text unit check
+    # fetch_content unit check (DOCX goes through the block extractor since
+    # 2026-09-24, not _fetch_text)
+    from mcpbrain.sync.drive import fetch_content
     meta = {"id": "d1", "mimeType": DOCX_MIME}
     svc = FakeDriveService(media={"d1": docx_bytes})
-    text = _fetch_text(svc, meta)
+    text = fetch_content(svc, meta).text
     assert text is not None
     assert "Quarterly budget review" in text
     assert "Revenue" in text
@@ -504,7 +510,9 @@ def test_a_supported_type_that_extracts_to_nothing_is_recorded_distinctly(monkey
             self.changes.append((kind, ref_id, summary))
 
     store = _Store()
-    monkeypatch.setattr(drive, "_fetch_text", lambda service, meta: "")
+    # DOCX goes through the block path since 2026-09-24: an extractor that
+    # yields no blocks is the "supported but empty" case.
+    monkeypatch.setattr(drive, "_fetch_blocks", lambda service, meta: [])
     fmeta = {"id": "f-2", "name": "Broken.docx",
              "mimeType": "application/vnd.openxmlformats-officedocument."
                          "wordprocessingml.document"}

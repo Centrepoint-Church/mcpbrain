@@ -543,35 +543,34 @@ def test_a_partial_result_still_behaves_as_the_plain_list_it_wraps():
 
 
 def test_a_mid_deck_pptx_failure_returns_a_partial_string(monkeypatch):
+    # 2026-09-24: extract_text_from_pptx is now to_text over the block
+    # extractor, which reads slide.shapes.title / shape_type / notes. The fake
+    # deck therefore wraps a REAL generated slide rather than hand-faking the
+    # python-pptx surface; the failure is still injected mid-iteration.
+    import io
+
+    import pptx
+    from pptx.util import Inches
+
     from mcpbrain.sync import extractors
     from mcpbrain.sync.extractors import extract_text_from_pptx, is_partial
 
-    class _Run:
-        text = "Slide body text"
-
-    class _Para:
-        runs = [_Run()]
-
-    class _Frame:
-        paragraphs = [_Para()]
-
-    class _Shape:
-        has_text_frame = True
-        text_frame = _Frame()
-
-    class _Slide:
-        shapes = [_Shape()]
+    real = pptx.Presentation()
+    slide = real.slides.add_slide(real.slide_layouts[6])
+    slide.shapes.add_textbox(Inches(1), Inches(1), Inches(4), Inches(1)
+                             ).text_frame.text = "Slide body text"
+    buf = io.BytesIO(); real.save(buf)
+    loaded = pptx.Presentation(io.BytesIO(buf.getvalue()))
 
     class _Slides:
         def __iter__(self):
-            yield _Slide()
+            yield from loaded.slides
             raise RuntimeError("simulated mid-deck failure")
 
     class _Prs:
         slides = _Slides()
 
-    monkeypatch.setitem(__import__("sys").modules, "pptx",
-                        type("m", (), {"Presentation": lambda _b: _Prs()}))
+    monkeypatch.setattr(pptx, "Presentation", lambda _b: _Prs())
 
     out = extract_text_from_pptx(b"fake")
 

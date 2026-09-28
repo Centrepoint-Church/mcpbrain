@@ -98,8 +98,12 @@ def test_handle_shared_drive_item_cache_hit_skips_extraction(tmp_path):
     s, fs = _store(tmp_path), LocalDirFleetStorage(tmp_path / "drv")
     # pre-publish an artifact for FID's current version so try_import hits
     src = _store(tmp_path, "src.sqlite3")
+    # mime_type: a Google Doc's artifact carries the block-extractor
+    # fingerprint (+x1), which publish_file derives from the chunk's mime and
+    # try_import requires since the drive path passes mime= (2026-09-24).
     src.import_cached_chunk("gdrive-FID-0", "cached body", "c0",
-                            {"source_type": "gdrive", "file_id": "FID", "chunk_index": 0}, [0.5]*4)
+                            {"source_type": "gdrive", "file_id": "FID", "chunk_index": 0,
+                             "mime_type": "application/vnd.google-apps.document"}, [0.5]*4)
     fm = _gdoc_change("FID")["file"]
     ch = _file_content_hash(fm)
     ingest_cache.publish_file(src, fs, "D1", "FID", ch, PIN)

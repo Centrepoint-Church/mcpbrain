@@ -7,6 +7,7 @@ matches. Likely the single largest content gap in the store.
 import base64
 
 from mcpbrain.sync import attachments
+from mcpbrain.sync.blocks import Paragraph
 
 
 def _msg(parts, msg_id="m1", thread_id="t1"):
@@ -76,8 +77,9 @@ def test_each_part_carries_its_own_stable_index():
 
 
 def test_a_pdf_attachment_becomes_chunks_carrying_its_message_and_thread(monkeypatch):
-    monkeypatch.setattr(attachments, "_EXTRACTORS",
-                        {"application/pdf": lambda b: "Total due: 4,200.00"})
+    # PDF now goes through the block extractor (2026-09-24).
+    monkeypatch.setattr(attachments, "_BLOCK_EXTRACTORS",
+                        {"application/pdf": lambda b: [Paragraph("Total due: 4,200.00")]})
     raw = _msg([_part("Invoice.pdf", "application/pdf")])
     part = attachments.iter_attachment_parts(raw["payload"])[0]
 
@@ -181,8 +183,9 @@ def test_fetch_and_normalise_reports_an_unsupported_attachment_type():
 
 
 def test_fetch_and_normalise_pulls_the_bytes_and_extracts(monkeypatch):
-    monkeypatch.setattr(attachments, "_EXTRACTORS",
-                        {"application/pdf": lambda b: b.decode()})
+    # PDF now goes through the block extractor (2026-09-24).
+    monkeypatch.setattr(attachments, "_BLOCK_EXTRACTORS",
+                        {"application/pdf": lambda b: [Paragraph(b.decode())]})
     payload = base64.urlsafe_b64encode(b"extracted words here").decode()
 
     class _Service:
@@ -209,8 +212,9 @@ def test_fetch_and_normalise_pulls_the_bytes_and_extracts(monkeypatch):
 
 
 def test_one_failing_attachment_does_not_kill_the_others(monkeypatch):
-    monkeypatch.setattr(attachments, "_EXTRACTORS",
-                        {"application/pdf": lambda b: "ok"})
+    # PDF now goes through the block extractor (2026-09-24).
+    monkeypatch.setattr(attachments, "_BLOCK_EXTRACTORS",
+                        {"application/pdf": lambda b: [Paragraph("ok")]})
 
     class _Service:
         def users(self):
@@ -267,8 +271,9 @@ def test_a_tabular_attachment_is_tagged_content_subtype_table(monkeypatch):
 def test_a_prose_attachment_is_not_tagged_as_a_table(monkeypatch):
     """The discriminator for the stamp: only chunks that came out of
     tabular.render_chunks get it."""
-    monkeypatch.setattr(attachments, "_EXTRACTORS",
-                        {"application/pdf": lambda b: "Board minutes. " * 30})
+    # PDF now goes through the block extractor (2026-09-24).
+    monkeypatch.setattr(attachments, "_BLOCK_EXTRACTORS",
+                        {"application/pdf": lambda b: [Paragraph("Board minutes. " * 30)]})
     raw = _msg([_part("Minutes.pdf", "application/pdf")])
     part = attachments.iter_attachment_parts(raw["payload"])[0]
 
@@ -283,8 +288,9 @@ def test_a_bulk_parents_attachment_inherits_the_bulk_flag(monkeypatch):
     so should_enrich cold-marks newsletter bodies. Without the same stamp here, a
     newsletter's attached flyer was graph-extracted while the body it arrived with
     was cold-marked."""
-    monkeypatch.setattr(attachments, "_EXTRACTORS",
-                        {"application/pdf": lambda b: "Our latest offers. " * 30})
+    # PDF now goes through the block extractor (2026-09-24).
+    monkeypatch.setattr(attachments, "_BLOCK_EXTRACTORS",
+                        {"application/pdf": lambda b: [Paragraph("Our latest offers. " * 30)]})
     raw = _msg([_part("Flyer.pdf", "application/pdf")])
     raw["payload"]["headers"].append(
         {"name": "List-Unsubscribe", "value": "<mailto:x@y.z>"})
@@ -297,8 +303,9 @@ def test_a_bulk_parents_attachment_inherits_the_bulk_flag(monkeypatch):
 
 
 def test_an_ordinary_parents_attachment_is_not_marked_bulk(monkeypatch):
-    monkeypatch.setattr(attachments, "_EXTRACTORS",
-                        {"application/pdf": lambda b: "Board minutes. " * 30})
+    # PDF now goes through the block extractor (2026-09-24).
+    monkeypatch.setattr(attachments, "_BLOCK_EXTRACTORS",
+                        {"application/pdf": lambda b: [Paragraph("Board minutes. " * 30)]})
     raw = _msg([_part("Minutes.pdf", "application/pdf")])
     part = attachments.iter_attachment_parts(raw["payload"])[0]
 

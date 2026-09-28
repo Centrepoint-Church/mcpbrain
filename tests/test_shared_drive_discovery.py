@@ -112,7 +112,9 @@ class _FilesGet:
 
 
 class _ExportFiles(_FilesGet):
-    def export(self, fileId, mimeType): return _Req(b"shared drive document body")
+    def export(self, fileId, mimeType):
+        from tests.helpers.drive_export import as_export
+        return _Req(as_export(b"shared drive document body", mimeType))
 
 
 class _ServiceWithFiles(_Service):

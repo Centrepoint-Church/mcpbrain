@@ -52,7 +52,8 @@ class _DriveFiles:
         self._file_meta = file_meta or {}
 
     def export(self, fileId, mimeType, **_kw):
-        return _DriveReq(self._exports.get(fileId, b""))
+        from tests.helpers.drive_export import as_export
+        return _DriveReq(as_export(self._exports.get(fileId, b""), mimeType))
 
     def get(self, fileId, fields=None, supportsAllDrives=None):
         # handle_drive_item re-fetches current metadata by id (discovery only
@@ -556,7 +557,11 @@ def test_run_sync_cycle_reports_cache_hit_miss_counts(tmp_path, monkeypatch):
     fs_pre = LocalDirFleetStorage(fs_root)
     src = Store(tmp_path / "src.sqlite3", dim=4); src.init()
     src.import_cached_chunk("gdrive-FID1-0", "cached body", "c0",
-                            {"source_type": "gdrive", "file_id": "FID1", "chunk_index": 0}, [0.5] * 4)
+                            {"source_type": "gdrive", "file_id": "FID1", "chunk_index": 0,
+                             # Google Doc artifacts carry the +x1 extraction
+                             # fingerprint since 2026-09-24 (derived from mime).
+                             "mime_type": "application/vnd.google-apps.document"},
+                            [0.5] * 4)
     fm1 = _gdoc_change("FID1")["file"]
     ch1 = _file_content_hash(fm1)
     # contextual_retrieval defaults True (config.contextual_retrieval_enabled),

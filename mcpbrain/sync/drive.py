@@ -2,7 +2,8 @@
 
 Implements bootstrap (getStartPageToken) + incremental delta (changes.list).
 Content fetch covers:
-  - Google Docs / Slides  → export as text/plain
+  - Google Docs / Slides  → export as DOCX / PPTX → block extractors
+                            (fallback on export-size error: Markdown/plain text)
   - Google Sheets         → export as text/csv
   - text/plain, text/markdown, text/csv → get_media
   - application/pdf       → get_media + pymupdf extraction (OCR optional via tesseract)
@@ -34,17 +35,25 @@ from dataclasses import dataclass
 from googleapiclient.errors import HttpError
 
 from mcpbrain import config
-from mcpbrain.chunking import CHUNKER_VERSION, chunk_text, content_hash, has_content
+from mcpbrain.chunking import (
+    CHUNKER_VERSION,
+    SPLIT_VERSION,
+    chunk_text,
+    content_hash,
+    has_content,
+)
 from mcpbrain.org_contracts import DRIVE_ID_META_KEY
+from mcpbrain.sync import blocks as blocks_mod
 from mcpbrain.sync import ingest_report, tabular
 from mcpbrain.sync.normalise import Chunk
 from mcpbrain.sync.extractors import (
+    extract_blocks_from_docx,
+    extract_blocks_from_pdf,
+    extract_blocks_from_pptx,
+    extract_blocks_from_rtf,
     extract_tables_from_xls,
     extract_tables_from_xlsx,
-    extract_text_from_docx,
     extract_text_from_eml,
-    extract_text_from_pdf,
-    extract_text_from_pptx,
     is_partial,
 )
 from mcpbrain.sync.tabular import Table
@@ -58,27 +67,42 @@ _NUM_RETRIES = 5  # see mcpbrain.backup._NUM_RETRIES for the full rationale
 # MIME routing tables
 # ---------------------------------------------------------------------------
 
+_DOCX = "application/vnd.openxmlformats-officedocument.wordprocessingml.document"
+_PPTX = "application/vnd.openxmlformats-officedocument.presentationml.presentation"
+
+# Google Docs/Slides export as DOCX/PPTX so they share the structure-preserving
+# DOCX/PPTX extractors (2026-09-24 extraction-fidelity). Drive caps exports at
+# 10 MB; on that error the chain falls back (Docs: Markdown then plain text;
+# Slides: plain text) so no file that ingested before stops ingesting.
 _EXPORT = {
-    "application/vnd.google-apps.document": "text/plain",
     "application/vnd.google-apps.spreadsheet": "text/csv",
-    "application/vnd.google-apps.presentation": "text/plain",
+}
+_EXPORT_BLOCKS = {
+    "application/vnd.google-apps.document": (
+        (_DOCX, extract_blocks_from_docx), ("text/markdown", None), ("text/plain", None)),
+    "application/vnd.google-apps.presentation": (
+        (_PPTX, extract_blocks_from_pptx), ("text/plain", None)),
+}
+# Downloaded binaries that go through a Block extractor (sync/blocks.py).
+_DOWNLOAD_BLOCKS = {
+    "application/pdf": extract_blocks_from_pdf,
+    _DOCX: extract_blocks_from_docx,
+    _PPTX: extract_blocks_from_pptx,
+    "application/rtf": extract_blocks_from_rtf,
 }
 
 _DOWNLOAD_TEXT = {"text/plain", "text/markdown", "text/csv",
                   "application/csv", "text/tab-separated-values",
-                  "application/rtf", "application/json", "text/html"}
+                  "application/json", "text/html"}
 
 _DOWNLOAD_BINARY = {
-    "application/pdf": extract_text_from_pdf,
-    "application/vnd.openxmlformats-officedocument.wordprocessingml.document": extract_text_from_docx,
     # NOTE(Task 2 -> Task 4 handoff): extract_text_from_xlsx was replaced by
     # extract_tables_from_xlsx, which returns structured Table objects rather
     # than pre-rendered text (mcpbrain.sync.tabular) so chunk boundaries can be
     # decided by tabular.render_chunks instead of orphaning the header in
     # chunk 0 (B2). .xlsx/.xls are wired in below via fetch_content's
-    # binary_tables dict instead — this dict stays text-shaped.
-    "application/vnd.openxmlformats-officedocument.presentationml.presentation":
-        extract_text_from_pptx,
+    # binary_tables dict instead — this dict stays text-shaped. PDF/DOCX/PPTX
+    # moved to _DOWNLOAD_BLOCKS (2026-09-24).
     "message/rfc822": extract_text_from_eml,
 }
 
@@ -130,17 +154,62 @@ class Content:
     text: str = ""
     tables: list[Table] | None = None
     partial: bool = False
+    blocks: list | None = None
+
+
+def _export_too_large(exc) -> bool:
+    """Drive's 10 MB export cap (reason `exportSizeLimitExceeded`)."""
+    return ("exportSizeLimitExceeded" in str(getattr(exc, "content", b"") or "")
+            or "exportSizeLimitExceeded" in str(exc))
+
+
+def _as_bytes(raw) -> bytes:
+    return raw if isinstance(raw, bytes) else str(raw).encode("utf-8", "replace")
+
+
+def _fetch_blocks(service, file_meta: dict) -> list | None:
+    """Blocks for a structure-preserving MIME, or None if the MIME isn't one.
+
+    Downloads (_DOWNLOAD_BLOCKS) run the format's block extractor; Google
+    Docs/Slides (_EXPORT_BLOCKS) export as DOCX/PPTX and share those extractors,
+    falling back down the chain ONLY on the export-size error — any other
+    failure raises so the queue backs the item off. A text fallback goes
+    through blocks.from_text (blank-line paragraphs, '#' headings).
+    """
+    mime = file_meta.get("mimeType", "")
+    fid = file_meta["id"]
+    if mime in _DOWNLOAD_BLOCKS:
+        raw = service.files().get_media(fileId=fid, supportsAllDrives=True
+                                        ).execute(num_retries=_NUM_RETRIES)
+        return _DOWNLOAD_BLOCKS[mime](_as_bytes(raw))
+    if mime in _EXPORT_BLOCKS:
+        chain = _EXPORT_BLOCKS[mime]
+        for i, (target, fn) in enumerate(chain):
+            try:
+                # files.export takes no supportsAllDrives (see _fetch_text).
+                raw = service.files().export(fileId=fid, mimeType=target
+                                             ).execute(num_retries=_NUM_RETRIES)
+            except Exception as exc:  # noqa: BLE001
+                if _export_too_large(exc) and i < len(chain) - 1:
+                    log.info("drive: %s export as %s too large; falling back", fid, target)
+                    continue
+                raise
+            if fn is not None:
+                return fn(_as_bytes(raw))
+            text = raw.decode("utf-8", errors="replace") if isinstance(raw, bytes) else raw
+            return blocks_mod.from_text(text)
+    return None
 
 
 def _fetch_text(service, file_meta: dict) -> str | None:
     """Return decoded text for supported types, else None (skip).
 
-    Google Docs/Slides/Sheets are exported (_EXPORT); the plain-text family
-    (text/plain, text/markdown, text/csv, TSV, RTF, JSON, HTML — _DOWNLOAD_TEXT)
-    is fetched via get_media and decoded. PDF, DOCX, PPTX and .eml
-    (_DOWNLOAD_BINARY) are fetched via get_media and run through the binary
-    extractors in mcpbrain.sync.extractors. Images and other binary types
-    return None.
+    Google Sheets are exported (_EXPORT); the plain-text family
+    (text/plain, text/markdown, text/csv, TSV, JSON, HTML — _DOWNLOAD_TEXT)
+    is fetched via get_media and decoded. .eml (_DOWNLOAD_BINARY) is fetched
+    via get_media and run through its extractor. Images and other binary types
+    return None. PDF/DOCX/PPTX/RTF and Google Docs/Slides never reach here:
+    fetch_content routes them through _fetch_blocks first (2026-09-24).
 
     XLSX/XLS are deliberately NOT here: they are intercepted earlier by
     fetch_content's `binary_tables` dict and extracted as structured Tables
@@ -267,6 +336,14 @@ def fetch_content(service, file_meta: dict, *, store=None,
             _note_skip(store, report, "extraction_empty", fid, mime, name)
         return Content(tables=tables, partial=is_partial(tables))
 
+    blocks = _fetch_blocks(service, file_meta)
+    if blocks is not None:
+        text = blocks_mod.to_text(blocks)
+        if not text.strip():
+            _note_skip(store, report, "extraction_empty", fid, mime, name)
+            return Content(partial=is_partial(text))
+        return Content(text=text, blocks=list(blocks), partial=is_partial(text))
+
     text = _fetch_text(service, file_meta)
     if text is None:
         _note_skip(store, report, "unsupported_mime", fid, mime, name)
@@ -290,7 +367,8 @@ def fetch_content(service, file_meta: dict, *, store=None,
 # ---------------------------------------------------------------------------
 
 def normalise_drive(file_meta: dict, text: str, drive_id: str | None = None, *,
-                    tables: list[Table] | None = None, folder: str = "") -> list[Chunk]:
+                    tables: list[Table] | None = None, folder: str = "",
+                    blocks: list | None = None) -> list[Chunk]:
     """Convert Drive file metadata + text content (or structured `tables`) into
     indexable Chunks.
 
@@ -303,8 +381,13 @@ def normalise_drive(file_meta: dict, text: str, drive_id: str | None = None, *,
     of chunk_text — a spreadsheet is not prose, and character-splitting it
     orphans the header in chunk 0 (B2). `folder` (from folder_path) is stamped
     as metadata['folder_path'] for embed.contextual_prefix (C5).
+
+    `blocks` (from fetch_content, for the structure-preserving MIMEs) routes
+    through blocks.render: chunks carry `heading_trail` metadata and their
+    source `spans` (the reflow coverage proof reads them). Every chunk carries
+    `split_version`; block-extracted MIMEs also carry `extraction_version`.
     """
-    if not tables and (not text or not text.strip()):
+    if not tables and not blocks and (not text or not text.strip()):
         return []
 
     fid = file_meta["id"]
@@ -330,24 +413,30 @@ def normalise_drive(file_meta: dict, text: str, drive_id: str | None = None, *,
         "extraction_method": extraction_method,
         "content_subtype": content_subtype,
         "confidence": confidence,
+        "split_version": SPLIT_VERSION,
     }
+    if blocks_mod.extraction_version(mime):
+        base_meta["extraction_version"] = blocks_mod.extraction_version(mime)
     if drive_id:
         base_meta[DRIVE_ID_META_KEY] = drive_id
     if folder:
         base_meta["folder_path"] = folder[:300]
 
     if tables:
-        rendered = tabular.render_chunks(tables, file_name=base_meta["file_name"],
-                                         max_chars=tabular.CHUNK_CHARS)
+        rendered = [(t, extra, [t]) for t, extra in tabular.render_chunks(
+            tables, file_name=base_meta["file_name"], max_chars=tabular.CHUNK_CHARS)]
+    elif blocks:
+        rendered = [(r.text, r.meta, r.spans) for r in blocks_mod.render(blocks)]
     else:
-        rendered = [(t, {}) for t in chunk_text(text)]
+        rendered = [(t, {}, [t]) for t in chunk_text(text)]
 
-    kept = [(t, extra) for t, extra in rendered if has_content(t)]
+    kept = [(t, extra, spans) for t, extra, spans in rendered if has_content(t)]
     out = []
-    for i, (chunk, extra) in enumerate(kept):
+    for i, (chunk, extra, spans) in enumerate(kept):
         meta = {**base_meta, **extra, "chunk_index": i, "chunk_total": len(kept)}
         out.append(Chunk(doc_id=f"gdrive-{fid}-{i}", text=chunk,
-                         content_hash=content_hash(chunk), metadata=meta))
+                         content_hash=content_hash(chunk), metadata=meta,
+                         spans=list(spans)))
     return out
 
 
@@ -590,17 +679,19 @@ def _cache_first_extract_one(
     fid = fmeta["id"]
     content_h = _file_content_hash(fmeta)
     if ingest_cache.try_import(store, fleet_storage, drive_id, fid, content_h, pin,
-                               contextual_retrieval=contextual_retrieval):
+                               contextual_retrieval=contextual_retrieval,
+                               mime=fmeta.get("mimeType", "")):
         return True, None
     content = fetch_content(service, fmeta, store=store, report=report)
     if content is None or (not content.text and not content.tables):
         return False, None
     # Re-check right before extraction: another daemon may have just published.
     if ingest_cache.try_import(store, fleet_storage, drive_id, fid, content_h, pin,
-                               contextual_retrieval=contextual_retrieval):
+                               contextual_retrieval=contextual_retrieval,
+                               mime=fmeta.get("mimeType", "")):
         return True, None
     chunks = normalise_drive(fmeta, content.text, drive_id=drive_id,
-                             tables=content.tables,
+                             tables=content.tables, blocks=content.blocks,
                              folder=folder_path(service, fmeta, folder_cache))
     if not chunks:
         return False, None
@@ -787,7 +878,7 @@ def handle_drive_item(service, store, item, *, folder_cache=None,
     folder = folder_path(service, fmeta, folder_cache if folder_cache is not None else {})
     with bulk_section():
         chunks = normalise_drive(fmeta, content.text, tables=content.tables,
-                                 folder=folder)
+                                 blocks=content.blocks, folder=folder)
         upsert_file_chunks(store, chunks, file_id=fid, partial=content.partial)
 
 
@@ -898,6 +989,7 @@ def backfill_drive(service, store, modified_after: str,
             if content is None or (not content.text and not content.tables):
                 continue
             chunks = normalise_drive(f, content.text, tables=content.tables,
+                                     blocks=content.blocks,
                                      folder=folder_path(service, f, folder_cache))
             if chunks:
                 with bulk_section():
@@ -1017,7 +1109,7 @@ def _reingest_one(service, store, fid, fields, folder_cache, report):
             return fid, "empty", None
         chunks = normalise_drive(
             fmeta, content.text, drive_id=fmeta.get("driveId"),
-            tables=content.tables,
+            tables=content.tables, blocks=content.blocks,
             folder=folder_path(service, fmeta, folder_cache))
         if not chunks:
             # Also deterministic: content was fetched but nothing in it survived

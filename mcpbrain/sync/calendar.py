@@ -12,7 +12,13 @@ from datetime import datetime, timedelta, timezone
 
 from googleapiclient.errors import HttpError
 
-from mcpbrain.chunking import CHUNKER_VERSION, chunk_text, content_hash, has_content
+from mcpbrain.chunking import (
+    CHUNKER_VERSION,
+    SPLIT_VERSION,
+    chunk_text,
+    content_hash,
+    has_content,
+)
 from mcpbrain.graph_write import (
     _is_owner,
     _meeting_series_id,
@@ -67,6 +73,7 @@ def normalise_calendar(event: dict) -> list[Chunk]:
     meta = {
         "source_type": "calendar",
         "chunker_version": CHUNKER_VERSION,
+        "split_version": SPLIT_VERSION,
         "event_id": eid,
         "summary": summary[:200],
         "start": start[:40],
