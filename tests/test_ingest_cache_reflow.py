@@ -267,6 +267,20 @@ def test_different_modified_takes_the_plain_replace_path(tmp_path):
     assert _reflow_map(a) == []
 
 
+def test_local_chunk_without_modified_takes_the_plain_path(tmp_path):
+    """A local row with no Drive `modified` cannot prove the source unchanged,
+    so the carry-over never applies (plain replace, nothing remapped)."""
+    fs = LocalDirFleetStorage(tmp_path / "fleet")
+    a = _local(tmp_path)
+    a.patch_chunk_metadata("gdrive-F-1", modified=None)
+    _publish(tmp_path, fs, ["alpha beta gamma\ndelta epsilon"])
+
+    assert ingest_cache.try_import(a, fs, "D1", "F", "vh2", PIN, mime=PDF) is True
+    assert [c[0] for c in _chunks(a)] == ["gdrive-F-0"]
+    assert _relation_doc(a) == "gdrive-F-1"
+    assert _reflow_map(a) == []
+
+
 def test_no_local_chunks_takes_the_plain_path(tmp_path):
     fs = LocalDirFleetStorage(tmp_path / "fleet")
     _publish(tmp_path, fs, ["alpha beta gamma\ndelta epsilon"])

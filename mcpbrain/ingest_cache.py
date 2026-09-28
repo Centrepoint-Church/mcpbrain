@@ -241,10 +241,11 @@ def _reflow_rows(store, art: CacheArtifact, rows: list[dict], mark_enriched: boo
             "carry-over import deferred")
     new = [Chunk(r["doc_id"], r["text"], r["content_hash"], r["metadata"], [r["text"]])
            for r in rows]
-    try:
-        plan = reflow.plan(old, new)
-    except ValueError:
-        return None
+    plan = reflow.plan(old, new)          # `new` is non-empty: rows was checked above
+    # Defence in depth: every positional gdrive-<fid>-<i> id shares ONE lineage,
+    # so a Drive plan cannot hold lineage_gone today. Were one ever to, the plain
+    # path is the right fallback (apply_reflow would refuse it with ValueError,
+    # which lands in the generic write-failure branch below instead).
     if any(why == "lineage_gone" for why in plan.reasons.values()):
         log.info("ingest_cache: %s reflow plan drops a whole lineage; plain replace",
                  art.file_id)
