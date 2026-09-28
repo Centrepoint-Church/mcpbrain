@@ -796,3 +796,17 @@ def test_terminal_outcomes_are_recorded(tmp_path, monkeypatch):
         {"source": "reflow:gmail", "ref_id": "M", "attempts": 0})
     assert _outcomes(s)["M"] == "source_gone"
     assert s.reflow_stats()["by_outcome"] == {"ordinary": 1, "gave_up": 1, "source_gone": 1}
+
+
+def test_record_publish_false_never_records_a_pending_publish(tmp_path, monkeypatch):
+    """bin/reflow_dryrun.py runs the handler against a store COPY: it must
+    never queue a fleet publish (which the daemon would ship under the new
+    fingerprint if the copy were ever mistaken for the store)."""
+    from mcpbrain.org_contracts import DRIVE_ID_META_KEY
+    s = _store(tmp_path); _seed_drive(s, extra={DRIVE_ID_META_KEY: "D1"})
+    _drive_blocks(monkeypatch)
+    ctx = _ctx(s, tmp_path, drive_service=_DriveSvc("2026-01-01T00:00:00Z"),
+               record_publish=False)
+    assert ctx.handle({"source": "reflow:drive", "ref_id": "F", "attempts": 0}) is None
+    assert s.owner_chunks(["gdrive-F-"])[0]["metadata"][DRIVE_ID_META_KEY] == "D1"
+    assert s.pending_publishes("D1") == []

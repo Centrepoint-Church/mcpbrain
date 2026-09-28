@@ -61,13 +61,16 @@ class ReflowContext:
     a changed source is then worked by exactly the ordinary handler (with the
     cycle's folder cache, bulk section and, for a Shared Drive file, its fleet
     storage). Without it the source modules' handlers are called directly.
-    `bulk_section` brackets the store writes (apply_reflow, stamps)."""
+    `bulk_section` brackets the store writes (apply_reflow, stamps).
+    `record_publish=False` never queues a shared-drive publish: the attended
+    dry run (bin/reflow_dryrun.py) works a store COPY and must leave nothing
+    that could reach the fleet."""
 
     def __init__(self, store, embedder, home, *, drive_service=None, gmail_service=None,
                  calendar_service=None, anarlog_db=None, max_items: int = 10,
                  max_seconds: float = 15.0, clock=time.monotonic,
                  normal_handlers: dict | None = None, bulk_section=None,
-                 defer_delay_s: float = DEFER_DELAY_S):
+                 defer_delay_s: float = DEFER_DELAY_S, record_publish: bool = True):
         self.store, self.embedder, self.home = store, embedder, str(home)
         self.drive, self.gmail, self.calendar, self.anarlog_db = (
             drive_service, gmail_service, calendar_service, anarlog_db)
@@ -75,6 +78,7 @@ class ReflowContext:
         self.normal_handlers = normal_handlers
         self.bulk_section = bulk_section or nullcontext
         self.defer_delay_s = defer_delay_s
+        self.record_publish = record_publish
         self._done = 0
         self._started = None
         self._folder_cache: dict = {}
@@ -148,7 +152,7 @@ class ReflowContext:
             # apply_reflow has already rolled back AND set the halt cursor.
             log.error("reflow halted: %s", exc)
             raise
-        if self._pending_publish is not None:
+        if self._pending_publish is not None and self.record_publish:
             # Only now: had embed or apply_reflow raised, a pending row would
             # publish the OLD chunks fleet-wide under the new fingerprint.
             self.store.record_pending_publish(*self._pending_publish)
