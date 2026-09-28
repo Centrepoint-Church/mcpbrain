@@ -430,3 +430,17 @@ def test_reflow_remap_does_not_change_a_relations_source_ref(tmp_path):
     delta, _wm = org_contrib._delta_since_watermark(s)
     org_contrib.collect_from_drain(s, delta, _pin(), "alice@x.org")
     assert {r["source_ref"] for r in _outbox(s)} == first
+
+
+def test_drive_chunks_are_labelled_drive_and_contribute_exactly_as_before(tmp_path):
+    """Residual R7: Drive chunks carry source_type "gdrive", which the map only
+    knew as "drive", so every Drive contribution shipped as "unknown". The only
+    thing that READS source_kind is the meeting guard, so relabelling changes
+    the label and nothing else: the same records are emitted."""
+    s = _store(tmp_path)
+    s.upsert_chunk("gdrive-F-0", "t", "h", {"source_type": "gdrive", "file_id": "F"})
+    assert org_contrib._source_kind(s, "gdrive-F-0") == "drive"
+    n = org_contrib.collect_from_drain(s, _delta(source_doc_id="gdrive-F-0"), _pin(),
+                                       "alice@x.org")
+    assert n == 3
+    assert {r["source_kind"] for r in _outbox(s)} == {"drive"}

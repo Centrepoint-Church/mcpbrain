@@ -130,8 +130,11 @@ def _chunk_provenance(store, doc_id: str) -> tuple[bool, str]:
     # new source type). source_kind now GATES too (the meeting-source check in
     # collect_from_drain), not just labels — a new source added to this mapping
     # must be reviewed for whether it should ever be allowed to contribute.
-    skind = {"gmail": "email", "drive": "drive", "calendar": "calendar",
-             "anarlog": "meeting"}.get(st, "unknown")
+    # Drive chunks are stamped source_type "gdrive" (normalise_drive); "drive"
+    # alone labelled every Drive contribution "unknown". Pure labelling: the
+    # meeting guard below is the only reader of source_kind.
+    skind = {"gmail": "email", "gdrive": "drive", "drive": "drive",
+             "calendar": "calendar", "anarlog": "meeting"}.get(st, "unknown")
     usable = r["enrich_state"] != "cold"
     return usable, skind
 
