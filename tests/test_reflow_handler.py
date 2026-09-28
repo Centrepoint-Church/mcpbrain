@@ -774,3 +774,36 @@ def test_record_publish_false_never_records_a_pending_publish(tmp_path, monkeypa
     assert ctx.handle({"source": "reflow:drive", "ref_id": "F", "attempts": 0}) is None
     assert s.owner_chunks(["gdrive-F-"])[0]["metadata"][DRIVE_ID_META_KEY] == "D1"
     assert s.pending_publishes("D1") == []
+
+
+def test_unknown_reflow_kind_completes_instead_of_retrying_forever(tmp_path):
+    """Nothing emits one today, but a raise here came before the give-up check,
+    so such a row would back off and retry forever."""
+    s = _store(tmp_path)
+    assert _ctx(s, tmp_path).handle(
+        {"source": "reflow:bogus", "ref_id": "X", "attempts": 0}) is None
+
+
+def test_anarlog_session_with_a_removed_part_takes_the_ordinary_path(tmp_path, monkeypatch):
+    """anarlog sessions are mutable and read from a local database: an old
+    lineage with no new counterpart (notes deleted in anarlog) is a real source
+    change, not a failed re-fetch, so it must not refuse and retry to gave_up."""
+    from mcpbrain.sync import anarlog
+    s = _store(tmp_path)
+    md = {"source_type": "anarlog", "session_id": "S1"}
+    s.upsert_chunk("anarlog-S1-transcript-0", "Dana Okafor: we agreed the roster", "t0",
+                   {**md, "content_subtype": "transcript", "chunk_index": 0, "chunk_total": 1})
+    s.upsert_chunk("anarlog-S1-notes-0", "Action: Marcus Reyes to book the hall", "n0",
+                   {**md, "content_subtype": "notes", "chunk_index": 0, "chunk_total": 1})
+    new = [Chunk("anarlog-S1-transcript-0", "Dana Okafor: we agreed the roster", "t",
+                 {**md, "content_subtype": "transcript", "split_version": 1,
+                  "chunk_index": 0, "chunk_total": 1})]
+    db = tmp_path / "anarlog.sqlite"
+    db.write_bytes(b"")
+    monkeypatch.setattr(anarlog, "read_session", lambda conn, sid: {"id": sid})
+    monkeypatch.setattr(anarlog, "normalise_session", lambda sess: new)
+    seen = []
+    ctx = _ctx(s, tmp_path, anarlog_db=str(db),
+               normal_handlers={"anarlog": lambda it: seen.append(it["ref_id"])})
+    assert ctx.handle({"source": "reflow:anarlog", "ref_id": "S1", "attempts": 0}) is None
+    assert seen == ["S1"]

@@ -110,7 +110,11 @@ class ReflowContext:
             return queue.DEFER            # immediate: next cycle, same place
         kind = item["source"].split(":", 1)[1].split(":", 1)[0]
         if kind not in ("drive", "gmail", "anarlog", "calendar"):
-            raise ValueError(f"reflow: unknown source {item['source']!r}")
+            # Complete it: raising here came before the give-up check, so the
+            # row would back off and retry forever. Nothing emits one today.
+            log.warning("reflow: dropping row with unknown source %r (%s)",
+                        item["source"], item.get("ref_id"))
+            return None
         owner = item["ref_id"]
         self._cur = (owner, kind)          # for outcome records (_stamp/_normal)
         if self._service_missing(kind):
@@ -143,7 +147,7 @@ class ReflowContext:
         # Gmail ALWAYS applies the plan (covered rows carry, uncovered ones
         # re-enrich, legacy ids are deletes remapped onto their text). Only
         # calendar and anarlog, whose sources can change, are tested.
-        if kind in ("anarlog", "calendar") and self._source_changed(p, old, new):
+        if kind in ("anarlog", "calendar") and self._source_changed(p, old, new, kind):
             # These sources' prose extraction is unchanged, so differing text
             # means the SOURCE changed: take the ordinary path.
             self._normal(kind, owner, old)
@@ -220,7 +224,7 @@ class ReflowContext:
                 "anarlog": [f"anarlog-{owner}-"], "calendar": [f"cal-{owner}"]}[kind]
 
     @staticmethod
-    def _source_changed(p, old, new) -> bool:
+    def _source_changed(p, old, new, kind: str = "calendar") -> bool:
         """Calendar / anarlog: has the SOURCE changed? (Gmail never asks --
         messages are immutable, see handle.)
 
@@ -237,7 +241,10 @@ class ReflowContext:
         removed text fails (ii)) does not.
 
         A lineage only in `new` is a change (new content appeared). A lineage
-        only in `old` is never read as one: it is a failed re-extraction, and
+        only in `old` is a change for anarlog only: its sessions are mutable
+        and read from a local database, so a missing part (notes deleted) is
+        the source's real state, and the ordinary handler sweeps it. For
+        calendar it is never read as one: it is a failed re-extraction, and
         apply_reflow's lineage_gone refusal is what must handle it."""
         def lk(doc_id, md):
             return reflow.lineage_key(doc_id, md or {})
@@ -255,6 +262,8 @@ class ReflowContext:
                 continue
             if not reflow.contained_both_ways(rows, chunks):
                 return True
+        if kind == "anarlog" and set(old_by) - set(new_by):
+            return True
         return False
 
     def _embed(self, chunks) -> list:
