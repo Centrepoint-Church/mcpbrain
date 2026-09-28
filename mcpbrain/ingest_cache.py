@@ -297,7 +297,8 @@ def _replace_rows(store, art: CacheArtifact, rows: list[dict]) -> bool:
                     db, row["doc_id"], row["text"], row["content_hash"],
                     row["metadata"], row["vector"],
                     enriched=row.get("enriched", False),
-                    enriched_version=row.get("enriched_version", 0))
+                    enriched_version=row.get("enriched_version", 0),
+                    uncover=True)
             # Exact metadata.file_id match (index-backed by idx_chunks_fileid),
             # not a doc_id LIKE or RANGE predicate: `LIKE ... ESCAPE` disables
             # SQLite's LIKE-to-index optimisation and silently turns a doc_id

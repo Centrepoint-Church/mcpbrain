@@ -430,6 +430,54 @@ def test_unchanged_upsert_leaves_covers_alone(tmp_path):
     assert _covers(s) is None and s.enrich_payload_covers_file("F")
 
 
+def _cached(doc_id, text, h, i, enriched=False):
+    return {"doc_id": doc_id, "text": text, "content_hash": h, "metadata": _meta(i),
+            "vector": V, "enriched": enriched, "enriched_version": 3 if enriched else 0}
+
+
+def test_cache_import_of_changed_text_drops_the_chunk_from_covers(tmp_path):
+    """The shared-drive cache import writes rows through _write_cached_chunk_row,
+    not upsert_chunk; a changed row must leave the local payload's covers the
+    same way (H4), or a later mark_enriched makes a stale payload look whole."""
+    s = _store(tmp_path)
+    _seed(s)
+    s.set_enrich_payload("F", "{}", 3, covers=["gdrive-F-0", "gdrive-F-1"])
+    s.import_cached_chunks([_cached("gdrive-F-0", "alpha beta gamma", "h0", 0),
+                            _cached("gdrive-F-1", "changed text", "h1-new", 1)])
+    assert _covers(s) == ["gdrive-F-0"]
+    s.mark_enriched(["gdrive-F-1"])
+    assert not s.enrich_payload_covers_file("F")
+
+
+def test_single_cache_import_of_a_new_chunk_is_never_inside_null_covers(tmp_path):
+    s = _store(tmp_path)
+    _seed(s)
+    s.set_enrich_payload("F", "{}", 3)
+    s.import_cached_chunk("gdrive-F-2", "a third chunk", "h2", _meta(2), V)
+    assert _covers(s) == ["gdrive-F-0", "gdrive-F-1"]
+
+
+def test_cache_import_of_unchanged_text_leaves_covers_alone(tmp_path):
+    s = _store(tmp_path)
+    _seed(s)
+    s.set_enrich_payload("F", "{}", 3)
+    s.import_cached_chunks([_cached("gdrive-F-1", "delta epsilon", "h1", 1, True)])
+    assert _covers(s) is None and s.enrich_payload_covers_file("F")
+
+
+def test_plain_replace_import_uncovers_a_changed_row(tmp_path):
+    from types import SimpleNamespace
+
+    from mcpbrain import ingest_cache
+    s = _store(tmp_path)
+    _seed(s)
+    s.set_enrich_payload("F", "{}", 3, covers=["gdrive-F-0", "gdrive-F-1"])
+    assert ingest_cache._replace_rows(s, SimpleNamespace(file_id="F"), [
+        _cached("gdrive-F-0", "alpha beta gamma", "h0", 0),
+        _cached("gdrive-F-1", "changed text", "h1-new", 1)]) is True
+    assert _covers(s) == ["gdrive-F-0"]
+
+
 def _legacy(s, rows):
     with s._connect(write=True) as db:
         db.execute("CREATE TABLE enrich_payloads_legacy(doc_id TEXT PRIMARY KEY, "

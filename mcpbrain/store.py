@@ -3075,11 +3075,20 @@ class Store:
 
     @staticmethod
     def _write_cached_chunk_row(db, doc_id, text, content_hash, metadata, vector,
-                                *, enriched=False, enriched_version=0, home=None) -> None:
+                                *, enriched=False, enriched_version=0, home=None,
+                                uncover=False) -> None:
         """Write one cached chunk row + its vec_chunks/fts_chunks mirrors against
         an already-open connection `db`. Shared by import_cached_chunk (one row,
-        one transaction) and import_cached_chunks (many rows, one transaction)."""
-        row = db.execute("SELECT rowid FROM chunks WHERE doc_id=?", (doc_id,)).fetchone()
+        one transaction) and import_cached_chunks (many rows, one transaction).
+
+        `uncover=True` (the cache-import paths) applies upsert_chunk's H4 rule:
+        a new row, or one whose content_hash changes, leaves its file's enrich
+        payload `covers`. apply_reflow passes False because it rewrites covers
+        itself from the plan in the same transaction."""
+        row = db.execute("SELECT rowid, content_hash FROM chunks WHERE doc_id=?",
+                         (doc_id,)).fetchone()
+        if uncover and (row is None or row["content_hash"] != content_hash):
+            Store._uncover_changed_chunk(db, doc_id)
         if row:
             rowid = row["rowid"]
             db.execute(
@@ -3119,7 +3128,7 @@ class Store:
         with self._connect(write=True) as db:
             self._write_cached_chunk_row(db, doc_id, text, content_hash, metadata, vector,
                                          enriched=enriched, enriched_version=enriched_version,
-                                         home=home)
+                                         home=home, uncover=True)
             return True
 
     def import_cached_chunks(self, rows: list[dict], *, home=None) -> bool:
@@ -3141,7 +3150,7 @@ class Store:
                     row["metadata"], row["vector"],
                     enriched=row.get("enriched", False),
                     enriched_version=row.get("enriched_version", 0),
-                    home=home)
+                    home=home, uncover=True)
         return True
 
     def embedding_for_doc(self, doc_id: str) -> list[float] | None:
