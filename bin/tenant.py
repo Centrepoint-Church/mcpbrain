@@ -74,6 +74,36 @@ def use_profile(src: Path, repo: Path = _REPO) -> list[Path]:
     return written
 
 
+def remap_gold(gold_path: Path, store, *, dry_run: bool = False) -> list[tuple[str, str]]:
+    """Point gold expected_chunk_ids that a reflow removed at their new chunk.
+
+    Textual edit of '- <id>' list lines (never a YAML parse/dump), so the
+    file's comments and formatting survive untouched. Only ids with NO chunk
+    row in `store` are considered; an id that still resolves is left exactly
+    as written even if a (stale) reflow target exists for it. `dry_run=True`
+    computes and returns the same changes without touching the file — the
+    CLI's `--write` flag is what decides whether a run is a preview or a
+    real rewrite."""
+    import re
+    text = gold_path.read_text()
+    changes: list[tuple[str, str]] = []
+
+    def sub(m):
+        old = m.group(2)
+        if store.get_chunk(old) is not None:
+            return m.group(0)
+        new = store.latest_reflow_target(old)
+        if not new or new == old:
+            return m.group(0)
+        changes.append((old, new))
+        return f"{m.group(1)}{new}"
+
+    out = re.sub(r"^(\s*-\s+)((?:gdrive|gmail|cal|anarlog)-\S+)\s*$", sub, text, flags=re.M)
+    if changes and not dry_run:
+        gold_path.write_text(out)
+    return changes
+
+
 def main(argv=None) -> int:
     ap = argparse.ArgumentParser(prog="mcpbrain tenant")
     sub = ap.add_subparsers(dest="cmd", required=True)
@@ -83,10 +113,23 @@ def main(argv=None) -> int:
     p_check.add_argument("--online", action="store_true",
                           help="also check Drive folders, the wheel index and the "
                                "marketplace repo")
+    p_gold = sub.add_parser("remap-gold", help="repoint gold chunk ids moved by a reflow")
+    p_gold.add_argument("gold", help="path to a gold YAML (in the tenant checkout)")
+    p_gold.add_argument("--write", action="store_true")
     ns = ap.parse_args(argv)
     if ns.cmd == "use":
         for p in use_profile(Path(ns.dir)):
             print(f"installed {p.relative_to(_REPO)}")
+        return 0
+    if ns.cmd == "remap-gold":
+        from mcpbrain import config
+        from mcpbrain.embed import get_embedder
+        from mcpbrain.store import Store
+        store = Store(config.store_path(), dim=get_embedder("bge-small").dim, read_only=True)
+        changes = remap_gold(Path(ns.gold), store, dry_run=not ns.write)
+        for o, n in changes:
+            print(f"{o} -> {n}")
+        print(f"{len(changes)} id(s) {'rewritten' if ns.write else 'would change'}")
         return 0
     from mcpbrain import tenant as _tenant
     problems = _tenant.check_offline(_REPO)
