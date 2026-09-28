@@ -437,3 +437,43 @@ def test_halted_seed_does_not_rescan_candidates(tmp_path, monkeypatch):
     d._run_reflow_seed()
     assert calls == []
     assert json.loads(s.get_cursor("reflow:last_seed"))["remaining"] == 3
+
+
+def test_deferred_rows_do_not_hold_the_window_full(tmp_path, monkeypatch):
+    """Task 11/12 triage: rows a handler deferred with a delay (a long transient
+    outage) are not due, so they must not count toward REFLOW_WINDOW -- else
+    the window stays full and every other source's reflow stalls."""
+    from datetime import datetime, timedelta, timezone
+
+    from mcpbrain import daemon as dmod
+    s = _store(tmp_path)
+    _c(s, "gmail-N-body-0", source_type="gmail", message_id="N", chunk_total=2)
+    (tmp_path / "backup_state.json").write_text(json.dumps({"last_success": time.time()}))
+    items = [{"ref_id": f"F{i}", "event": "reflow", "modified_at": "1970-01-01T00:00:00"}
+             for i in range(dmod.REFLOW_WINDOW)]
+    s.enqueue_items(items, source="reflow:drive")
+    later = (datetime.now(timezone.utc).replace(tzinfo=None)
+             + timedelta(hours=1)).isoformat()
+    for it in items:
+        assert s.defer_sync_item("reflow:drive", it["ref_id"], later)
+    d = _seed_daemon(tmp_path, monkeypatch, s)
+    out = d._run_reflow_seed()
+    assert out["reflow_seed"] == "ok" and out["enqueued"] == 1
+
+
+def test_due_rows_still_fill_the_window(tmp_path, monkeypatch):
+    from datetime import datetime, timedelta, timezone
+
+    from mcpbrain import daemon as dmod
+    s = _store(tmp_path)
+    _c(s, "gmail-N-body-0", source_type="gmail", message_id="N", chunk_total=2)
+    (tmp_path / "backup_state.json").write_text(json.dumps({"last_success": time.time()}))
+    items = [{"ref_id": f"F{i}", "event": "reflow", "modified_at": "1970-01-01T00:00:00"}
+             for i in range(dmod.REFLOW_WINDOW)]
+    s.enqueue_items(items, source="reflow:drive")
+    past = (datetime.now(timezone.utc).replace(tzinfo=None)
+            - timedelta(minutes=1)).isoformat()
+    for it in items[:10]:
+        s.defer_sync_item("reflow:drive", it["ref_id"], past)   # delay elapsed: due
+    d = _seed_daemon(tmp_path, monkeypatch, s)
+    assert d._run_reflow_seed()["reflow_seed"] == "window_full"

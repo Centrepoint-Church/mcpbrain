@@ -3269,7 +3269,9 @@ class Daemon:
             if dropped:
                 log.info("reflow_seed: freed %d queued row(s) of unavailable source(s) %s",
                          dropped, sorted(gone))
-            room = REFLOW_WINDOW - self._store.reflow_stats()["queued"]
+            # Size the window on DUE rows only: a row deferred with a delay
+            # is not work, and counting it lets a long outage stall the rest.
+            room = REFLOW_WINDOW - self._store.reflow_due_count()
             if room <= 0:
                 return {"reflow_seed": "window_full", "enqueued": 0,
                         "remaining": self._reflow_remaining(workable)}

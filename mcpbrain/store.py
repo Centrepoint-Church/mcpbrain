@@ -4016,6 +4016,22 @@ class Store:
                 "queued": q, "remaining": remaining,
                 "total": total, "last_seed": last_seed}
 
+    def reflow_due_count(self, now: str | None = None) -> int:
+        """Queued reflow rows that are DUE (next_attempt_at unset or <= now),
+        the same filter due_sync_items applies. The seed sizes REFLOW_WINDOW
+        on this, not on every queued row: a row a handler deferred with a
+        delay (a long transient outage) is not work this cycle can do, and
+        counting it let deferred rows hold the window full and stall every
+        other source's reflow. `now` defaults to naive-UTC isoformat, the
+        format sync.queue writes."""
+        if now is None:
+            now = datetime.now(timezone.utc).replace(tzinfo=None).isoformat()
+        with self._connect() as db:
+            return db.execute(
+                "SELECT count(*) FROM sync_queue WHERE source LIKE 'reflow:%' "
+                "AND (next_attempt_at IS NULL OR next_attempt_at <= ?)", (now,)
+            ).fetchone()[0]
+
     def drop_queued_reflow_rows(self, sources) -> int:
         """Delete queued reflow rows for `sources` (e.g. {"reflow:calendar"}).
         For a source that cannot be worked on this install (scope not
