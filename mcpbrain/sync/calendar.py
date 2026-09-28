@@ -344,7 +344,11 @@ def backfill_calendar_window(service, store, *, time_min: str, time_max: str,
             break
         with bulk_section():
             chunks = normalise_calendar(ev)
-            for ch in chunks:
+            if chunks and _hand_to_reflow(store, ev["id"], chunks):
+                chunks_to_write = []         # the reflow re-chunks it, with carry-over
+            else:
+                chunks_to_write = chunks
+            for ch in chunks_to_write:
                 if not store.upsert_chunk(ch.doc_id, ch.text, ch.content_hash,
                                           ch.metadata):
                     store.patch_chunk_metadata(ch.doc_id, **ch.metadata)
@@ -420,6 +424,28 @@ def discover_calendar(service, store, source: str = "calendar",
     return len(queue_items)
 
 
+def _hand_to_reflow(store, eid: str, chunks) -> bool:
+    """Final review I2: an unchanged multi-chunk event stored by the old
+    splitter (a reflow candidate) must not be re-chunked here -- the upsert
+    would reset enrichment over reused positional ids and leave the old tail.
+    Unchanged is proven the way the reflow proves it: the stitched,
+    normalised text of the stored chunks equals the new chunks'. Then
+    `reflow:calendar` is enqueued (epoch modified_at) and True returned; any
+    content difference takes the ordinary path."""
+    from mcpbrain import reflow
+    if not chunks:
+        return False
+    old = store.owner_chunks([f"cal-{eid}"])
+    if not old or not reflow.needs_reflow(old):
+        return False
+    old = sorted(old, key=lambda r: int((r["metadata"] or {}).get("chunk_index", 0)))
+    if reflow.stitch([r["text"] for r in old])[0] != reflow.stitch([c.text for c in chunks])[0]:
+        return False
+    store.enqueue_items([{"ref_id": eid, "event": "reflow",
+                          "modified_at": "1970-01-01T00:00:00"}], source="reflow:calendar")
+    return True
+
+
 def handle_calendar_item(service, store, item, *, calendar_id: str = "primary",
                          bulk_section=None) -> None:
     """Work one queued calendar event. Raises on failure so the loop backs it off."""
@@ -442,8 +468,9 @@ def handle_calendar_item(service, store, item, *, calendar_id: str = "primary",
     owner = owner_identity_from_config()
     with bulk_section():
         chunks = normalise_calendar(ev)
-        for ch in chunks:
-            store.upsert_chunk(ch.doc_id, ch.text, ch.content_hash, ch.metadata)
+        if not _hand_to_reflow(store, item["ref_id"], chunks):
+            for ch in chunks:
+                store.upsert_chunk(ch.doc_id, ch.text, ch.content_hash, ch.metadata)
         if chunks:
             _apply_attendees_to_graph(store, ev, owner)
             _annotate_series_from_event(store, ev, owner)

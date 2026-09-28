@@ -153,10 +153,21 @@ def phase_reingest_stale(store, apply: bool, *, limit: int, workers: int = 1) ->
                                     other_version=PRIOR_CHUNKER_VERSION,
                                     limit=limit)
     by_type: dict[str, list] = {}
+    reflow_owned: dict[str, int] = {}
     for item in items:
+        # The background reflow owns these (block-extracted below the current
+        # extraction_version, or multi-chunk below split_version): a plain
+        # re-ingest would re-chunk them with enrichment reset and provenance
+        # stranded, which is exactly what the reflow's carry-over prevents.
+        if store.reflow_owns(item["source_type"], item["id"]):
+            reflow_owned[item["source_type"]] = reflow_owned.get(item["source_type"], 0) + 1
+            continue
         by_type.setdefault(item["source_type"], []).append(item["id"])
     counts = {k: len(v) for k, v in by_type.items()}
     print(f"[reingest-stale] {len(items)} item(s) selected (limit {limit}): {counts}")
+    if reflow_owned:
+        print(f"[reingest-stale] skipped {sum(reflow_owned.values())} item(s) that belong "
+              f"to the reflow (carry-over keeps their enrichment): {reflow_owned}")
     if not apply:
         print("[reingest-stale] dry run — nothing fetched; pass --apply to write")
         return 0

@@ -682,6 +682,10 @@ def _cache_first_extract_one(
                                contextual_retrieval=contextual_retrieval,
                                mime=fmeta.get("mimeType", "")):
         return True, None
+    if unchanged_reflow_owner(store, fmeta):
+        # Unchanged and stale: the reflow re-extracts it with carry-over and
+        # records the pending publish itself once apply_reflow commits.
+        return True, None
     content = fetch_content(service, fmeta, store=store, report=report)
     if content is None or (not content.text and not content.tables):
         return False, None
@@ -856,6 +860,34 @@ def discover_shared_drives(service, store, *, pin, budget=None) -> dict:
     return out
 
 
+_REFLOW_EPOCH = "1970-01-01T00:00:00"
+
+
+def unchanged_reflow_owner(store, fmeta: dict) -> bool:
+    """True when the ordinary path must NOT re-chunk this file (final review
+    I2): its stored chunks carry this exact Drive `modifiedTime` -- the source
+    is unchanged, the event metadata-only (share/move/star) or a backfill
+    re-walk -- AND they are either a reflow candidate (then `reflow:drive` is
+    enqueued, epoch modified_at, so the carry-over keeps their enrichment) or
+    already stamped by the reflow (gave_up/unsupported/source_gone: nothing to
+    gain, and an upsert over reused positional ids would reset enrichment and
+    delete the tail without invalidating its relations). A changed file
+    (different modifiedTime) always takes the ordinary path."""
+    from mcpbrain import reflow
+    fid = fmeta.get("id")
+    modified = fmeta.get("modifiedTime") or ""
+    if not fid or not modified:
+        return False
+    old = store.owner_chunks([f"gdrive-{fid}-"])
+    if not old or any((r["metadata"] or {}).get("modified") != modified for r in old):
+        return False
+    if reflow.needs_reflow(old):
+        store.enqueue_items([{"ref_id": fid, "event": "reflow",
+                              "modified_at": _REFLOW_EPOCH}], source="reflow:drive")
+        return True
+    return any((r["metadata"] or {}).get("reflow_skipped") for r in old)
+
+
 def handle_drive_item(service, store, item, *, folder_cache=None,
                       bulk_section=None, report=None) -> None:
     """Work one queued Drive item. Raises on failure so the loop backs it off."""
@@ -872,6 +904,8 @@ def handle_drive_item(service, store, item, *, folder_cache=None,
         fileId=fid, supportsAllDrives=True,
         fields="id,name,mimeType,modifiedTime,version,parents").execute(
             num_retries=_NUM_RETRIES)
+    if unchanged_reflow_owner(store, fmeta):
+        return                      # the reflow owns it (or already stamped it)
     content = fetch_content(service, fmeta, store=store, report=report)
     if content is None or (not content.text and not content.tables):
         return                      # unsupported/empty: done, nothing to write
@@ -985,6 +1019,8 @@ def backfill_drive(service, store, modified_after: str,
             if max_files is not None and processed >= max_files:
                 flush_skip_report(store, skip_report)
                 return processed
+            if unchanged_reflow_owner(store, f):
+                continue
             content = fetch_content(service, f, store=store, report=skip_report)
             if content is None or (not content.text and not content.tables):
                 continue

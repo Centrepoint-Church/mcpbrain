@@ -2611,6 +2611,25 @@ class Store:
         ("gdrive", "file_id"), ("gmail", "thread_id"), ("calendar", "event_id"),
     )
 
+    def reflow_owns(self, source_type: str, owner_id: str) -> bool:
+        """True when the reflow selector covers this repair owner
+        (_STALE_ID_FIELDS: a Drive file, a Gmail THREAD, a calendar event):
+        any lineage of its chunks is a reflow.needs_reflow candidate.
+        bin/repair.py reingest-stale skips these -- its plain re-ingest would
+        reset their enrichment and strand their provenance."""
+        from mcpbrain import reflow
+        field = dict(self._STALE_ID_FIELDS).get(source_type)
+        if not field:
+            return False
+        with self._connect() as db:
+            rows = [dict(r) for r in db.execute(
+                "SELECT doc_id, metadata FROM chunks WHERE "
+                f"{_meta_extract('$.source_type')}=? AND {_meta_extract('$.' + field)}=?",
+                (source_type, owner_id))]
+        for r in rows:
+            r["metadata"] = json.loads(r["metadata"] or "{}")
+        return bool(rows) and reflow.needs_reflow(rows)
+
     def stale_chunker_ids(self, *, table_version: int, other_version: int,
                           limit: int | None) -> list[dict]:
         """File/thread/event ids with at least one chunk written by an older

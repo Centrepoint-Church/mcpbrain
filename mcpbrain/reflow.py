@@ -270,6 +270,39 @@ def plan(old: list[dict], new: list[Chunk]) -> ReflowPlan:
 # Unit-file keys naming chunk owners / chunks (see prepare.write_units and
 # thread_enrich.reassemble_thread). Anything that names an id is collected; a
 # false positive only defers an item, which is the safe direction.
+_SPLIT_SOURCES = ("gdrive", "gmail", "anarlog", "calendar")
+
+
+def needs_reflow(rows: list[dict]) -> bool:
+    """True when an owner's stored chunk rows (Store.owner_chunks) are what
+    Store.reflow_candidates selects: a block-extracted MIME below its
+    EXTRACTION_VERSIONS entry, or a multi-chunk, non-table lineage below
+    SPLIT_VERSION. The ORDINARY ingest paths use it to hand an unchanged owner
+    to the reflow instead of re-chunking it destructively (final review I2).
+    A lineage with no chunk_total counts its own rows (legacy chunks)."""
+    from mcpbrain.chunking import SPLIT_VERSION
+    from mcpbrain.sync.blocks import extraction_version
+    counts: dict[str, int] = {}
+    for r in rows:
+        key = lineage_key(r["doc_id"], r["metadata"] or {})
+        counts[key] = counts.get(key, 0) + 1
+    for r in rows:
+        md = r["metadata"] or {}
+        st = md.get("source_type")
+        mime = md.get("mime_type") if st == "gdrive" else md.get("attachment_mime")
+        want = extraction_version(mime or "")
+        if st in ("gdrive", "gmail") and want and int(md.get("extraction_version") or 0) < want:
+            return True
+        if (st in _SPLIT_SOURCES and int(md.get("split_version") or 0) < SPLIT_VERSION
+                and md.get("content_subtype") != "table"):
+            total = md.get("chunk_total")
+            if total is None:
+                total = counts[lineage_key(r["doc_id"], md)]
+            if int(total or 1) > 1:
+                return True
+    return False
+
+
 _UNIT_REF_KEYS = frozenset({"thread_id", "message_id", "doc_id", "file_id",
                             "event_id", "session_id"})
 _UNIT_REF_LISTS = frozenset({"part_doc_ids", "chunk_doc_ids", "doc_ids"})
