@@ -3555,12 +3555,20 @@ class Store:
                     db, c.doc_id, c.text, c.content_hash, c.metadata, vec,
                     enriched=bool(row.enriched), enriched_version=row.enriched_version,
                     home=home)
-                db.execute("UPDATE chunks SET enrich_state=?, salience=COALESCE(?, salience),"
-                           " memory_tier=COALESCE(?, memory_tier),"
-                           " memory_type=COALESCE(?, memory_type), enrich_attempts=0"
-                           " WHERE doc_id=?",
-                           (row.enrich_state, row.salience, row.memory_tier,
-                            row.memory_type, c.doc_id))
+                # Covered rows carry the majority state of the old text they
+                # hold; everything else gets the column defaults. Never
+                # COALESCE with the row already at this positional id: that is
+                # an old chunk of DIFFERENT text (ids are reused), so its
+                # salience/tier/type say nothing about this text.
+                db.execute("UPDATE chunks SET enrich_state=?, salience=?, memory_tier=?,"
+                           " memory_type=?, enrich_attempts=0 WHERE doc_id=?",
+                           (row.enrich_state,
+                            row.salience if row.covered and row.salience is not None else 0.0,
+                            row.memory_tier if row.covered and row.memory_tier is not None
+                            else "",
+                            row.memory_type if row.covered and row.memory_type is not None
+                            else "episodic",
+                            c.doc_id))
             db.execute("CREATE TEMP TABLE IF NOT EXISTS reflow_tmp("
                        "old TEXT PRIMARY KEY, new TEXT NOT NULL)")
             db.execute("DELETE FROM reflow_tmp")

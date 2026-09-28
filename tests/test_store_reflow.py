@@ -356,3 +356,21 @@ def test_orphan_guard_is_not_blinded_by_a_null_doc_id_chunk(tmp_path):
     p = plan(s.owner_chunks(["gdrive-F-"]), _new("F", ["alpha beta gamma\ndelta epsilon"]))
     with pytest.raises(ReflowOrphanError, match="dangling"):
         s.apply_reflow("F", "drive", p, [V])
+
+
+def test_uncovered_row_gets_fresh_defaults_not_the_positional_old_chunks(tmp_path):
+    """Final-review investigation: an uncovered new chunk written over a reused
+    positional id kept that id's OLD salience/memory_tier/memory_type through
+    COALESCE -- state scored for different text. It gets the column defaults."""
+    s = _store(tmp_path)
+    _seed(s, texts=("alpha beta gamma", "delta epsilon"))
+    with s._connect(write=True) as db:
+        db.execute("UPDATE chunks SET salience=0.9, memory_tier='core', memory_type='semantic'")
+    old = s.owner_chunks(["gdrive-F-"])
+    new = _new("F", ["alpha beta gamma\ndelta epsilon", "Notes: entirely new remark"])
+    s.apply_reflow("F", "drive", plan(old, new), [V, V])
+    with s._connect() as db:
+        rows = {r[0]: tuple(r[1:]) for r in db.execute(
+            "SELECT doc_id, salience, memory_tier, memory_type, enriched FROM chunks")}
+    assert rows["gdrive-F-0"] == (0.9, "core", "semantic", 1)       # covered: carried
+    assert rows["gdrive-F-1"] == (0.0, "", "episodic", 0)           # uncovered: fresh
