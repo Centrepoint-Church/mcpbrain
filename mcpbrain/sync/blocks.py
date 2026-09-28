@@ -110,31 +110,94 @@ class _Piece:
     trail: str
 
 
+def _lost_cell_pieces(values: list[str], trail: str, max_chars: int) -> list[_Piece]:
+    """Emit cell/header text a row or caption rendering could not carry
+    verbatim -- truncated by _fit_row_sentence's shrinking cell cap, dropped
+    past _MAX_FIELDS_PER_ROW, or containing a newline _cell collapsed to a
+    space -- as its own bounded piece.
+
+    A span must be a literal substring of its chunk's text (spec Sec 2/3:
+    reflow's coverage proof reads spans, so a false span is silent content
+    loss). The safe response to "this cell didn't survive verbatim in its
+    row's sentence" is not to just drop the span -- it is to also emit the
+    cell in full somewhere, so the source text is never lost from retrieval
+    even though it no longer rides inside the row's own rendering.
+    """
+    out: list[_Piece] = []
+    seen: set[str] = set()
+    for v in values:
+        if not v or v in seen:
+            continue
+        seen.add(v)
+        parts = [v] if len(v) <= max_chars else split_long_paragraph(v, max_chars, overlap=0)
+        out.extend(_Piece(p, [p], "table", trail) for p in parts)
+    return out
+
+
 def _table_pieces(t: TableBlock, trail: str, max_chars: int) -> list[_Piece]:
     rows = tabular.normalise_rows([[("" if c is None else str(c)).strip() for c in r]
                                    for r in t.rows])
     if not rows:
         return []
+
+    dropped: list[str] = []   # cell/header text no piece could carry verbatim
+
     if len(rows) == 1:
+        cells = [c for c in rows[0] if c]
         line = _table_line(rows[0])
-        return [_Piece(line, [c for c in rows[0] if c], "table", trail)] if has_content(line) else []
+        if not has_content(line):
+            return []
+        # A single wide row is rendered as one 'a | b | c' line, same as
+        # to_text -- but that line is unbounded, so route it through the
+        # same bounded splitter as an oversize paragraph rather than
+        # emitting one chunk that can be many times max_chars.
+        parts = [line] if len(line) <= max_chars else split_long_paragraph(line, max_chars, overlap=0)
+        pieces = [_Piece(p, [c for c in cells if c in p], "table", trail) for p in parts]
+        claimed = {c for p in pieces for c in p.spans}
+        dropped.extend(c for c in cells if c not in claimed)
+        pieces.extend(_lost_cell_pieces(dropped, trail, max_chars))
+        return pieces
+
     header, body = rows[0], rows[1:]
     where = f" (in {trail})" if trail else ""
-    caption = f"Table{': ' + t.caption if t.caption else ''}{where}"
+    caption_full = f"Table{': ' + t.caption if t.caption else ''}{where}"
+    # A caption with no length bound (a long user-supplied caption, or a deep
+    # heading trail) could eat the whole budget or push it negative, in which
+    # case _fit_row_sentence's own floor can't save the piece -- the caption
+    # itself would already exceed max_chars before a single row is added.
+    # Keep at least half the budget for rows by truncating the caption.
+    cap_floor = max(max_chars // 2, 1)
+    max_caption_len = max(max_chars - cap_floor - 1, 0)
+    caption = (caption_full[:max_caption_len] if len(caption_full) > max_caption_len
+               else caption_full)
     budget = max_chars - len(caption) - 1
-    pieces, cur, cur_cells = [], [], []
+    pieces: list[_Piece] = []
+    cur: list[str] = []
+    cur_cells: list[str] = []
+
+    def flush_rows():
+        if not cur:
+            return
+        text = caption + "\n" + "\n".join(cur)
+        spans = [c for c in cur_cells if c in text]
+        dropped.extend(c for c in cur_cells if c not in text)
+        pieces.append(_Piece(text, spans, "table", trail))
+
     for r in body:
         sent = tabular._fit_row_sentence(header, r, budget)
         if cur and len("\n".join(cur + [sent])) > budget:
-            pieces.append(_Piece(caption + "\n" + "\n".join(cur), cur_cells, "table", trail))
+            flush_rows()
             cur, cur_cells = [], []
         cur.append(sent)
         cur_cells.extend(c for c in r if c)
-    if cur:
-        pieces.append(_Piece(caption + "\n" + "\n".join(cur), cur_cells, "table", trail))
-    # header cells are source text too: attribute them to the first piece
+    flush_rows()
+    # header cells are source text too: attribute them to the first piece,
+    # but only the ones it actually contains verbatim.
     if pieces:
-        pieces[0].spans = [c for c in header if c] + pieces[0].spans
+        header_present = [c for c in header if c and c in pieces[0].text]
+        dropped.extend(c for c in header if c and c not in pieces[0].text)
+        pieces[0].spans = header_present + pieces[0].spans
+    pieces.extend(_lost_cell_pieces(dropped, trail, max_chars))
     return pieces
 
 

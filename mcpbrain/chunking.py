@@ -388,21 +388,37 @@ def prose_max_chars(max_tokens: int = 500) -> int:
 def _units(para: str, max_chars: int) -> list[tuple[str, str]]:
     """(unit, separator-before-next) pairs, each unit <= max_chars: lines first,
     then sentences inside an over-long line, then words inside an over-long
-    sentence. The separator is what joins this unit to the following one."""
+    sentence. The separator is what joins this unit to the following one.
+
+    A blank line -- an empty string from para.split("\\n") -- is kept as its
+    own empty-text unit, not dropped: dropping it would collapse an internal
+    "\\n\\n" (a real paragraph break inside one over-budget Paragraph) down to
+    a single "\\n" when text_of() rejoins the units. An empty SENTENCE is a
+    different thing: it is an artifact of _SENTENCE_BREAK matching a line's
+    trailing whitespace with nothing after it (e.g. "...budget. " ends in a
+    space), carries no source text, and must be filtered out of THIS line's
+    own units before the line's final separator is stamped -- filtering it
+    afterwards, from the whole accumulated list, stamps the newline onto the
+    artifact instead of the real last sentence and it gets lost together with
+    the artifact, leaving the real last sentence's default " " separator and
+    silently joining it to the next line with a space instead of a newline.
+    """
     out: list[tuple[str, str]] = []
     for line in para.split("\n"):
         if len(line) <= max_chars:
             out.append((line, "\n"))
             continue
-        sentences = _SENTENCE_BREAK.split(line)
+        sentences = [s for s in _SENTENCE_BREAK.split(line) if s != ""]
+        line_units: list[tuple[str, str]] = []
         for s in sentences:
             if len(s) <= max_chars:
-                out.append((s, " "))
+                line_units.append((s, " "))
             else:
-                out.extend((w, " ") for w in _split_paragraph(s, max_chars, 0))
-        if out:
-            out[-1] = (out[-1][0], "\n")
-    return [(u, sep) for u, sep in out if u != ""] or [("", "\n")]
+                line_units.extend((w, " ") for w in _split_paragraph(s, max_chars, 0))
+        if line_units:
+            line_units[-1] = (line_units[-1][0], "\n")
+        out.extend(line_units)
+    return out or [("", "\n")]
 
 
 def split_long_paragraph(para: str, max_chars: int, overlap: int = 50) -> list[str]:

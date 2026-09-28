@@ -70,3 +70,21 @@ def test_chunk_text_no_longer_collapses_newlines_in_long_paragraph():
 
 def test_split_version_constant():
     assert chunking.SPLIT_VERSION == 1
+
+
+def test_trailing_whitespace_before_newline_does_not_collapse_newline():
+    """Fix round 1: a long line ending in whitespace (the sentence-break regex
+    matches the trailing whitespace, yielding an empty trailing 'sentence')
+    used to lose its own newline, joining onto the next line with a space."""
+    para = ("This is a sentence about the budget. " * 60) + "\nNEXT LINE here"
+    pieces = split_long_paragraph(para, 1800, overlap=0)
+    assert not any("budget. NEXT" in p for p in pieces)
+    assert any("\nNEXT LINE here" in p for p in pieces)
+
+
+def test_internal_blank_line_between_short_lines_is_preserved():
+    """Fix round 1: a blank line inside an over-budget paragraph used to be
+    dropped as an empty unit, collapsing '\\n\\n' into '\\n'."""
+    para = "Alpha\n\nBeta\n" + ("Long line word " * 30)   # tail forces a flush after Beta
+    pieces = split_long_paragraph(para, 200, overlap=0)
+    assert pieces[0] == "Alpha\n\nBeta"

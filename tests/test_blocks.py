@@ -68,3 +68,24 @@ def test_from_text_headings_and_paragraphs():
 
 def test_empty_and_contentless_blocks_are_dropped():
     assert render([Paragraph("   "), Paragraph("---")]) == []
+
+
+def test_table_render_stays_within_budget_and_spans_are_substrings():
+    """Fix round 1: a single wide row's unbounded 'a | b | c' line, and an
+    unbounded caption, could each alone push a table chunk past max_chars;
+    and a cell _row_sentence truncates/drops was still claimed as a span even
+    though it no longer appears verbatim in the emitted text."""
+    max_chars = 400
+    long_cell_a = "A" * 300
+    long_cell_b = "B" * 300
+    wide_row_table = TableBlock([["h1", "h2"], [long_cell_a, long_cell_b]])
+    single_row_wide = TableBlock([[long_cell_a, long_cell_b, "C" * 300]])
+    long_caption_table = TableBlock([["h1", "h2"], ["v1", "v2"]], caption="Section " * 100)
+
+    for block in (wide_row_table, single_row_wide, long_caption_table):
+        out = render([block], max_chars=max_chars)
+        assert out, "expected at least one chunk"
+        for r in out:
+            assert len(r.text) <= max_chars
+            for span in r.spans:
+                assert span in r.text
