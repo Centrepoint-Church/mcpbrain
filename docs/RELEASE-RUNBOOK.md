@@ -553,6 +553,83 @@ Practical consequences:
 - Metadata storage is *not* a factor here: it is JSON TEXT read with
   `json_extract`, which every supported SQLite has.
 
+## 8. Reflow rollout (extraction fidelity)
+
+The extraction-fidelity release re-chunks every already-enriched document whose
+chunks predate `SPLIT_VERSION` / `EXTRACTION_VERSIONS` (~7,000 owners on the
+author's store) **on every install**, in the background, carrying enrichment and
+provenance across in place (`reflow_map`). Spec:
+`docs/superpowers/specs/2026-09-24-extraction-fidelity-design.md`. The reflow is
+level-triggered, capped at 10 items / 15 s per sync cycle, seeded 200 at a time,
+and seeds only while a backup succeeded in the last 24 h. Kill switch:
+`reflow_enabled` (fleet-flippable via `org-config.json` `flags`).
+
+**Before release (attended, on a COPY — never the live store):**
+
+1. Stop the daemon so nothing writes while you copy (`launchctl stop` is not
+   enough — KeepAlive relaunches it), take the copy, and bring it back:
+   ```bash
+   launchctl bootout gui/$(id -u)/com.mcpbrain
+   pgrep -fl "mcpbrain" || echo "no daemon"           # confirm it is really gone
+   STORE="$HOME/Library/Application Support/mcpbrain/brain.sqlite3"
+   mkdir -p /tmp/reflow-dry && rm -f /tmp/reflow-dry/brain.sqlite3
+   sqlite3 "$STORE" "VACUUM INTO '/tmp/reflow-dry/brain.sqlite3'"
+   launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/com.mcpbrain.plist
+   ```
+2. Dry run against the copy (real Google services and embedder; never publishes,
+   never touches the daemon; refuses the live path):
+   ```bash
+   uv run python bin/reflow_dryrun.py --store /tmp/reflow-dry/brain.sqlite3 \
+       --limit 200 --per-mime --out /tmp/reflow-dry/summary.json --yes
+   ```
+   Require exit 0: **no new orphan references** (`orphans_new` empty —
+   `orphans_before` is reported too; the live store has pre-existing dangling
+   references, which is why the gate is on NEW ones), `foreign_key_check` 0 on a
+   rebuilt store, `integrity_check` ok, not halted. Record carried vs re-enrich
+   chunk counts, `by_class`, the p95 `extract_s` / `apply_reflow_s`, and the
+   Gmail/Calendar `source_changed` rate (a high rate means the ordinary path is
+   re-ingesting, which costs re-enrichment) in the release commit body.
+3. Gold on the copy. remap-gold reads `config.store_path()`, so point
+   `MCPBRAIN_HOME` at the copy's directory, and remap **scratch copies** of the
+   gold files — the reflow_map ids of the copy are not the live store's:
+   ```bash
+   cp tests/eval/golden_retrieval_set*.yaml /tmp/reflow-dry/     # keep the originals
+   for f in tests/eval/golden_retrieval_set*.yaml; do
+     MCPBRAIN_HOME=/tmp/reflow-dry uv run python bin/tenant.py remap-gold "$f" --from-start --write
+   done
+   MCPBRAIN_HOME=/tmp/reflow-dry uv run python tests/eval/run_eval.py --gold --k 10
+   cp /tmp/reflow-dry/golden_retrieval_set*.yaml tests/eval/      # restore the originals
+   ```
+   `--from-start` is right here because the gold files predate every reflow
+   (they carry no watermark). A 200-owner dry run is indicative only; the binding
+   gold gate is step 5.
+4. Release (§1). Afterwards watch `mcpbrain doctor` (the `Reflow` line) and
+   `/api/status` → `reflow`: `n of N owners done`, carried / re-enrich, the last
+   seed status. `BLOCKED` means the seed is gated (no backup in 24 h, the kill
+   switch, or an error) — fix the cause; it is never reported as idle.
+5. **On backlog 0** (doctor `✅ Reflow idle`, `/api/status` `reflow.integrity`
+   `== "ok"` — the seed runs `integrity_check` once when the backlog empties):
+   ```bash
+   for f in tests/eval/golden_retrieval_set*.yaml; do
+     uv run python bin/tenant.py remap-gold "$f" --from-start            # review
+     uv run python bin/tenant.py remap-gold "$f" --from-start --write
+   done
+   uv run python tests/eval/run_eval.py --gold --k 10
+   ```
+   Gate: recall@10 **≥ 0.850** and MRR **≥ 0.546** (the pre-release
+   measurement). Copy the remapped gold files back into the tenant repo
+   (`mcpbrain-tenant/eval/`). They now carry a
+   `# remap-gold: reflow_map applied through id N` watermark, so later runs are
+   incremental and must NOT pass `--from-start`; a watermark-less file run
+   without it adopts the current max id and remaps nothing (it says so).
+6. **A halt** (doctor `❌ Reflow HALTED`): `apply_reflow` found a dangling
+   reference and rolled back — nothing was written. Read the failing item's
+   `last_error` (`sqlite3 "$STORE" "SELECT source, ref_id, attempts, last_error
+   FROM sync_queue WHERE source LIKE 'reflow:%' AND last_error != ''"`) and the
+   daemon log, fix the cause, then `uv run python bin/reflow.py resume --yes`.
+   Every carry-over path (the reflow handler and the shared-drive cache import)
+   waits while halted.
+
 ## Environment note — repos live outside iCloud
 
 All repos now live under `~/GitHub` (moved off the iCloud-synced `~/Documents`

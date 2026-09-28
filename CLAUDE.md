@@ -301,6 +301,40 @@ assert_relation / merge / undo, each with `basis` user_stated|inferred) plus
 
 ## Shipping caveats
 
+- **Extraction fidelity (2026-09-24 spec) — IMPLEMENTED on `main`, NOT released.**
+  Spec `docs/superpowers/specs/2026-09-24-extraction-fidelity-design.md`. PDF,
+  DOCX, PPTX, RTF, Google Docs and Slides are now extracted as structured blocks
+  (headings, paragraphs, tables, slide notes) and rendered with a
+  `heading_trail`; long paragraphs split at sentence seams (`chunking.SPLIT_VERSION
+  = 1`, prose budget `prose_max_chars()` = 1800; `CHUNKER_VERSION` stays **3**).
+  Chunks stamp `split_version`, `extraction_version` (per MIME,
+  `sync/blocks.EXTRACTION_VERSIONS`) and `heading_trail`.
+  **The reflow re-chunks ~7,000 already-enriched owners on EVERY install**, in
+  place: `reflow.plan` + `Store.apply_reflow` carry enrichment and remap every
+  `_REFLOW_REF_COLUMNS` reference simultaneously in one transaction, logged in
+  `reflow_map`; an orphan reference raises `ReflowOrphanError`, rolls back and
+  HALTS the reflow (`reflow:halted`; clear with `bin/reflow.py resume --yes`
+  after investigating). Gates: kill switch `reflow_enabled` (fleet-flippable),
+  seeds only with a backup in the last 24 h, 200-item window, ≤10 items / 15 s
+  per cycle, only the sources this install can work
+  (`reflow.workable_reflow_sources`). Visible in doctor (`Reflow` line),
+  `/api/status` and the dashboard — a gated seed shows BLOCKED, never idle.
+  **New schema:** `entity_relations.contrib_doc_id` (the pre-remap id, so org
+  contribution's `source_ref` does not change under a remap — otherwise one
+  document would count as two corroborating sources), `enrich_payloads.covers`
+  (a payload publishes to the shared-drive cache only when it covers every
+  non-cold chunk), `reflow_owners.outcome`, `reflow_map`.
+  **Gold:** `bin/tenant.py remap-gold <file> [--from-start] --write` repoints gold
+  ids through `reflow_map` and records a `# remap-gold: reflow_map applied through
+  id N` watermark; `--from-start` only for a file that predates the reflow.
+  **Two attended scripts:** `bin/reflow_dryrun.py` (store COPY only, never
+  publishes; the pre-release gate) and `bin/reflow.py status|resume`.
+  **Rollout procedure: `docs/RELEASE-RUNBOOK.md` §8** — dry run on a VACUUM INTO
+  copy (no new orphans, integrity ok), then after release on backlog 0:
+  integrity ok, remap-gold, gold gate recall@10 ≥ 0.850 and MRR ≥ 0.546.
+  Also in this work: Drive contributions are now labelled `source_kind "drive"`
+  (were "unknown"; labelling only — the meeting guard is the only reader).
+
 - **Current state (2026-09-10): the four version files (+ `uv.lock`) are at `0.7.128`,
   RELEASED** — source `2b806ee`, gh-pages `0cdedcb`, plugin `ee26349`; the published index
   serves only `mcpbrain-0.7.128-py3-none-any.whl` and `install.ps1` is live (200). Full
