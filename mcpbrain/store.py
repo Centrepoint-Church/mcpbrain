@@ -698,6 +698,23 @@ def _begin_immediate(db, *, retries: int = _BEGIN_RETRIES) -> None:
             _time.sleep(_BEGIN_BASE_SLEEP_S * (2 ** attempt) * (0.5 + random.random()))
 
 
+class ReflowOrphanError(RuntimeError):
+    """apply_reflow found a reference to one of the owner's doc_ids with no
+    chunk row; the transaction was rolled back (extraction-fidelity §3)."""
+
+
+# Every (table, column) holding a chunk doc_id that a reflow must remap.
+_REFLOW_REF_COLUMNS = (
+    ("entity_relations", "source_doc_id"),
+    ("entity_observations", "source"),
+    ("actions", "source_doc_id"),
+    ("actions", "waiting_on_cleared_by_doc_id"),
+    ("graph_actions_legacy", "source_doc_id"),
+    ("graph_decisions_legacy", "source_doc_id"),
+    ("recall_feedback", "doc_id"),
+)
+
+
 class Store:
     # Phase C: bump when the FTS contextual-text format changes so
     # reindex_fts_batch() knows which embedded chunks are stale.
@@ -3316,6 +3333,37 @@ class Store:
                 (drive_id,)).rowcount
         return {"queue_rows": queue_rows, "cursors": cursors,
                 "pending_publishes": pending_publishes}
+
+    # --- reflow (extraction-fidelity) -- CONTRACT (Stage 0), unit 1d ---------
+
+    def enqueue_items(self, items, *, source: str) -> int:
+        """enqueue_and_advance without a cursor (the reflow seed has no feed
+        position). ON CONFLICT(source, ref_id) DO NOTHING."""
+        raise NotImplementedError("Store.enqueue_items: unit 1d")
+
+    def owner_chunks(self, doc_id_prefixes: list[str]) -> list[dict]:
+        """Rows (doc_id, text, metadata dict, enriched, enriched_version,
+        enrich_state, salience, memory_tier, memory_type) for every chunk whose
+        doc_id starts with any prefix, in rowid order."""
+        raise NotImplementedError("Store.owner_chunks: unit 1d")
+
+    def apply_reflow(self, owner: str, source: str, plan, vectors, *, home=None) -> dict:
+        """Apply a reflow.ReflowPlan in ONE transaction; returns {written,
+        carried, reenrich, deleted, remapped}; raises ReflowOrphanError (rolled
+        back) on any dangling reference."""
+        raise NotImplementedError("Store.apply_reflow: unit 1d")
+
+    def latest_reflow_target(self, doc_id: str) -> str | None:
+        raise NotImplementedError("Store.latest_reflow_target: unit 1d")
+
+    def reflow_stats(self) -> dict:
+        """{owners_done, chunks_carried, chunks_reenrich, queued}."""
+        raise NotImplementedError("Store.reflow_stats: unit 1d")
+
+    def reflow_candidates(self, limit: int) -> list[tuple[str, str]]:
+        """Level-triggered selector: (source, owner) pairs, source in
+        reflow:drive|gmail|anarlog|calendar, excluding owners already queued."""
+        raise NotImplementedError("Store.reflow_candidates: unit 1d")
 
     def enqueue_and_advance(self, items, *, source: str, cursor: str) -> int:
         """UPSERT queue rows and advance this source's cursor in ONE transaction.

@@ -718,6 +718,12 @@ def fleet_flag(home, name, default=False):
     return default
 
 
+def reflow_enabled(home) -> bool:
+    """Kill switch for the background reflow (2026-09-24 extraction-fidelity).
+    Fleet-flippable; the new extractors apply to fresh ingests regardless."""
+    return bool(fleet_flag(home, "reflow_enabled", True))
+
+
 def retrieval_expand_enabled(home) -> bool:
     """Whether injection-path expansion runs. Fleet-flippable via
     org-config.json {"flags": {"retrieval_expand": true}}. Default OFF."""

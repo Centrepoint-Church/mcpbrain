@@ -10,6 +10,35 @@
 
 **Spec:** `docs/superpowers/specs/2026-09-24-extraction-fidelity-design.md`
 
+## Execution map (2026-09-28) — units, ownership, and moves from the task text
+
+A Stage 0 **contracts commit** already exists on `main`: `SPLIT_VERSION`,
+`prose_max_chars`, a `split_long_paragraph` stub (chunking.py); `sync/blocks.py`
+(final types/constants, stub `to_text`/`from_text`/`render`); `Chunk.spans`;
+`sync/extract_pdf.py`, `sync/extract_office.py`, `sync/rtf.py` stubs;
+`reflow.py` (final dataclasses + `norm` + `lineage_key`, stub `stitch`/`plan`);
+`store.ReflowOrphanError`, `_REFLOW_REF_COLUMNS` and stub reflow `Store` methods
+(`enqueue_items`, `owner_chunks`, `apply_reflow`, `latest_reflow_target`,
+`reflow_stats`, `reflow_candidates`); `queue.DEFER` (sentinel only);
+`config.reflow_enabled` (final). **Replace stubs; never change a contract
+signature or type.** If a contract is wrong, stop and report.
+
+| Unit | Plan tasks | Owns (only these files) | Moves from the task text |
+|---|---|---|---|
+| 1a | 1, 2 | `chunking.py`, `sync/blocks.py`, `tests/test_chunking_split.py`, `tests/test_blocks.py`, `tests/oracles/`, `tests/test_chunking.py` | `Chunk.spans`, `SPLIT_VERSION`, `prose_max_chars` already exist. |
+| 1b | 3 | `sync/extract_pdf.py`, `tests/test_extract_blocks_pdf.py` | Code goes in `extract_pdf.py`, NOT `extractors.py`. Import `is_scanned_pdf`, `_tesseract_available`, `_ocr_page`, `_OCR_MIN_PAGE_CHARS`, `log` helpers from `mcpbrain.sync.extractors` INSIDE the function (extractors will later re-export this module). Tests assert on blocks directly — no `to_text`/`extract_text_from_pdf` (unit 1a/2a own those); the reading-order test concatenates `Paragraph.text`s. Use `blocks.from_text` only on the OCR path and cover it with a monkeypatch that returns `[Paragraph(...)]` if 1a is not merged yet. |
+| 1c | 4, 5, 6 | `sync/extract_office.py`, `sync/rtf.py`, `tests/test_extract_blocks_docx.py`, `tests/test_extract_blocks_pptx.py`, `tests/test_rtf.py` | Code in the new modules, NOT `extractors.py`. Tests assert on blocks / `rtf_to_text` only. `extract_blocks_from_rtf` = `from_text(rtf_to_text(...))`; its test belongs to 2a. |
+| 1d | 9, 10 (+ Task 12's `reflow_candidates` and its two selector tests) | `reflow.py`, `store.py`, `drain.py`, `org_contrib.py`, `tests/test_reflow_plan.py`, `tests/test_store_reflow.py`, `tests/test_reflow_selector.py` | Two commits: planner, then store. All six reflow `Store` methods are 1d's. |
+| 1e | 8, 15 | `ingest_cache.py`, `bin/tenant.py`, `tests/test_ingest_cache_extraction_version.py`, `tests/test_tenant_remap_gold.py` | Do NOT touch `drive.py` (2a threads `mime=` into `_cache_first_extract_one`). The remap-gold test uses a tiny fake with `get_chunk`/`latest_reflow_target`, since `remap_gold` calls only those. |
+| 2a | 7, 11 | `sync/drive.py`, `sync/attachments.py`, `sync/normalise.py`, `sync/anarlog.py`, `sync/calendar.py`, `embed.py`, `sync/extractors.py`, `sync/reflow_handler.py`, `sync/queue.py`, `sync/__init__.py`, their tests | `extractors.py` re-exports `extract_blocks_from_*` and its `extract_text_from_pdf/docx/pptx` become `to_text(extract_blocks_*(...))` (old bodies deleted). Adds `mime=` to both `try_import` calls. Implements `DEFER` handling in `work_queue`. Starts after 1a, 1b, 1c, 1d, 1e pass review. |
+| 2b | 12 (minus the store selector), 14 | `daemon.py`, `doctor.py`, `dashboard.py`, `bin/reflow.py`, `tests/test_reflow_seed.py`, `tests/test_reflow_visibility.py` | Starts after 1d. |
+| 2c | 13 | `ingest_cache.py`, `tests/test_ingest_cache_reflow.py` | Starts after 1d and 1e. |
+| 3 | 16 + whole-branch review | `bin/reflow_dryrun.py`, docs | Attended. |
+
+Commit rule for every unit: `git add <owned files>` then `git commit <owned files> -m "..."`
+(pathspec commit, so another agent's edits are never swept in); retry once after 2 s on
+`index.lock`. Never `git add -A`, never push.
+
 ## Global Constraints
 
 - `CHUNKER_VERSION` stays **3**. Do not bump it (it gates the table pipeline and `bin/repair.py`).

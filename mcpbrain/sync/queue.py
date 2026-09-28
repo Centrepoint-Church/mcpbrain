@@ -14,6 +14,11 @@ from datetime import datetime, timezone
 
 log = logging.getLogger("mcpbrain.sync.queue")
 
+# Handler return value: leave the row exactly as it is (neither completed nor
+# failed) and try again next cycle. Used by the reflow handler's per-cycle cap
+# and its enrich-unit guard. work_queue's handling is implemented by unit 2a.
+DEFER = object()
+
 
 def _utc_now_iso() -> str:
     return datetime.now(timezone.utc).replace(tzinfo=None).isoformat()

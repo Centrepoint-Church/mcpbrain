@@ -6,7 +6,7 @@ No Google API calls here; this module is pure data transformation.
 
 import base64
 import re
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 
 from mcpbrain.chunking import CHUNKER_VERSION, chunk_text, content_hash, has_content
 
@@ -17,6 +17,11 @@ class Chunk:
     text: str
     content_hash: str
     metadata: dict
+    # Source text this chunk carries, excluding renderer-synthesised text
+    # (table captions, row-sentence column labels). In-memory only -- never
+    # written to the store. reflow.plan uses it to prove coverage. Empty
+    # means "the whole text is source text".
+    spans: list[str] = field(default_factory=list)
 
 
 # ---------------------------------------------------------------------------

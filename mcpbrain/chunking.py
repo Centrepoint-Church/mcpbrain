@@ -30,6 +30,13 @@ import unicodedata
 # Bump it whenever chunk boundaries or chunk admission change.
 CHUNKER_VERSION = 3
 
+# Version of chunk_text's over-budget paragraph splitter. 0 (absent) = the
+# word-split that collapsed every newline via para.split(); 1 = the
+# line -> sentence -> word fallback (2026-09-24 extraction-fidelity spec).
+# Stamped as metadata['split_version']; the reflow selector reads it. It is
+# deliberately separate from CHUNKER_VERSION, which gates the table pipeline.
+SPLIT_VERSION = 1
+
 # The version floor below which EVERY content type is considered stale --
 # these chunks predate the 2026-07-28 headroom fix (1 -> 2) and have needed
 # re-chunking since before this release, regardless of source or subtype.
@@ -363,6 +370,21 @@ def split_lossless(text: str, max_chars: int = NOTE_MAX_CHARS) -> list[str]:
         out.append(text[i:i + cut])
         i += cut
     return out
+
+
+def prose_max_chars(max_tokens: int = 500) -> int:
+    """The per-chunk character budget chunk_text() uses for `max_tokens`."""
+    max_chars = max_tokens * 4
+    if max_chars >= _PREFIX_HEADROOM_CHARS * 4:
+        max_chars -= _PREFIX_HEADROOM_CHARS
+    return max_chars
+
+
+def split_long_paragraph(para: str, max_chars: int, overlap: int = 50) -> list[str]:
+    """Split ONE paragraph larger than max_chars without collapsing newlines:
+    lines -> sentences -> words, overlap as whole trailing units. CONTRACT
+    (extraction-fidelity Stage 0); implemented by unit 1a."""
+    raise NotImplementedError("split_long_paragraph: unit 1a")
 
 
 def chunk_text(text: str, max_tokens: int = 500, overlap: int = 50) -> list[str]:
