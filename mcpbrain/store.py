@@ -3556,9 +3556,13 @@ class Store:
             for table, col in _REFLOW_REF_COLUMNS:
                 if table not in tables:
                     continue
+                # NOT EXISTS, never `NOT IN (SELECT doc_id FROM chunks)`:
+                # chunks.doc_id is nullable, and one NULL makes NOT IN
+                # unknown for every row -- the guard would count 0.
                 dangling += db.execute(
-                    f"SELECT count(*) FROM {table} WHERE {col} IN ({ph}) "
-                    f"AND {col} NOT IN (SELECT doc_id FROM chunks)", ids).fetchone()[0]
+                    f"SELECT count(*) FROM {table} t WHERE t.{col} IN ({ph}) "
+                    f"AND NOT EXISTS (SELECT 1 FROM chunks c WHERE c.doc_id = t.{col})",
+                    ids).fetchone()[0]
             if missing_targets or dangling:
                 raise ReflowOrphanError(
                     f"reflow {owner}: {dangling} dangling reference(s), "

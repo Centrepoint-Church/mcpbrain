@@ -336,3 +336,20 @@ def test_apply_reflow_refuses_to_delete_a_whole_lineage(tmp_path):
         s.apply_reflow("M", "gmail", p, [V])
     assert _snapshot(s) == before
     assert (tmp_path / "a.sqlite3").read_bytes() == raw_before
+
+
+def test_orphan_guard_is_not_blinded_by_a_null_doc_id_chunk(tmp_path):
+    """Final review I7: `col NOT IN (SELECT doc_id FROM chunks)` is never true
+    once any chunks.doc_id is NULL, so the guard silently counted 0."""
+    s = _store(tmp_path)
+    _seed(s)
+    _all_refs(s, "gdrive-F-1")
+    with s._connect(write=True) as db:
+        db.execute("INSERT INTO chunks(doc_id, text, content_hash, metadata) "
+                   "VALUES(NULL, 'stray', 'x', '{}')")
+        db.execute("CREATE TRIGGER late_ref AFTER INSERT ON reflow_map BEGIN "
+                   "INSERT INTO recall_feedback(doc_id, event_type) "
+                   "VALUES('gdrive-F-1', 'late'); END")
+    p = plan(s.owner_chunks(["gdrive-F-"]), _new("F", ["alpha beta gamma\ndelta epsilon"]))
+    with pytest.raises(ReflowOrphanError, match="dangling"):
+        s.apply_reflow("F", "drive", p, [V])
