@@ -305,3 +305,14 @@ def test_dashboard_done_backlog_with_stale_backup_is_not_blocked():
                              "last_seed": {"status": status, "remaining": 0}}) == "done (4)"
         assert _reflow_text({"owners_done": 0, "queued": 0, "remaining": 0,
                              "last_seed": {"status": status}}) == "idle"
+
+
+def test_dashboard_gated_seed_with_unknown_remaining_is_blocked():
+    """remaining == null (a first-ever error tick, or a failed count) is
+    UNKNOWN, not zero: a gated seed must still read as blocked."""
+    for status in ("no_recent_backup", "disabled", "error"):
+        assert _reflow_text({"owners_done": 0, "queued": 0, "remaining": None,
+                             "last_seed": {"status": status, "remaining": None}}
+                            ) == "blocked: " + status.replace("_", " ")
+    assert _reflow_text({"owners_done": 0, "queued": 0, "remaining": None,
+                         "last_seed": {"status": "ok"}}) == "idle"

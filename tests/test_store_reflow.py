@@ -454,3 +454,18 @@ def test_migrated_legacy_payload_covers_nothing_unless_provably_whole(tmp_path):
     assert _covers(s, "G") == ["gdrive-G-0", "gdrive-G-1"]
     assert s.enrich_payload_covers_file("G")
     assert _covers(s, "H") == [] and not s.enrich_payload_covers_file("H")
+
+
+@pytest.mark.parametrize("bad", ["garbage", "null", "5", "{}"])
+def test_malformed_covers_never_fails_the_upsert(tmp_path, bad):
+    s = _store(tmp_path)
+    _seed(s)
+    s.set_enrich_payload("F", "{}", 3, covers=["gdrive-F-0"])
+    with s._connect(write=True) as db:
+        db.execute("UPDATE enrich_payloads SET covers=? WHERE file_id='F'", (bad,))
+    assert s.upsert_chunk("gdrive-F-1", "changed text", "h1-new", _meta(1)) is True
+    assert s.get_chunk("gdrive-F-1")["text"] == "changed text"
+    with s._connect() as db:
+        assert db.execute("SELECT covers FROM enrich_payloads WHERE file_id='F'"
+                          ).fetchone()[0] == "[]"
+    assert not s.enrich_payload_covers_file("F")

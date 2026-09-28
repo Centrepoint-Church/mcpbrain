@@ -2251,25 +2251,45 @@ class Store:
         noise filter, the trivial short-circuit) would otherwise make a stale
         payload look whole-file to enrich_payload_covers_file. A NULL (legacy
         whole-file) covers is materialised as the file's other non-cold
-        chunks. One primary-key lookup; nothing for a non-Drive doc_id."""
-        fid = _file_key_from_doc_id(doc_id)
-        if fid is None:
-            return
-        prow = db.execute("SELECT covers FROM enrich_payloads WHERE file_id=?",
-                          (fid,)).fetchone()
-        if prow is None:
-            return
-        if prow[0] is None:
-            covers = {x[0] for x in db.execute(
-                f"SELECT doc_id FROM chunks WHERE {_meta_extract('$.file_id')}=? "
-                "AND COALESCE(enrich_state,'')!='cold'", (fid,))}
-        else:
-            covers = set(json.loads(prow[0]))
-            if doc_id not in covers:
+        chunks. One primary-key lookup; nothing for a non-Drive doc_id.
+
+        Never raises: it runs inside upsert_chunk's transaction on the hottest
+        write path, so a raise would roll back every content change to the
+        file on every sync. A malformed covers (unparseable, or not a list)
+        is rewritten as [] -- fail closed: the payload is withheld until
+        drain re-covers the file."""
+        import logging
+        try:
+            fid = _file_key_from_doc_id(doc_id)
+            if fid is None:
                 return
-        covers.discard(doc_id)
-        db.execute("UPDATE enrich_payloads SET covers=? WHERE file_id=?",
-                   (json.dumps(sorted(covers)), fid))
+            prow = db.execute("SELECT covers FROM enrich_payloads WHERE file_id=?",
+                              (fid,)).fetchone()
+            if prow is None:
+                return
+            if prow[0] is None:
+                covers = {x[0] for x in db.execute(
+                    f"SELECT doc_id FROM chunks WHERE {_meta_extract('$.file_id')}=? "
+                    "AND COALESCE(enrich_state,'')!='cold'", (fid,))}
+            else:
+                try:
+                    parsed = json.loads(prow[0])
+                except (TypeError, ValueError):
+                    parsed = None
+                if not isinstance(parsed, list) or not all(isinstance(x, str) for x in parsed):
+                    logging.getLogger(__name__).debug(
+                        "enrich payload %s: malformed covers %r reset to []", fid, prow[0])
+                    db.execute("UPDATE enrich_payloads SET covers='[]' WHERE file_id=?", (fid,))
+                    return
+                covers = set(parsed)
+                if doc_id not in covers:
+                    return
+            covers.discard(doc_id)
+            db.execute("UPDATE enrich_payloads SET covers=? WHERE file_id=?",
+                       (json.dumps(sorted(covers)), fid))
+        except Exception as exc:  # noqa: BLE001 — payload bookkeeping must never fail the write
+            logging.getLogger(__name__).debug(
+                "enrich payload covers update skipped for %s: %s", doc_id, exc)
 
     def mark_all_unembedded(self) -> None:
         with self._connect(write=True) as db:

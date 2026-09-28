@@ -398,8 +398,11 @@ function reflowText(r){
   const last = (r.last_seed || {}).status;
   const pending = (r.queued || 0) + (r.remaining || 0);
   const done = r.owners_done || 0;
-  // Same rule as doctor's reflow_line: blocked only while work remains.
-  if(pending && ["no_recent_backup", "disabled", "error"].includes(last))
+  // Same rule as doctor's reflow_line: blocked only while work remains. A
+  // null remaining is UNKNOWN (a first-ever error tick, a failed count), so a
+  // gated seed with it is treated as having work left.
+  const gated = ["no_recent_backup", "disabled", "error"].includes(last);
+  if(gated && (pending || r.remaining == null))
     return "blocked: " + last.replace(/_/g, " ");
   if(pending)
     return fmt(done) + (r.total != null ? " of " + fmt(r.total) : "") + " done";
