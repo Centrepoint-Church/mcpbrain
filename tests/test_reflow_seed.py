@@ -379,3 +379,61 @@ def test_scope_not_granted_frees_queued_rows(tmp_path, monkeypatch):
     assert _queued(s) == set()
     last = json.loads(s.get_cursor("reflow:last_seed"))
     assert "reflow:calendar" not in last["sources"]
+
+
+# -- hardening H1: a source-resolution failure never frees queued rows -------
+
+def test_source_resolution_error_returns_before_dropping_or_completing(tmp_path, monkeypatch):
+    s = _store(tmp_path)
+    s.enqueue_items([{"ref_id": "OLD", "event": "reflow",
+                      "modified_at": "1970-01-01T00:00:00"}], source="reflow:drive")
+    (tmp_path / "backup_state.json").write_text(json.dumps({"last_success": time.time()}))
+    d = _seed_daemon(tmp_path, monkeypatch, s)
+
+    def boom(home):
+        raise RuntimeError("token unreadable")
+
+    monkeypatch.setattr(d, "_reflow_source_sets", boom)
+    checked = []
+    monkeypatch.setattr("mcpbrain.doctor._run_integrity_check",
+                        lambda home: checked.append(home) or [])
+    out = d._run_reflow_seed()
+    assert out["reflow_seed"] is False and "token unreadable" in out["error"]
+    assert _queued(s) == {("reflow:drive", "OLD", 0)}      # nothing freed
+    assert checked == []                                   # never "backlog empty"
+    last = json.loads(s.get_cursor("reflow:last_seed"))
+    assert last["status"] == "error" and "token unreadable" in last["error"]
+
+
+# -- hardening H6: disabled/halted ticks reuse the last known remaining -------
+
+def _no_scan(monkeypatch, s):
+    calls = []
+    real = s.reflow_candidates
+    monkeypatch.setattr(s, "reflow_candidates",
+                        lambda *a, **k: calls.append(a) or real(*a, **k))
+    return calls
+
+
+def test_disabled_seed_does_not_rescan_candidates(tmp_path, monkeypatch):
+    from mcpbrain import daemon as dmod
+    s = _store(tmp_path)
+    d = _blocked_daemon(tmp_path, monkeypatch, s)
+    monkeypatch.setattr(dmod.config, "reflow_enabled", lambda home: False)
+    s.set_cursor("reflow:last_seed", json.dumps({"status": "ok", "remaining": 7}))
+    calls = _no_scan(monkeypatch, s)
+    assert d._run_reflow_seed() == {"reflow_seed": "disabled"}
+    assert calls == []
+    last = json.loads(s.get_cursor("reflow:last_seed"))
+    assert last["status"] == "disabled" and last["remaining"] == 7
+
+
+def test_halted_seed_does_not_rescan_candidates(tmp_path, monkeypatch):
+    s = _store(tmp_path)
+    s.set_cursor("reflow:halted", "reflow F: 1 dangling reference(s)")
+    d = _blocked_daemon(tmp_path, monkeypatch, s)
+    s.set_cursor("reflow:last_seed", json.dumps({"status": "halted", "remaining": 3}))
+    calls = _no_scan(monkeypatch, s)
+    d._run_reflow_seed()
+    assert calls == []
+    assert json.loads(s.get_cursor("reflow:last_seed"))["remaining"] == 3

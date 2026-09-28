@@ -3190,12 +3190,40 @@ class Daemon:
             return None
         home = str(app_dir())
         self._last_reflow_seed = self._clock()
+        prev = self._last_reflow_seed_record()
         try:
             now, workable = self._reflow_source_sets(home)
         except Exception as exc:  # noqa: BLE001 — a cadence pass must never kill the cycle
+            # Return BEFORE the drop/backlog-empty logic: with no workable set
+            # every source would look permanently unavailable, so its queued
+            # rows would be freed and an empty backlog could be declared done.
             log.warning("reflow_seed: could not resolve sources: %s", exc)
-            now, workable = set(), None
-        out = self._reflow_seed_once(home, now, workable or set())
+            out = {"reflow_seed": False, "error": f"could not resolve reflow sources: {exc}"}
+            self._record_reflow_seed(out, prev.get("remaining"), prev.get("sources"))
+            return out
+        out = self._reflow_seed_once(home, now, workable)
+        if "remaining" in out:
+            remaining = out["remaining"]
+        elif out.get("reflow_seed") in ("disabled", "halted") and "remaining" in prev:
+            # A disabled/halted seed ticks hourly for as long as it stays that
+            # way and nothing it gates changes the backlog: reuse the last
+            # known figure instead of re-running the chunk-table scans.
+            remaining = prev["remaining"]
+        else:
+            # Every other branch -- gated or failed included -- records what is
+            # left, so the dashboard/doctor never read a blocked seed as idle.
+            remaining = self._reflow_remaining(workable)
+        self._record_reflow_seed(out, remaining, sorted(workable))
+        return {k: v for k, v in out.items() if k != "remaining"}
+
+    def _last_reflow_seed_record(self) -> dict:
+        try:
+            rec = json.loads(self._store.get_cursor("reflow:last_seed") or "{}")
+            return rec if isinstance(rec, dict) else {}
+        except Exception:  # noqa: BLE001 — a bad record is just "unknown"
+            return {}
+
+    def _record_reflow_seed(self, out: dict, remaining, sources) -> None:
         try:
             import datetime as _dt
             rec = {"status": out.get("reflow_seed") if out.get("reflow_seed") is not False
@@ -3203,16 +3231,12 @@ class Daemon:
             for k in ("enqueued", "error"):
                 if k in out:
                     rec[k] = out[k]
-            # Every branch -- gated, halted or failed included -- records what
-            # is left, so the dashboard/doctor never read a blocked seed as idle.
-            rec["remaining"] = (out["remaining"] if "remaining" in out
-                                else self._reflow_remaining(workable))
-            if workable is not None:
-                rec["sources"] = sorted(workable)
+            rec["remaining"] = remaining
+            if sources is not None:
+                rec["sources"] = sources
             self._store.set_cursor("reflow:last_seed", json.dumps(rec))
         except Exception as exc:  # noqa: BLE001 — visibility must never kill the cycle
             log.debug("reflow_seed: could not record last status: %s", exc)
-        return {k: v for k, v in out.items() if k != "remaining"}
 
     def _reflow_remaining(self, sources) -> int | None:
         if sources is None:
