@@ -16,7 +16,9 @@ _REFLOW_REF_COLUMNS reference with no chunk row (before AND after),
 PRAGMA foreign_key_check and PRAGMA integrity_check.
 
 Safety, by construction:
-  * refuses the live store (config.store_path(), resolved, or the same file);
+  * refuses the live store (config.store_path() AND the platform default
+    store computed without MCPBRAIN_HOME, resolved or the same file), and
+    refuses when the comparison itself fails (OSError fails closed);
   * never publishes: the handler runs with record_publish=False, so no
     shared-drive pending publish is recorded, and a CHANGED Shared Drive file
     (which only the cycle's shared-drive handler -- fleet storage and all --
@@ -26,8 +28,9 @@ Safety, by construction:
     install's home is only READ: config flags, the enrich queue (in-flight
     units defer an owner, exactly as they would live) and the anarlog db.
 
-Exit status: 0 = clean; 1 = a NEW orphan reference (after > before on any
-column; with --strict-orphans, any orphan at all), foreign_key_check > 0 on a
+Exit status: 0 = clean; 1 = a NEW orphan reference (a dangling value present
+after the run that was not before, per column -- a set difference, not a count
+difference; with --strict-orphans, any orphan at all), foreign_key_check > 0 on a
 rebuilt store (one whose tables carry REFERENCES clauses), integrity_check
 not ok, or the run halted on a ReflowOrphanError; 2 = refused / bad input.
 
@@ -39,6 +42,7 @@ operator to ignore it. The count before and after is always reported.
 """
 import argparse
 import json
+import os
 import sqlite3
 import sys
 import time
@@ -72,14 +76,35 @@ def _get_embedder():
 
 # -- helpers --------------------------------------------------------------------
 
+def _platform_default_store() -> Path:
+    """The store a real install uses, computed WITHOUT the MCPBRAIN_HOME
+    override (mirrors config.app_dir's platform branch, minus its mkdir): an
+    operator who exported MCPBRAIN_HOME for a scratch copy must still not be
+    able to point --store at the live install's file."""
+    if os.name == "nt":
+        base = Path(os.environ.get("APPDATA") or Path.home() / "AppData" / "Roaming")
+        d = base / "mcpbrain"
+    elif sys.platform == "darwin":
+        d = Path.home() / "Library" / "Application Support" / "mcpbrain"
+    else:
+        d = Path.home() / ".mcpbrain"
+    return d / "brain.sqlite3"
+
+
 def _is_live(path: Path) -> bool:
-    live = config.store_path()
+    """True when `path` is (or might be) a live store: config.store_path()
+    as configured, or the platform default store. Fails CLOSED -- any OSError
+    while comparing counts as live, so an unresolvable path is refused."""
     try:
-        if path.resolve() == live.resolve():
-            return True
-        return live.exists() and path.exists() and path.samefile(live)
-    except OSError:
+        target = path.resolve()
+        for live in (config.store_path(), _platform_default_store()):
+            if target == live.resolve():
+                return True
+            if live.exists() and path.exists() and path.samefile(live):
+                return True
         return False
+    except OSError:
+        return True
 
 
 def _classify(store, src: str, owner: str) -> str:
@@ -120,18 +145,21 @@ def _select(store, limit: int, sources, per_mime: bool) -> list[tuple[str, str, 
     return out
 
 
-def _orphans(store) -> dict[str, int]:
+def _orphan_refs(store) -> dict[str, set[str]]:
+    """{"table.column": the set of referenced values with no chunk row}. A
+    SET, not a count: the new-orphan gate is a set difference, so a run that
+    resolves one pre-existing orphan and creates a different one still fails."""
     from mcpbrain.store import _REFLOW_REF_COLUMNS
-    out = {}
+    out: dict[str, set[str]] = {}
     with store._connect() as db:
         tables = {r[0] for r in db.execute("SELECT name FROM sqlite_master WHERE type='table'")}
         for table, col in _REFLOW_REF_COLUMNS:
             if table not in tables:
                 continue
-            out[f"{table}.{col}"] = db.execute(
-                f"SELECT count(*) FROM {table} t WHERE t.{col} IS NOT NULL AND t.{col} != '' "
-                f"AND NOT EXISTS (SELECT 1 FROM chunks c WHERE c.doc_id = t.{col})"
-            ).fetchone()[0]
+            out[f"{table}.{col}"] = {r[0] for r in db.execute(
+                f"SELECT DISTINCT t.{col} FROM {table} t WHERE t.{col} IS NOT NULL "
+                f"AND t.{col} != '' "
+                f"AND NOT EXISTS (SELECT 1 FROM chunks c WHERE c.doc_id = t.{col})")}
     return out
 
 
@@ -166,7 +194,8 @@ def run(store, *, home, services: dict, embedder, limit: int, per_mime: bool) ->
     workable = workable_reflow_sources(home, services)
     now = {s for s, k in REFLOW_SOURCE_SERVICES.items() if services.get(k) is not None}
     sources = (now | {"reflow:anarlog"}) & workable
-    orphans_before = _orphans(store)
+    orphans_before = _orphan_refs(store)
+    publishes_before = _pending_publish_rows(store)
 
     shared_not_run: list[str] = []
 
@@ -252,9 +281,9 @@ def run(store, *, home, services: dict, embedder, limit: int, per_mime: bool) ->
         c[r["outcome"]] = c.get(r["outcome"], 0) + 1
     gc = [r for r in items if r["source"] in ("reflow:gmail", "reflow:calendar")
           and r["outcome"] not in ("deferred", "failed", "noop")]
-    orphans_after = _orphans(store)
-    new_orphans = {k: orphans_after.get(k, 0) - orphans_before.get(k, 0)
-                   for k in orphans_after if orphans_after.get(k, 0) > orphans_before.get(k, 0)}
+    orphans_after = _orphan_refs(store)
+    new_values = {k: sorted(v - orphans_before.get(k, set()))
+                  for k, v in orphans_after.items() if v - orphans_before.get(k, set())}
     return {
         "items": len(items), "limit": limit, "per_mime": per_mime,
         "sources_seeded": sorted(sources), "sources_workable": sorted(workable),
@@ -269,27 +298,38 @@ def run(store, *, home, services: dict, embedder, limit: int, per_mime: bool) ->
             "rate": round(sum(1 for r in gc if r["outcome"] == "ordinary") / len(gc), 3)
             if gc else None},
         "shared_drive_changed_not_run": shared_not_run,
-        "pending_publishes_recorded": _pending_publish_count(store),
+        "pending_publishes_recorded": len(_pending_publish_rows(store) - publishes_before),
         "halted": halted,
-        "orphans_before": orphans_before, "orphans_after": orphans_after,
-        "orphans_new": new_orphans,
+        # Counts are DISTINCT dangling values per column; orphans_new is the
+        # size of the set difference after - before (orphans_new_values the
+        # first 50 of it), never a difference of counts.
+        "orphans_before": {k: len(v) for k, v in orphans_before.items()},
+        "orphans_after": {k: len(v) for k, v in orphans_after.items()},
+        "orphans_new": {k: len(v) for k, v in new_values.items()},
+        "orphans_new_values": {k: v[:50] for k, v in new_values.items()},
         **_checks(store),
         "failures": [r for r in items if r["outcome"] == "failed"][:50],
     }
 
 
-def _pending_publish_count(store) -> int:
+def _pending_publish_rows(store) -> set[tuple]:
+    """Every pending-publish row, whole. The run's figure is after - before as
+    SETS, so a row the copy already held is never counted as recorded, and an
+    upsert that re-stamps an existing file is."""
     try:
         with store._connect() as db:
-            return db.execute("SELECT count(*) FROM shared_drive_pending_publish").fetchone()[0]
+            return {tuple(r) for r in db.execute(
+                "SELECT drive_id, file_id, content_hash, discovered_at "
+                "FROM shared_drive_pending_publish")}
     except sqlite3.OperationalError:
-        return 0
+        return set()
 
 
 def verdict(summary: dict, *, strict_orphans: bool = False) -> list[str]:
     problems = []
     if summary["orphans_new"]:
-        problems.append(f"new orphan references: {summary['orphans_new']}")
+        sample = {k: v[:5] for k, v in (summary.get("orphans_new_values") or {}).items()}
+        problems.append(f"new orphan references: {summary['orphans_new']} (e.g. {sample})")
     if strict_orphans and any(summary["orphans_after"].values()):
         problems.append(f"orphan references: {summary['orphans_after']}")
     if summary["rebuilt_store"] and summary["foreign_key_check"]:

@@ -154,3 +154,69 @@ def test_pre_existing_orphans_only_fail_under_strict(tmp_path, home, monkeypatch
         db.execute("INSERT INTO recall_feedback(doc_id, event_type) "
                    "VALUES('gdrive-LONG-GONE-0','exposure')")
     assert dryrun.main(["--store", str(path2), "--strict-orphans", "--yes"]) == 1
+
+
+# -- hardening H3 ------------------------------------------------------------
+
+def test_a_new_orphan_is_caught_even_when_an_old_one_is_resolved(tmp_path, home, monkeypatch):
+    """One orphan fixed + one created leaves the COUNT unchanged; the gate is a
+    set difference of references, so it still fails."""
+    path = _copy(tmp_path)
+    with sqlite3.connect(path) as db:
+        db.execute("INSERT INTO recall_feedback(doc_id, event_type) "
+                   "VALUES('gdrive-OLD-0','exposure')")
+
+    def swap():
+        with sqlite3.connect(path) as db:
+            db.execute("INSERT OR IGNORE INTO chunks(doc_id, text, content_hash, metadata) "
+                       "VALUES('gdrive-OLD-0','t','h','{}')")
+            db.execute("INSERT INTO recall_feedback(doc_id, event_type) "
+                       "VALUES('gdrive-GONE-9','exposure')")
+
+    _fakes(monkeypatch, emb=_Emb(on_embed=swap))
+    out = tmp_path / "summary.json"
+    assert dryrun.main(["--store", str(path), "--out", str(out), "--yes"]) == 1
+    summary = json.loads(out.read_text())
+    assert summary["orphans_before"]["recall_feedback.doc_id"] == \
+        summary["orphans_after"]["recall_feedback.doc_id"] == 1
+    assert summary["orphans_new"] == {"recall_feedback.doc_id": 1}
+    assert summary["orphans_new_values"] == {"recall_feedback.doc_id": ["gdrive-GONE-9"]}
+
+
+def test_pre_existing_pending_publishes_are_not_counted_as_recorded(tmp_path, home, monkeypatch):
+    path = _copy(tmp_path)
+    Store(path, dim=4).record_pending_publish("D1", "OTHER", "h")
+    _fakes(monkeypatch)
+    out = tmp_path / "summary.json"
+    assert dryrun.main(["--store", str(path), "--out", str(out), "--yes"]) == 0
+    assert json.loads(out.read_text())["pending_publishes_recorded"] == 0
+
+
+def test_is_live_fails_closed_on_an_os_error(tmp_path, home, monkeypatch):
+    path = _copy(tmp_path)
+
+    def boom(self, *a, **k):
+        raise OSError("stale NFS handle")
+
+    monkeypatch.setattr(Path, "resolve", boom)
+    assert dryrun._is_live(path) is True
+
+
+def test_refuses_the_platform_default_store_despite_a_home_override(
+        tmp_path, home, monkeypatch):
+    """MCPBRAIN_HOME points somewhere else, but --store names the real
+    install's default store: still refused."""
+    import sys as _sys
+    fake_home = tmp_path / "user"
+    monkeypatch.setenv("HOME", str(fake_home))
+    monkeypatch.setenv("APPDATA", str(fake_home / "AppData"))
+    default = dryrun._platform_default_store()
+    if _sys.platform == "darwin":
+        assert default == fake_home / "Library" / "Application Support" / "mcpbrain" / \
+            "brain.sqlite3"
+    default.parent.mkdir(parents=True)
+    Store(default, dim=4).init()
+    before = default.read_bytes()
+    _fakes(monkeypatch)
+    assert dryrun.main(["--store", str(default), "--yes"]) == 2
+    assert default.read_bytes() == before
