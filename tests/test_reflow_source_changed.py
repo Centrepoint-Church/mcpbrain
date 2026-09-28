@@ -358,3 +358,52 @@ def test_sweep_changed_chunks_refuses_a_missing_target_and_writes_nothing(tmp_pa
     with s._connect() as db:
         assert db.execute("SELECT source FROM entity_observations").fetchone()[0] == "cal-E-2"
     assert _map(s, "E") == {}
+
+
+def test_sweep_changed_chunks_remaps_non_local_relations_and_invalidates_local(tmp_path):
+    """A relation with origin != 'local' (the curator's own store: org_curate
+    keeps the local source_doc_id and flips origin to 'org') on a swept id is
+    NOT the ordinary path's to invalidate -- it is remapped to the lineage's
+    first new chunk and stays live, with contrib_doc_id keeping the pre-remap
+    id (as apply_reflow does). A local relation on the same id is invalidated
+    and keeps its source_doc_id."""
+    s = _store(tmp_path)
+    s.upsert_chunk("cal-E-0", "new agenda", "n0", {**_CMD, "chunk_index": 0, "chunk_total": 1})
+    s.upsert_chunk("cal-E-2", "old tail", "c2", {**_CMD, "chunk_index": 2, "chunk_total": 3})
+    _entities(s)
+    with s._connect(write=True) as db:
+        db.execute("INSERT INTO entity_relations(entity_a, relation, entity_b, source_doc_id,"
+                   " origin) VALUES('e1','works_at','e2','cal-E-2','org')")
+        db.execute("INSERT INTO entity_relations(entity_a, relation, entity_b, source_doc_id,"
+                   " origin) VALUES('e1','member_of','e2','cal-E-2','local')")
+    out = s.sweep_changed_chunks("E", {"cal-E-2": "cal-E-0"})
+    assert out["invalidated"] == 1
+    with s._connect() as db:
+        rows = {r["relation"]: dict(r) for r in db.execute(
+            "SELECT relation, source_doc_id, contrib_doc_id, invalidated_at, origin "
+            "FROM entity_relations")}
+    org = rows["works_at"]
+    assert org["source_doc_id"] == "cal-E-0"
+    assert org["invalidated_at"] is None
+    assert org["contrib_doc_id"] == "cal-E-2"
+    loc = rows["member_of"]
+    assert loc["invalidated_at"] is not None
+    assert loc["source_doc_id"] == "cal-E-2"
+    assert s.get_chunk("cal-E-2") is None
+
+
+def test_sweep_changed_chunks_keeps_an_existing_contrib_doc_id(tmp_path):
+    """First remap wins: a relation already remapped once keeps its ORIGINAL
+    contrib_doc_id through a second sweep."""
+    s = _store(tmp_path)
+    s.upsert_chunk("cal-E-0", "new agenda", "n0", {**_CMD, "chunk_index": 0, "chunk_total": 1})
+    s.upsert_chunk("cal-E-2", "old tail", "c2", {**_CMD, "chunk_index": 2, "chunk_total": 3})
+    _entities(s)
+    with s._connect(write=True) as db:
+        db.execute("INSERT INTO entity_relations(entity_a, relation, entity_b, source_doc_id,"
+                   " origin, contrib_doc_id) VALUES('e1','works_at','e2','cal-E-2','org',"
+                   " 'cal-E-orig')")
+    s.sweep_changed_chunks("E", {"cal-E-2": "cal-E-0"})
+    with s._connect() as db:
+        r = db.execute("SELECT source_doc_id, contrib_doc_id FROM entity_relations").fetchone()
+    assert tuple(r) == ("cal-E-0", "cal-E-orig")

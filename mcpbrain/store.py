@@ -2489,6 +2489,9 @@ class Store:
           * origin='local' relations sourced from them are invalidated (as the
             ordinary change path does -- the old text no longer evidences
             them), and keep their source_doc_id: invalidated rows are history;
+          * live relations of any OTHER origin (e.g. 'org' on the curator's
+            own store) are remapped instead, contrib_doc_id keeping the
+            pre-remap id (first remap wins) -- exactly as apply_reflow;
           * every OTHER reference (_REFLOW_REF_COLUMNS minus entity_relations)
             is repointed to remap[old] by simultaneous substitution through a
             temp table, and chunk_quality is merged -- exactly as apply_reflow
@@ -2526,6 +2529,21 @@ class Store:
             db.execute("DELETE FROM reflow_tmp")
             db.executemany("INSERT INTO reflow_tmp(old, new) VALUES(?,?)", list(remap.items()))
             remapped = 0
+            if "entity_relations" in tables:
+                # Non-local relations (origin='org' on a curator's own store,
+                # which keeps the local source_doc_id) are not the ordinary
+                # path's to invalidate: remap them, exactly as apply_reflow
+                # does, keeping the pre-remap id for org contribution (first
+                # remap wins). Local rows were invalidated above and keep
+                # their source_doc_id as history.
+                live_nonlocal = ("WHERE source_doc_id IN (SELECT old FROM reflow_tmp) "
+                                 "AND invalidated_at IS NULL "
+                                 "AND COALESCE(origin,'local')!='local'")
+                db.execute("UPDATE entity_relations SET contrib_doc_id=source_doc_id "
+                           f"{live_nonlocal} AND contrib_doc_id IS NULL")
+                remapped += db.execute(
+                    "UPDATE entity_relations SET source_doc_id=(SELECT new FROM reflow_tmp "
+                    f"WHERE old=entity_relations.source_doc_id) {live_nonlocal}").rowcount
             for table, col in _REFLOW_REF_COLUMNS:
                 if table == "entity_relations" or table not in tables:
                     continue
