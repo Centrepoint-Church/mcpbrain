@@ -376,17 +376,30 @@ def _collect_unit_refs(node, out: set[str]) -> None:
             _collect_unit_refs(v, out)
 
 
-# home -> (directory-mtime stamp, refs): re-scanned whenever units/ or claims/
+# home -> (per-entry stamp, refs): re-scanned whenever an entry of units/ or claims/
 # changes, so a unit written mid-cycle is still seen, while repeated calls
 # (one per reflow item or import) do not re-read hundreds of unit files.
 _REFS_CACHE: dict[str, tuple[tuple, set[str]]] = {}
 
 
 def _queue_stamp(queue) -> tuple:
+    """Every entry's (name, mtime_ns, size) in units/ and claims/: one stat
+    per entry, no file read or JSON parse. The directory mtime alone is not
+    enough -- on a coarse-mtime filesystem two writes in the same tick leave
+    it unchanged and the cache would serve a scan that misses a new unit."""
+    import os
     out = []
     for d in (queue / "units", queue / "claims"):
         try:
-            out.append(d.stat().st_mtime_ns)
+            with os.scandir(d) as it:
+                entries = []
+                for e in it:
+                    try:
+                        st = e.stat()
+                    except OSError:
+                        continue
+                    entries.append((e.name, st.st_mtime_ns, st.st_size))
+            out.append(tuple(sorted(entries)))
         except OSError:
             out.append(None)
     return tuple(out)

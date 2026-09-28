@@ -405,3 +405,21 @@ def test_duplicate_old_text_maps_to_the_new_chunk_holding_it():
     assert p.remap["gdrive-F-2"] == "gdrive-F-0"
     assert p.reasons["gdrive-F-2"] == "exact"
     assert p.deletes == ["gdrive-F-2"]
+
+
+def test_pending_unit_refs_rescans_when_the_directory_mtime_did_not_move(tmp_path):
+    """The cache stamp must not rest on the directory mtime alone: on a
+    coarse-mtime filesystem (1 s) two writes in the same second leave it
+    unchanged, and a stale scan would let a reflow run under an in-flight unit."""
+    import json
+    import os
+
+    from mcpbrain import reflow
+    q = tmp_path / "enrich_queue"
+    (q / "units").mkdir(parents=True)
+    (q / "units" / "u1.json").write_text(json.dumps({"thread_id": "OLD"}))
+    before = (q / "units").stat()
+    assert "OLD" in reflow.pending_unit_refs(tmp_path)
+    (q / "units" / "u2.json").write_text(json.dumps({"thread_id": "NEW"}))
+    os.utime(q / "units", ns=(before.st_atime_ns, before.st_mtime_ns))   # same tick
+    assert "NEW" in reflow.pending_unit_refs(tmp_path)
