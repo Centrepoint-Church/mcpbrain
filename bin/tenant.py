@@ -74,31 +74,76 @@ def use_profile(src: Path, repo: Path = _REPO) -> list[Path]:
     return written
 
 
-def remap_gold(gold_path: Path, store, *, dry_run: bool = False) -> list[tuple[str, str]]:
-    """Point gold expected_chunk_ids that a reflow removed at their new chunk.
+_GOLD_WATERMARK = "# remap-gold: reflow_map applied through id "
 
-    Textual edit of '- <id>' list lines (never a YAML parse/dump), so the
-    file's comments and formatting survive untouched. Only ids with NO chunk
-    row in `store` are considered; an id that still resolves is left exactly
-    as written even if a (stale) reflow target exists for it. `dry_run=True`
-    computes and returns the same changes without touching the file — the
-    CLI's `--write` flag is what decides whether a run is a preview or a
-    real rewrite."""
+
+def _reflow_batches(rows):
+    """Group reflow_map rows (ascending id) into apply_reflow batches: one
+    owner + one timestamp. A batch's rows are SIMULTANEOUS (i->j and j->i in
+    one reflow), so they are applied as one mapping, never chained."""
+    batches: list[dict[str, str]] = []
+    key = None
+    for r in rows:
+        k = (r["owner"], r["at"])
+        if k != key:
+            batches.append({})
+            key = k
+        batches[-1][r["old_doc_id"]] = r["new_doc_id"]
+    return batches
+
+
+def remap_gold(gold_path: Path, store, *, dry_run: bool = False) -> list[tuple[str, str]]:
+    """Repoint gold expected_chunk_ids through reflow_map (spec §5).
+
+    doc_ids are positional and REUSED by a reflow: after one, gdrive-F-4
+    usually still exists but holds other text, so whether an id still has a
+    chunk row says nothing. Every reflow batch recorded after the file's
+    watermark (a `# remap-gold: reflow_map applied through id N` line this
+    writes) is applied in order, each batch as one simultaneous mapping, and
+    the watermark is advanced -- so a re-run is a no-op and a later reflow is
+    composed onto the earlier one, never re-applied.
+
+    Textual edit of '- <id>' list lines (never a YAML parse/dump): single- or
+    double-quoted ids and trailing '# comments' are kept exactly, and so is
+    every other line. `dry_run=True` returns the same changes without
+    touching the file (the CLI's `--write` decides)."""
     import re
     text = gold_path.read_text()
+    m = re.search(r"^" + re.escape(_GOLD_WATERMARK) + r"(\d+)[ \t]*$", text, flags=re.M)
+    after = int(m.group(1)) if m else 0
+    rows = list(store.reflow_map_rows(after_id=after))
+    batches = _reflow_batches(rows)
     changes: list[tuple[str, str]] = []
 
-    def sub(m):
-        old = m.group(2)
-        if store.get_chunk(old) is not None:
-            return m.group(0)
-        new = store.latest_reflow_target(old)
-        if not new or new == old:
-            return m.group(0)
-        changes.append((old, new))
-        return f"{m.group(1)}{new}"
+    def resolve(doc_id: str) -> str:
+        for b in batches:
+            doc_id = b.get(doc_id, doc_id)
+        return doc_id
 
-    out = re.sub(r"^(\s*-\s+)((?:gdrive|gmail|cal|anarlog)-\S+)\s*$", sub, text, flags=re.M)
+    def sub(mm):
+        indent, dq, sq, bare, tail = mm.groups()
+        old = dq if dq is not None else sq if sq is not None else bare
+        new = resolve(old)
+        if new == old:
+            return mm.group(0)
+        changes.append((old, new))
+        q = '"' if dq is not None else "'" if sq is not None else ""
+        return f"{indent}{q}{new}{q}{tail}"
+
+    # Gmail attachment ids embed the attachment's FILENAME (spaces, brackets,
+    # dashes), so an id is everything up to its closing quote, or -- unquoted
+    # -- up to a ' #' comment or the end of the line. [ \t], never \s: \s*$
+    # under re.M swallows the newline and a following blank line.
+    ident = r"(?:gdrive|gmail|cal|anarlog)-"
+    out = re.sub(r"^([ \t]*-[ \t]+)"
+                 rf"""(?:"({ident}[^"\n]*)"|'({ident}[^'\n]*)'|({ident}[^\n]*?))"""
+                 r"([ \t]+#.*|[ \t]*)$", sub, text, flags=re.M)
+    if rows:
+        mark = f"{_GOLD_WATERMARK}{rows[-1]['id']}"
+        if m:
+            out = out.replace(m.group(0), mark, 1)
+        else:
+            out = f"{mark}\n{out}"
     if changes and not dry_run:
         gold_path.write_text(out)
     return changes

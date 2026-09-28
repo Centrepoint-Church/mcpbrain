@@ -3633,6 +3633,20 @@ class Store:
                 raise
         return r["new_doc_id"] if r else None
 
+    def reflow_map_rows(self, after_id: int = 0) -> list[dict]:
+        """reflow_map rows with id > after_id, ascending: {id, owner,
+        old_doc_id, new_doc_id, reason, at}. Read-only; the input to
+        bin/tenant.py remap-gold. [] on a store without the table."""
+        with self._connect() as db:
+            try:
+                return [dict(r) for r in db.execute(
+                    "SELECT id, owner, old_doc_id, new_doc_id, reason, at FROM reflow_map "
+                    "WHERE id > ? ORDER BY id", (int(after_id),))]
+            except sqlite3.OperationalError as exc:
+                if "no such table" in str(exc):
+                    return []
+                raise
+
     def resolve_reflowed_ids(self, doc_ids: list[str], *, max_hops: int = 8) -> list[str]:
         """Map doc_ids onto chunks that exist, preserving order, de-duplicated.
 
