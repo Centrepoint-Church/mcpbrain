@@ -706,9 +706,12 @@ def reflow_line(store) -> str:
               f"{st['chunks_carried']} chunks carried, {st['chunks_reenrich']} re-enrich")
     pending = st["queued"] + (st["remaining"] or 0)
     last = (st.get("last_seed") or {}).get("status")
-    if pending and last in _REFLOW_SEED_BLOCKED and not st["queued"]:
-        return (f"⚠️ {'Reflow':<16} BLOCKED: last seed {last} — {st['remaining']} "
-                f"owner(s) waiting; {detail}")
+    # Blocked = work remains (queued rows or unseeded owners) AND the last
+    # seed was gated. The dashboard's reflowText applies the same rule: once
+    # the backlog is done, a stale backup is not a block.
+    if pending and last in _REFLOW_SEED_BLOCKED:
+        return (f"⚠️ {'Reflow':<16} BLOCKED: last seed {last} — {st['queued']} queued, "
+                f"{st['remaining'] or 0} owner(s) waiting; {detail}")
     if pending:
         gate = f"; last seed {last}" if last and last != "ok" else ""
         if last is None:

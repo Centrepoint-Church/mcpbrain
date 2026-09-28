@@ -398,7 +398,8 @@ function reflowText(r){
   const last = (r.last_seed || {}).status;
   const pending = (r.queued || 0) + (r.remaining || 0);
   const done = r.owners_done || 0;
-  if(["no_recent_backup", "disabled", "error"].includes(last))
+  // Same rule as doctor's reflow_line: blocked only while work remains.
+  if(pending && ["no_recent_backup", "disabled", "error"].includes(last))
     return "blocked: " + last.replace(/_/g, " ");
   if(pending)
     return fmt(done) + (r.total != null ? " of " + fmt(r.total) : "") + " done";

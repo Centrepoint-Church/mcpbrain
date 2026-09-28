@@ -272,3 +272,36 @@ def test_dashboard_reflow_text_reports_every_blocked_status():
     assert _reflow_text({"owners_done": 0, "queued": 0, "remaining": 0,
                          "last_seed": {"status": "ok"}}) == "idle"
     assert _reflow_text({"halted": "x"}) == "halted — see doctor"
+
+
+# -- hardening H5: doctor and dashboard agree on "blocked" -------------------
+# Blocked = work remains (queued or remaining) AND the last seed was gated.
+# Once the backlog is done a stale backup is not a block.
+
+def _gated(s, status, remaining):
+    import json
+    s.set_cursor("reflow:last_seed", json.dumps({"status": status, "remaining": remaining,
+                                                "sources": ["reflow:drive"]}))
+
+
+def test_doctor_done_backlog_with_stale_backup_is_not_blocked(tmp_path):
+    s = _store(tmp_path)
+    _gated(s, "no_recent_backup", 0)
+    line = reflow_line(s)
+    assert line.startswith("✅") and "BLOCKED" not in line
+
+
+def test_doctor_queued_rows_with_a_gated_seed_are_blocked(tmp_path):
+    s = _store(tmp_path)
+    s.enqueue_items([{"ref_id": "F", "event": "reflow", "modified_at": "1970-01-01T00:00:00"}],
+                    source="reflow:drive")
+    _gated(s, "disabled", 0)
+    assert "BLOCKED: last seed disabled" in reflow_line(s)
+
+
+def test_dashboard_done_backlog_with_stale_backup_is_not_blocked():
+    for status in ("no_recent_backup", "disabled", "error"):
+        assert _reflow_text({"owners_done": 4, "queued": 0, "remaining": 0,
+                             "last_seed": {"status": status, "remaining": 0}}) == "done (4)"
+        assert _reflow_text({"owners_done": 0, "queued": 0, "remaining": 0,
+                             "last_seed": {"status": status}}) == "idle"
