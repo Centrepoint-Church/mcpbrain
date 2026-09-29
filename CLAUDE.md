@@ -299,7 +299,7 @@ assert_relation / merge / undo, each with `basis` user_stated|inferred) plus
   the elicitation accept path (`confirmed_via='elicitation'`) in an interactive session;
   the dashboard Pending-corrections click-through.
 
-## brain_owner_context (2026-09-29, source-only, NOT released)
+## brain_owner_context (2026-09-29, RELEASED in 0.7.134)
 
 **Voice/identity/preferences were unreachable in Claude Desktop and Cowork.** They
 were offered only as MCP *resources*, and those clients give the model no tool to
@@ -316,6 +316,24 @@ say "call brain_owner_context". **28 tools** after release (was 27).
 
 ## Shipping caveats
 
+- **Current state (2026-09-29): the four version files (+ `uv.lock`) are at
+  `0.7.134`, RELEASED** — source `be855d3d`, gh-pages `315c3ef8`, plugin `b29c282`;
+  index serves only `mcpbrain-0.7.134-py3-none-any.whl`, `install.ps1` 200. Full
+  suite **4369 passed** under the lock AND under the fleet's resolution
+  (`mcp==2.2.0`, `mcp-types==2.2.0`, `fastembed==0.8.1`, `pymupdf==1.28.2`); ruff
+  clean; tenant check passed. Wheel CONTENTS asserted (`owner_context.py`, the tool
+  declaration + dispatch, resources delegating to `owner_context.entries()`, both
+  instruction texts naming the tool, tenant files; no gold set, no
+  `tenant_people.json`). Installed from the PUBLISHED index (bootout →
+  `--upgrade --reinstall-package` → clear `__pycache__` → bootstrap):
+  `/api/status` 0.7.134, `stalled: None`; `doctor` integrity ok, 0 need action.
+  **Called through the INSTALLED stdio server:** 28 tools, `initialize`
+  instructions name `brain_owner_context`, a bare call returned all four core
+  files, a named call returned `reference/systems.md`. **0.7.134 is only
+  `brain_owner_context`** (section above). Transitive drift noticed:
+  `sse-starlette` resolves 3.5.0 for the fleet vs 3.4.4 in the lock — only mcp's
+  SSE transport uses it (mcpbrain serves stdio), and the live stdio call above ran
+  on 3.5.0. **The Windows HARDWARE QA GATE remains OPEN.**
 - **Current state (2026-09-28, later): the four version files (+ `uv.lock`) are at
   `0.7.133`, RELEASED** — source `e3b41c09`, gh-pages `5d3f54a2`, plugin `f53988b`;
   index serves only `mcpbrain-0.7.133-py3-none-any.whl`, `install.ps1` 200. Full
