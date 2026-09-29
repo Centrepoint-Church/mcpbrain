@@ -29,7 +29,7 @@ corrupted this store (CLAUDE.md, "STORE CORRUPTION INCIDENT"). So this:
     override; discouraged), while reflow is halted, or with the kill switch off;
   * never calls store.init() (no migration of the live store from this tree).
 
-Ctrl-C (or SIGTERM) finishes the current owner -- each is its own transaction
+Ctrl-C (or SIGTERM / SIGHUP) finishes the current owner -- each is its own transaction
 -- prints the summary and exits 130; a second Ctrl-C aborts that owner (its
 transaction rolls back). Safe to re-run: the backlog is level-triggered.
 
@@ -37,8 +37,15 @@ At the end: PRAGMA integrity_check (doctor._run_integrity_check) and
 foreign_key_check. `reflow:integrity_checked` is NOT set here -- the daemon's
 seed runs its own check when it next finds the backlog empty.
 
-Exit: 0 done; 1 integrity_check not ok; 2 refused / bad input; 3 halted on a
-ReflowOrphanError; 4 a daemon appeared mid-run; 130 interrupted.
+Run it with the INSTALLED tool's interpreter (the wrapper does), never
+`uv run`: the imported mcpbrain must be the daemon's own package (refused
+otherwise). `--check` runs the refusal gates alone (no daemon detection, writes
+nothing) so the wrapper can refuse before it stops anything.
+
+Exit: 0 done; 1 unexpected error; 2 refused / bad input; 3 halted on a
+ReflowOrphanError; 4 a daemon appeared mid-run; 5 integrity_check not ok, or
+foreign_key_check > 0 on a rebuilt store (the wrapper then does NOT restart
+the daemon); 130 interrupted.
 """
 import argparse
 import os
@@ -50,9 +57,13 @@ import sys
 import time
 from pathlib import Path
 
-sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+# Deliberately NO sys.path.insert of the repo: the drain must import the
+# INSTALLED mcpbrain (the daemon's exact code and dependencies), so the wrapper
+# runs it with the uv tool's own interpreter; _check_installed enforces it.
+from mcpbrain import config
 
-from mcpbrain import config  # noqa: E402
+EXIT_STORE_CHECK = 5         # integrity/fk failure: the wrapper must NOT restart the daemon
+SIGNAL_DEBOUNCE_S = 1.5      # a second signal this soon is the same keypress
 
 PROGRESS_EVERY = 10          # owners between progress lines
 RECHECK_EVERY = 5            # owners between daemon re-checks
@@ -89,11 +100,77 @@ def _daemon_alive() -> str | None:
                     f"{m.group(1) if m else 'unknown'}); KeepAlive relaunches it -- "
                     f"`launchctl bootout gui/$(id -u)/{_LAUNCHD_LABEL}` first")
     if shutil.which("pgrep"):
-        r = subprocess.run(["pgrep", "-f", "mcpbrain daemon"], capture_output=True, text=True)
+        r = subprocess.run(["pgrep", "-f", "mcpbrain[ .]daemon"],
+                           capture_output=True, text=True)
         pids = [p for p in r.stdout.split() if p.isdigit() and int(p) != os.getpid()]
         if pids:
             return f"mcpbrain daemon process(es) alive: pid {', '.join(pids)}"
     return None
+
+
+def _check_installed() -> tuple[str | None, str]:
+    """(refusal or None, version). The imported mcpbrain must be the uv tool's
+    installed package, never this repo's working tree: the working tree may be
+    ahead of (or behind) the daemon that owns the store, and its venv resolves
+    different dependency versions (pymupdf, fastembed) than the fleet runs."""
+    import mcpbrain
+    version = getattr(mcpbrain, "__version__", "?")
+    f = Path(mcpbrain.__file__).resolve()
+    repo = Path(__file__).resolve().parents[1]
+    if repo in f.parents:
+        return (f"mcpbrain was imported from the working tree ({f.parent}); run this "
+                "with the installed tool's interpreter (bin/reflow_drain.sh does)", version)
+    tools = Path(os.environ.get("UV_TOOL_DIR") or Path.home() / ".local/share/uv/tools")
+    try:
+        under = tools.resolve() / "mcpbrain" in f.parents
+    except OSError:
+        under = False
+    if not under:
+        return (f"mcpbrain at {f.parent} is not the installed uv tool package under "
+                f"{tools / 'mcpbrain'}", version)
+    return None, version
+
+
+class _SafeStream:
+    """stdout/stderr that never raises: a closed terminal (EIO/EPIPE) must not
+    crash the drain between an owner's writes."""
+
+    def __init__(self, inner):
+        self._inner = inner
+
+    def write(self, s):
+        try:
+            return self._inner.write(s)
+        except (OSError, ValueError):
+            return len(s)
+
+    def flush(self):
+        try:
+            self._inner.flush()
+        except (OSError, ValueError):
+            pass
+
+    def __getattr__(self, name):
+        return getattr(self._inner, name)
+
+
+def _make_signal_handler(clock=time.monotonic):
+    """First SIGINT/SIGTERM/SIGHUP: finish the current owner, then stop. A
+    second within SIGNAL_DEBOUNCE_S is the same keypress delivered twice (tty +
+    a forwarding parent) and is ignored; a later one aborts the owner."""
+    first = {"at": None}
+
+    def handler(signum, frame):
+        now = clock()
+        if _STOP.reason == "interrupt" and first["at"] is not None:
+            if now - first["at"] < SIGNAL_DEBOUNCE_S:
+                return
+            raise KeyboardInterrupt
+        first["at"] = now
+        _STOP.request("interrupt")
+        print("\ninterrupt: finishing the current owner (Ctrl-C again to abort it)...",
+              flush=True)
+    return handler
 
 
 # -- stop flag --------------------------------------------------------------------
@@ -416,9 +493,32 @@ def _backup_age(home) -> float | None:
     return None if last is None else time.time() - last
 
 
+def _gates(store, home, ns) -> str | None:
+    """The refusal gates shared by --check and --yes (daemon detection aside):
+    None to proceed, else the refusal message."""
+    from mcpbrain.daemon import REFLOW_BACKUP_MAX_AGE_S
+    from mcpbrain.store import REFLOW_HALT_CURSOR
+    halted = store.get_cursor(REFLOW_HALT_CURSOR)
+    if halted:
+        return f"refusing: reflow is halted: {halted}\n{_RESUME_HELP}"
+    if not config.reflow_enabled(home):
+        return "refusing: reflow is disabled (reflow_enabled kill switch)."
+    if not ns.no_backup_check:
+        age = _backup_age(home)
+        if age is None or age > REFLOW_BACKUP_MAX_AGE_S:
+            return ("refusing: no backup succeeded in the last 24 h "
+                    f"({'never' if age is None else f'{age / 3600:.1f} h ago'}). Let the "
+                    "daemon back up first (mcpbrain doctor shows it).")
+    return None
+
+
 def main(argv=None) -> int:
     ap = argparse.ArgumentParser(prog="reflow_drain", description=__doc__.splitlines()[0])
-    ap.add_argument("--yes", action="store_true", help="actually run (default: plan only)")
+    mode = ap.add_mutually_exclusive_group()
+    mode.add_argument("--yes", action="store_true", help="actually run (default: plan only)")
+    mode.add_argument("--check", action="store_true",
+                      help="run the refusal gates only (no daemon detection); write "
+                           "nothing; exit 0 = would proceed, 2 = refused")
     ap.add_argument("--max-owners", type=int, default=None)
     ap.add_argument("--source", action="append", dest="sources", default=None,
                     help="restrict to this reflow source, e.g. reflow:drive (repeatable)")
@@ -438,6 +538,10 @@ def main(argv=None) -> int:
     if bad:
         print(f"unknown --source {bad}; choose from {list(REFLOW_SOURCES)}", file=sys.stderr)
         return 2
+    err, version = _check_installed()
+    if err and (ns.yes or ns.check):
+        print(f"refusing: {err}", file=sys.stderr)
+        return 2
     home = str(config.app_dir())
     path = config.store_path()
     if not path.is_file():
@@ -448,6 +552,15 @@ def main(argv=None) -> int:
         print(f"{path} has no recorded embedding dim (never initialised by the daemon?)",
               file=sys.stderr)
         return 2
+
+    if ns.check:
+        refusal = _gates(Store(path, dim=dim, read_only=True), home, ns)
+        if refusal:
+            print(refusal, file=sys.stderr)
+            return 2
+        print(f"check ok: mcpbrain {version}; gates pass"
+              f"{' (backup check SKIPPED)' if ns.no_backup_check else ''}.")
+        return 0
 
     if not ns.yes:
         store = Store(path, dim=dim, read_only=True)
@@ -460,6 +573,7 @@ def main(argv=None) -> int:
               f"daemon's own seed + work_queue path, caps lifted"
               f"{f', at most {ns.max_owners} owner(s)' if ns.max_owners else ''}"
               f"{f', sources {ns.sources}' if ns.sources else ''}.\n"
+              f"  code: {err or f'installed mcpbrain {version}'}\n"
               f"  queued reflow rows: {st['queued']}; unqueued candidates: "
               f"{left}{'+' if left >= REFLOW_REMAINING_CAP else ''}; "
               f"owners done so far: {st['owners_done']}\n"
@@ -484,44 +598,31 @@ def main(argv=None) -> int:
         print(f"refusing: the single-writer lock is held ({exc}) -- a daemon or another "
               "drain is running.", file=sys.stderr)
         return 2
+    prev: dict = {}
+    streams = (sys.stdout, sys.stderr)
     try:
-        store = Store(path, dim=dim)     # writable; NO init(): never migrate from this tree
-        halted = store.get_cursor(REFLOW_HALT_CURSOR)
-        if halted:
-            print(f"refusing: reflow is halted: {halted}\n{_RESUME_HELP}", file=sys.stderr)
-            return 2
-        if not config.reflow_enabled(home):
-            print("refusing: reflow is disabled (reflow_enabled kill switch).",
-                  file=sys.stderr)
+        # A closed terminal must not crash the run mid-owner: output becomes
+        # best-effort, and SIGHUP stops cleanly like SIGINT/SIGTERM.
+        sys.stdout, sys.stderr = _SafeStream(sys.stdout), _SafeStream(sys.stderr)
+        print(f"mcpbrain {version} (installed package)", flush=True)
+        store = Store(path, dim=dim)     # writable; NO init(): never migrate from here
+        refusal = _gates(store, home, ns)
+        if refusal:
+            print(refusal, file=sys.stderr)
             return 2
         if ns.no_backup_check:
             print("WARNING: --no-backup-check: running with no verified recent backup; "
                   "the snapshot the wrapper takes is the only recovery point.", flush=True)
-        else:
-            age = _backup_age(home)
-            if age is None or age > REFLOW_BACKUP_MAX_AGE_S:
-                print("refusing: no backup succeeded in the last 24 h "
-                      f"({'never' if age is None else f'{age / 3600:.1f} h ago'}). Let the "
-                      "daemon back up first (mcpbrain doctor shows it).", file=sys.stderr)
-                return 2
         embedder = _get_embedder()
         if getattr(embedder, "dim", dim) != dim:
             print(f"refusing: embedder dim {embedder.dim} != store dim {dim}", file=sys.stderr)
             return 2
         services = _build_services() or {}
 
-        prev = {}
-
-        def _on_signal(signum, frame):
-            if _STOP.reason == "interrupt":
-                raise KeyboardInterrupt
-            _STOP.request("interrupt")
-            print("\ninterrupt: finishing the current owner (Ctrl-C again to abort it)...",
-                  flush=True)
-
-        for sig in (signal.SIGINT, signal.SIGTERM):
+        handler = _make_signal_handler()
+        for sig in (signal.SIGINT, signal.SIGTERM, signal.SIGHUP):
             try:
-                prev[sig] = signal.signal(sig, _on_signal)
+                prev[sig] = signal.signal(sig, handler)
             except ValueError:            # not the main thread (never in the CLI)
                 pass
         summary = None
@@ -531,9 +632,6 @@ def main(argv=None) -> int:
         except KeyboardInterrupt:
             _STOP.request("interrupt")
             print("aborted: the in-flight owner's transaction rolled back.", flush=True)
-        finally:
-            for sig, h in prev.items():
-                signal.signal(sig, h)
         checks = _checks(store, home)
         if summary is not None:
             _print_summary(summary, checks)
@@ -541,6 +639,13 @@ def main(argv=None) -> int:
             print(f"integrity_check: {checks['integrity_check']}; "
                   f"foreign_key_check: {checks['foreign_key_check']}")
         reason = _STOP.reason
+        if checks["integrity_check"] != "ok" or (checks["rebuilt_store"]
+                                                  and checks["foreign_key_check"]):
+            print("\nSTORE CHECK FAILED (integrity_check / foreign_key_check) -- do NOT "
+                  "restart the daemon on this store before investigating (CLAUDE.md, "
+                  "2026-09-10 incident rules); the wrapper's snapshot is the recovery "
+                  "point.", file=sys.stderr)
+            return EXIT_STORE_CHECK
         if reason == "halt":
             print(f"\nREFLOW HALTED: {(summary or {}).get('halt')}\n{_RESUME_HELP}",
                   file=sys.stderr)
@@ -549,15 +654,13 @@ def main(argv=None) -> int:
             print(f"\nSTOPPED: a daemon appeared mid-run -- {(summary or {}).get('daemon')}",
                   file=sys.stderr)
             return 4
-        if checks["integrity_check"] != "ok":
-            print("\nINTEGRITY CHECK FAILED -- do not restart the daemon on this store "
-                  "before investigating; the wrapper's snapshot is the recovery point.",
-                  file=sys.stderr)
-            return 1
         if reason == "interrupt":
             return 130
         return 0
     finally:
+        for sig, h in prev.items():
+            signal.signal(sig, h)
+        sys.stdout, sys.stderr = streams
         lock.release()
 
 

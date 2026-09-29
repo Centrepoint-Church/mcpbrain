@@ -642,32 +642,52 @@ and seeds only while a backup succeeded in the last 24 h. Kill switch:
 ### Draining the backlog faster (attended)
 
 The daemon works 10 owners / 15 s per cycle; `bin/reflow_drain.sh` drains the
-whole backlog in one sitting on the LIVE store, daemon stopped:
+whole backlog in one sitting on the LIVE store, daemon stopped. **Run it inside
+`tmux` or `screen`** so a closed terminal or dropped SSH session cannot end it:
 
 ```bash
-uv run python bin/reflow_drain.py   # plan only: counts, halt, backup age; writes nothing
-bin/reflow_drain.sh                 # the real run (extra args pass through:
-                                    #   --max-owners N, --source reflow:drive, ...)
+PY=~/.local/share/uv/tools/mcpbrain/bin/python
+$PY -I bin/reflow_drain.py            # plan only: counts, halt, backup age; writes nothing
+tmux new -s reflow                    # then, inside tmux:
+bin/reflow_drain.sh                   # the real run (extra args pass through:
+                                      #   --max-owners N, --source reflow:drive, ...)
 ```
 
-The wrapper keeps the Mac awake, `launchctl bootout`s the daemon, waits until no
-`mcpbrain daemon` process is left (aborts after 30 s), takes a `VACUUM INTO`
-snapshot (`brain.sqlite3.pre-reflow-drain-<epoch>`, refuses under 2x the store
-in free disk), runs `bin/reflow_drain.py --yes`, and on ANY exit — once the
-drain process is gone — `launchctl bootstrap`s the daemon back. The drain uses
-the daemon's own seed logic and `work_queue` + `ReflowContext` with the
-per-cycle caps lifted, so DEFER, the enrich-unit guard, give-up stamps, the
-transient-defer bound, the orphan halt and shared-drive pending publishes all
-behave as in the daemon (a changed Shared Drive file is deferred for the
-daemon, which has its fleet storage). It refuses while a daemon is alive (and
-holds the single-writer lock, re-checking every few owners — exit 4 if one
-appears), while halted, with the kill switch off, or without a backup in the
-last 24 h (`--no-backup-check` overrides; discouraged). Ctrl-C finishes the
-current owner and exits 130; re-running is safe. It ends with
-`integrity_check` + `foreign_key_check` (exit 1 if integrity is not ok; 3 on
-a halt — then step 6). Afterwards `mcpbrain doctor`; the daemon's next seed
-runs its own backlog-end integrity check. Delete the snapshot once the daemon
-has completed a backup.
+The drain runs with the **installed** tool's interpreter (the daemon's exact
+code and dependencies — never `uv run`, which would import the working tree
+and the repo venv's dependency versions; it refuses if `mcpbrain` is not the
+installed package). The wrapper first runs `reflow_drain.py --check` (halt,
+kill switch, backup freshness), so a refusal stops nothing. Then it keeps the
+Mac awake, `launchctl bootout`s the daemon, waits until no `mcpbrain daemon`
+process is left (aborts after 30 s), takes a `sqlite3 -readonly … VACUUM INTO`
+snapshot (`brain.sqlite3.pre-reflow-drain-<epoch>`; refuses under 2x the store
+in free disk) and runs `reflow_drain.py --yes`. On any exit — once the drain
+process is gone — it `launchctl bootstrap`s the daemon back exactly once,
+before printing anything. **Exception: exit 5** (integrity_check not ok, or
+foreign_key_check > 0 on a rebuilt store) leaves the daemon DOWN and prints
+the bootstrap command: investigate first (CLAUDE.md 2026-09-10 incident rules;
+the snapshot is the recovery point). Everything is also logged to
+`<app dir>/logs/reflow_drain.log`.
+
+The drain uses the daemon's own seed logic and `work_queue` + `ReflowContext`
+with the per-cycle caps lifted, so DEFER, the enrich-unit guard, give-up
+stamps, the transient-defer bound, the orphan halt and shared-drive pending
+publishes all behave as in the daemon (a changed Shared Drive file is deferred
+for the daemon, which has its fleet storage). It holds the single-writer lock
+and re-checks for a daemon every few owners (exit 4 if one appears). Ctrl-C
+finishes the current owner and exits 130 (a second press more than 1.5 s later
+aborts that owner; its transaction rolls back); re-running is safe. Exit 3 is
+a halt — then step 6. Afterwards `mcpbrain doctor`; the daemon's next seed runs
+its own backlog-end integrity check. Delete the snapshot once the daemon has
+completed a backup.
+
+**While it runs, do NOT:** close the terminal outside tmux/screen; log out,
+sleep-by-lid on battery, or reboot; start a daemon by hand (`mcpbrain daemon`,
+`python -m mcpbrain.daemon`); run `mcpbrain setup`; or `launchctl load` /
+`bootstrap` / `kickstart` the agent yourself. Claude Desktop and Claude Code
+can stay open, but avoid the MCP tools that write the store directly
+(`brain_draft_save`, `brain_meeting_pack_upsert`, `brain_finding_resolve`,
+graph corrections) until the daemon is back.
 
 ## Environment note — repos live outside iCloud
 
