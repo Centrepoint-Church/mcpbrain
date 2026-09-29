@@ -52,6 +52,7 @@ import os
 import re
 import shutil
 import signal
+import sqlite3
 import subprocess
 import sys
 import time
@@ -62,6 +63,7 @@ from pathlib import Path
 # runs it with the uv tool's own interpreter; _check_installed enforces it.
 from mcpbrain import config
 
+MARKER_NAME = "reflow_drain.STORE_CHECK_FAILED"
 EXIT_STORE_CHECK = 5         # integrity/fk failure: the wrapper must NOT restart the daemon
 SIGNAL_DEBOUNCE_S = 1.5      # a second signal this soon is the same keypress
 
@@ -547,8 +549,16 @@ def main(argv=None) -> int:
     if not path.is_file():
         print(f"no store at {path}", file=sys.stderr)
         return 2
+    if (ns.yes or ns.check) and _marker_path(home).exists():
+        print(f"refusing: {_marker_path(home)} exists -- an earlier run's store check "
+              f"FAILED:\n{_marker_path(home).read_text(errors='replace').strip()}\n"
+              "The store is suspect: investigate (integrity_check, the snapshot), then "
+              "delete the marker.", file=sys.stderr)
+        return 2
     dim = Store.stored_dim(path)
     if dim is None:
+        if ns.yes:     # --check passed a moment ago: unreadable now means damaged
+            return _store_check_failed(home, f"cannot read the store's meta at {path}")
         print(f"{path} has no recorded embedding dim (never initialised by the daemon?)",
               file=sys.stderr)
         return 2
@@ -600,69 +610,130 @@ def main(argv=None) -> int:
         return 2
     prev: dict = {}
     streams = (sys.stdout, sys.stderr)
+
+    def restore_signals():
+        for sig, h in prev.items():
+            signal.signal(sig, h)
+        prev.clear()
+
     try:
         # A closed terminal must not crash the run mid-owner: output becomes
         # best-effort, and SIGHUP stops cleanly like SIGINT/SIGTERM.
         sys.stdout, sys.stderr = _SafeStream(sys.stdout), _SafeStream(sys.stderr)
         print(f"mcpbrain {version} (installed package)", flush=True)
-        store = Store(path, dim=dim)     # writable; NO init(): never migrate from here
-        refusal = _gates(store, home, ns)
-        if refusal:
-            print(refusal, file=sys.stderr)
-            return 2
-        if ns.no_backup_check:
-            print("WARNING: --no-backup-check: running with no verified recent backup; "
-                  "the snapshot the wrapper takes is the only recovery point.", flush=True)
-        embedder = _get_embedder()
-        if getattr(embedder, "dim", dim) != dim:
-            print(f"refusing: embedder dim {embedder.dim} != store dim {dim}", file=sys.stderr)
-            return 2
-        services = _build_services() or {}
-
-        handler = _make_signal_handler()
-        for sig in (signal.SIGINT, signal.SIGTERM, signal.SIGHUP):
-            try:
-                prev[sig] = signal.signal(sig, handler)
-            except ValueError:            # not the main thread (never in the CLI)
-                pass
-        summary = None
         try:
-            summary = drain(store, home=home, services=services, embedder=embedder,
-                            sources_filter=ns.sources, max_owners=ns.max_owners)
-        except KeyboardInterrupt:
-            _STOP.request("interrupt")
-            print("aborted: the in-flight owner's transaction rolled back.", flush=True)
-        checks = _checks(store, home)
-        if summary is not None:
-            _print_summary(summary, checks)
-        else:
-            print(f"integrity_check: {checks['integrity_check']}; "
-                  f"foreign_key_check: {checks['foreign_key_check']}")
-        reason = _STOP.reason
-        if checks["integrity_check"] != "ok" or (checks["rebuilt_store"]
-                                                  and checks["foreign_key_check"]):
-            print("\nSTORE CHECK FAILED (integrity_check / foreign_key_check) -- do NOT "
-                  "restart the daemon on this store before investigating (CLAUDE.md, "
-                  "2026-09-10 incident rules); the wrapper's snapshot is the recovery "
-                  "point.", file=sys.stderr)
-            return EXIT_STORE_CHECK
-        if reason == "halt":
-            print(f"\nREFLOW HALTED: {(summary or {}).get('halt')}\n{_RESUME_HELP}",
-                  file=sys.stderr)
-            return 3
-        if reason == "daemon":
-            print(f"\nSTOPPED: a daemon appeared mid-run -- {(summary or {}).get('daemon')}",
-                  file=sys.stderr)
-            return 4
-        if reason == "interrupt":
-            return 130
-        return 0
+            return _run_yes(ns, store_path=path, dim=dim, home=home, prev=prev,
+                            restore_signals=restore_signals)
+        except sqlite3.DatabaseError as exc:
+            # "database disk image is malformed" is exactly the 2026-09-10
+            # symptom: never an ordinary error the wrapper restarts through.
+            return _store_check_failed(home, f"{type(exc).__name__}: {exc}")
     finally:
-        for sig, h in prev.items():
-            signal.signal(sig, h)
-        sys.stdout, sys.stderr = streams
+        restore_signals()
+        sys.stdout, sys.stderr = (_live_or_devnull(streams[0]),
+                                  _live_or_devnull(streams[1]))
         lock.release()
 
 
+def _run_yes(ns, *, store_path, dim, home, prev, restore_signals) -> int:
+    from mcpbrain.store import Store
+    store = Store(store_path, dim=dim)   # writable; NO init(): never migrate from here
+    refusal = _gates(store, home, ns)
+    if refusal:
+        print(refusal, file=sys.stderr)
+        return 2
+    if ns.no_backup_check:
+        print("WARNING: --no-backup-check: running with no verified recent backup; "
+              "the snapshot the wrapper takes is the only recovery point.", flush=True)
+    embedder = _get_embedder()
+    if getattr(embedder, "dim", dim) != dim:
+        print(f"refusing: embedder dim {embedder.dim} != store dim {dim}", file=sys.stderr)
+        return 2
+    services = _build_services() or {}
+
+    handler = _make_signal_handler()
+    for sig in (signal.SIGINT, signal.SIGTERM, signal.SIGHUP):
+        try:
+            prev[sig] = signal.signal(sig, handler)
+        except ValueError:                # not the main thread (never in the CLI)
+            pass
+    summary = None
+    try:
+        summary = drain(store, home=home, services=services, embedder=embedder,
+                        sources_filter=ns.sources, max_owners=ns.max_owners)
+    except KeyboardInterrupt:
+        _STOP.request("interrupt")
+        print("aborted: the in-flight owner's transaction rolled back.", flush=True)
+    finally:
+        restore_signals()                 # the checks below run with default handlers
+    checks = _checks(store, home)
+    if summary is not None:
+        _print_summary(summary, checks)
+    else:
+        print(f"integrity_check: {checks['integrity_check']}; "
+              f"foreign_key_check: {checks['foreign_key_check']}")
+    reason = _STOP.reason
+    if checks["integrity_check"] != "ok":
+        return _store_check_failed(home, f"integrity_check: {checks['integrity_check']}")
+    if checks["rebuilt_store"] and checks["foreign_key_check"]:
+        return _store_check_failed(
+            home, f"foreign_key_check: {checks['foreign_key_check']} violation(s)")
+    if reason == "halt":
+        print(f"\nREFLOW HALTED: {(summary or {}).get('halt')}\n{_RESUME_HELP}",
+              file=sys.stderr)
+        return 3
+    if reason == "daemon":
+        print(f"\nSTOPPED: a daemon appeared mid-run -- {(summary or {}).get('daemon')}",
+              file=sys.stderr)
+        return 4
+    if reason == "interrupt":
+        return 130
+    return 0
+
+
+def _marker_path(home) -> Path:
+    return Path(home) / MARKER_NAME
+
+
+def _store_check_failed(home, reason: str) -> int:
+    """Record a failed store check durably BEFORE returning: the wrapper
+    reads this marker (not only the exit code, which a dead terminal can
+    rewrite at interpreter shutdown) and then does NOT restart the daemon."""
+    import datetime as _dt
+    stamp = _dt.datetime.now(_dt.timezone.utc).isoformat()
+    try:
+        _marker_path(home).write_text(f"{stamp}\n{reason}\n")
+    except OSError as exc:
+        print(f"!! could not write {_marker_path(home)}: {exc}", file=sys.stderr)
+    print(f"\nSTORE CHECK FAILED ({reason}) -- do NOT restart the daemon on this store "
+          "before investigating (CLAUDE.md, 2026-09-10 incident rules); the wrapper's "
+          f"snapshot is the recovery point. Marker: {_marker_path(home)} (delete it "
+          "after investigating).", file=sys.stderr)
+    return EXIT_STORE_CHECK
+
+
+def _live_or_devnull(stream):
+    """The original stream if it still flushes, else /dev/null: restoring a
+    dead terminal would make CPython's shutdown flush fail and rewrite the
+    exit status (to 120)."""
+    try:
+        stream.flush()
+        return stream
+    except (OSError, ValueError):
+        return open(os.devnull, "w")
+
+
+def _run_cli(argv=None) -> None:
+    """The CLI entry: main(), a guarded flush, then os._exit so nothing at
+    interpreter shutdown can change the exit status the wrapper acts on."""
+    rc = main(argv)
+    for st in (sys.stdout, sys.stderr):
+        try:
+            st.flush()
+        except (OSError, ValueError):
+            pass
+    os._exit(rc)
+
+
 if __name__ == "__main__":
-    sys.exit(main())
+    _run_cli()

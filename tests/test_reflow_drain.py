@@ -300,13 +300,70 @@ def test_check_mode_runs_the_gates_writes_nothing_and_skips_daemon_detection(
     del before
 
 
-def test_integrity_failure_exits_5(home, monkeypatch):
+def _marker(home):
+    return home / "reflow_drain.STORE_CHECK_FAILED"
+
+
+def test_integrity_failure_exits_5_and_writes_the_marker(home, monkeypatch):
     _live()
     _fakes(monkeypatch)
     monkeypatch.setattr(drain, "_checks", lambda store, home: {
         "integrity_check": ["row 3 missing from index"], "foreign_key_check": 0,
         "rebuilt_store": True})
     assert drain.main(["--yes"]) == 5
+    assert "row 3 missing from index" in _marker(home).read_text()
+
+
+def test_a_malformed_store_during_the_drain_is_a_store_check_failure(home, monkeypatch):
+    import sqlite3
+    _live()
+    _fakes(monkeypatch)
+
+    def boom(*a, **k):
+        raise sqlite3.DatabaseError("database disk image is malformed")
+
+    monkeypatch.setattr(drain, "drain", boom)
+    assert drain.main(["--yes"]) == 5
+    assert "malformed" in _marker(home).read_text()
+
+
+def test_a_malformed_store_in_the_checks_is_a_store_check_failure(home, monkeypatch):
+    import sqlite3
+    _live()
+    _fakes(monkeypatch)
+
+    def boom(store, home):
+        raise sqlite3.DatabaseError("database disk image is malformed")
+
+    monkeypatch.setattr(drain, "_checks", boom)
+    assert drain.main(["--yes"]) == 5
+    assert _marker(home).exists()
+
+
+def test_an_existing_marker_refuses_every_mode(home, monkeypatch, capsys):
+    s = _live()
+    _fakes(monkeypatch)
+    _marker(home).write_text("integrity_check: bad\n")
+    assert drain.main(["--yes"]) == 2
+    assert drain.main(["--check"]) == 2
+    assert "STORE_CHECK_FAILED" in capsys.readouterr().err
+    assert _reflow_rows(s) == [] and s.reflow_candidates(10)
+
+
+def test_signal_handlers_are_restored_before_the_store_checks(home, monkeypatch):
+    import signal as _signal
+    _live()
+    _fakes(monkeypatch)
+    before = _signal.getsignal(_signal.SIGINT)
+    seen = {}
+
+    def checks(store, home):
+        seen["h"] = _signal.getsignal(_signal.SIGINT)
+        return {"integrity_check": "ok", "foreign_key_check": 0, "rebuilt_store": False}
+
+    monkeypatch.setattr(drain, "_checks", checks)
+    assert drain.main(["--yes"]) == 0
+    assert seen["h"] is before
 
 
 def test_foreign_key_violations_on_a_rebuilt_store_exit_5(home, monkeypatch):
@@ -315,6 +372,7 @@ def test_foreign_key_violations_on_a_rebuilt_store_exit_5(home, monkeypatch):
     monkeypatch.setattr(drain, "_checks", lambda store, home: {
         "integrity_check": "ok", "foreign_key_check": 2, "rebuilt_store": True})
     assert drain.main(["--yes"]) == 5
+    _marker(home).unlink()
     monkeypatch.setattr(drain, "_checks", lambda store, home: {
         "integrity_check": "ok", "foreign_key_check": 2, "rebuilt_store": False})
     assert drain.main(["--yes"]) == 0
@@ -356,6 +414,7 @@ _FAKE_PY = """#!/bin/sh
 # optionally signalling its parent (the wrapper) first.
 case "$*" in *--check*) exit "${FAKE_CHECK_RC:-0}";; esac
 echo DRAIN-RUNNING
+[ -n "$FAKE_MARKER" ] && echo "integrity_check: bad" > "$MCPBRAIN_HOME/reflow_drain.STORE_CHECK_FAILED"
 if [ -n "$FAKE_SIG" ]; then
   sleep 0.5
   kill -"$FAKE_SIG" "$PPID"
@@ -374,7 +433,8 @@ def _harness(tmp_path):
         (b / name).write_text("#!/bin/sh\n" + body)
         (b / name).chmod(0o755)
     w("launchctl", f'echo "$*" >> "{calls}"\n[ "$1" = print ] && exit 113\nexit 0\n')
-    w("pgrep", "exit 1\n")
+    w("pgrep", 'case "$*" in *daemon*) [ -n "$FAKE_DAEMON_PID" ] && '
+               '{ echo "$FAKE_DAEMON_PID"; exit 0; };; esac\nexit 1\n')
     w("caffeinate", "exit 0\n")
     w("sqlite3", f'echo "sqlite3 $*" >> "{calls}"\n'
                  'for a; do last="$a"; done\n'
@@ -383,21 +443,26 @@ def _harness(tmp_path):
     (b / "python").write_text(_FAKE_PY)
     (b / "python").chmod(0o755)
     app = tmp_path / "app"
-    app.mkdir()
+    app.mkdir(exist_ok=True)
     (app / "brain.sqlite3").write_text("x")
     hm = tmp_path / "userhome"
     (hm / "Library" / "LaunchAgents").mkdir(parents=True)
     (hm / "Library" / "LaunchAgents" / "com.mcpbrain.plist").write_text("<plist/>")
     import os
     env = {**os.environ, "PATH": f"{b}:{os.environ['PATH']}", "HOME": str(hm),
-           "MCPBRAIN_HOME": str(app), "MCPBRAIN_PY": str(b / "python")}
+           "MCPBRAIN_HOME": str(app), "MCPBRAIN_PY": str(b / "python"),
+           "REFLOW_DRAIN_DAEMON_WAIT_S": "2"}
     return env, calls, app
 
 
-def _run_wrapper(tmp_path, dead_stdout=False, **fake):
+def _run_wrapper(tmp_path, dead_stdout=False, real_py=None, marker=False, **fake):
     import os
     import threading
     env, calls, app = _harness(tmp_path)
+    if marker:
+        (app / "reflow_drain.STORE_CHECK_FAILED").write_text("integrity_check: bad\n")
+    if real_py is not None:
+        env["MCPBRAIN_PY"] = str(_real_fake_python(tmp_path, app, real_py))
     env.update({k: str(v) for k, v in fake.items()})
     cmd = ["bash", str(_ROOT / "bin" / "reflow_drain.sh")]
     if not dead_stdout:
@@ -426,7 +491,7 @@ def _run_wrapper(tmp_path, dead_stdout=False, **fake):
     log = "".join(p.read_text() for p in (app / "logs").glob("reflow_drain*.log")) \
         if (app / "logs").exists() else ""
     lines = calls.read_text().splitlines() if calls.exists() else []
-    return rc, out, log, lines
+    return rc, out, log, lines, app
 
 
 def _boots(lines, verb):
@@ -440,21 +505,21 @@ def test_wrapper_script_parses():
 
 @pytest.mark.parametrize("rc", [0, 1, 3, 4, 130])
 def test_wrapper_bootstraps_exactly_once_for_every_ordinary_exit(tmp_path, rc):
-    got, out, log, lines = _run_wrapper(tmp_path, FAKE_RC=rc)
+    got, out, log, lines, app = _run_wrapper(tmp_path, FAKE_RC=rc)
     assert got == rc
     assert _boots(lines, "bootout") == 1 and _boots(lines, "bootstrap") == 1
     assert any("-readonly" in ln for ln in lines if ln.startswith("sqlite3"))
 
 
 def test_wrapper_never_bootstraps_after_an_integrity_failure(tmp_path):
-    got, out, log, lines = _run_wrapper(tmp_path, FAKE_RC=5)
+    got, out, log, lines, app = _run_wrapper(tmp_path, FAKE_RC=5)
     assert got == 5
     assert _boots(lines, "bootout") == 1 and _boots(lines, "bootstrap") == 0
     assert "launchctl bootstrap gui/" in out and "launchctl bootstrap gui/" in log
 
 
 def test_wrapper_refusal_by_check_costs_nothing(tmp_path):
-    got, out, log, lines = _run_wrapper(tmp_path, FAKE_CHECK_RC=2)
+    got, out, log, lines, app = _run_wrapper(tmp_path, FAKE_CHECK_RC=2)
     assert got == 2
     assert _boots(lines, "bootout") == 0 and _boots(lines, "bootstrap") == 0
     assert not any(ln.startswith("sqlite3") for ln in lines)
@@ -462,17 +527,110 @@ def test_wrapper_refusal_by_check_costs_nothing(tmp_path):
 
 @pytest.mark.parametrize("sig,rc", [("INT", 130), ("TERM", 0)])
 def test_wrapper_signal_during_the_drain_still_bootstraps_once(tmp_path, sig, rc):
-    got, out, log, lines = _run_wrapper(tmp_path, FAKE_SIG=sig, FAKE_RC=rc)
+    got, out, log, lines, app = _run_wrapper(tmp_path, FAKE_SIG=sig, FAKE_RC=rc)
     assert _boots(lines, "bootstrap") == 1
 
 
 def test_wrapper_signal_does_not_mask_an_integrity_failure(tmp_path):
-    got, out, log, lines = _run_wrapper(tmp_path, FAKE_SIG="INT", FAKE_RC=5)
+    got, out, log, lines, app = _run_wrapper(tmp_path, FAKE_SIG="INT", FAKE_RC=5)
     assert got == 5 and _boots(lines, "bootstrap") == 0
 
 
 def test_wrapper_hup_with_a_dead_terminal_still_bootstraps_once(tmp_path):
-    got, out, log, lines = _run_wrapper(tmp_path, dead_stdout=True, FAKE_SIG="HUP",
+    got, out, log, lines, app = _run_wrapper(tmp_path, dead_stdout=True, FAKE_SIG="HUP",
                                         FAKE_RC=0)
     assert _boots(lines, "bootstrap") == 1
     assert "bootstrap" in log
+
+
+# -- fix round 2: a REAL python drain behind the wrapper ------------------------
+
+_REAL_FAKE = """#!{exe}
+# The wrapper's "installed python": runs the REAL bin/reflow_drain.py CLI
+# entry (main + its os._exit), with only the store checks / drain faked.
+import importlib.util, json, sqlite3, sys, time
+spec = importlib.util.spec_from_file_location("reflow_drain", {script!r})
+d = importlib.util.module_from_spec(spec); spec.loader.exec_module(d)
+d._check_installed = lambda: (None, "0.0-test")
+d._daemon_alive = lambda: None
+d._build_services = lambda: {{}}
+
+class E:
+    dim = 4
+    def embed_passages(self, xs):
+        return [[0.1, 0.2, 0.3, 0.4] for _ in xs]
+
+d._get_embedder = lambda: E()
+mode = {mode!r}
+args = [a for a in sys.argv[1:] if a not in ("-I", {script!r})]
+if "--yes" in args:
+    print("DRAIN-RUNNING", flush=True)
+    time.sleep(0.8)                      # the terminal goes away here
+    if mode == "integrity":
+        d._checks = lambda store, home: {{"integrity_check": ["bad index"],
+                                          "foreign_key_check": 0, "rebuilt_store": True}}
+    elif mode == "malformed":
+        def boom(*a, **k):
+            raise sqlite3.DatabaseError("database disk image is malformed")
+        d.drain = boom
+    for _ in range(200):
+        print("progress line that must not crash a dead terminal")
+d._run_cli(args)
+"""
+
+
+def _real_fake_python(tmp_path, app, mode):
+    import sys as _sys
+    (app / "brain.sqlite3").unlink()
+    s = Store(app / "brain.sqlite3", dim=4)
+    s.init()
+    (app / "backup_state.json").write_text(json.dumps({"last_success": time.time()}))
+    p = tmp_path / "fakebin" / "realpy"
+    p.write_text(_REAL_FAKE.format(exe=_sys.executable,
+                                   script=str(_ROOT / "bin" / "reflow_drain.py"), mode=mode))
+    p.chmod(0o755)
+    return p
+
+
+@pytest.mark.parametrize("mode", ["integrity", "malformed"])
+def test_wrapper_store_check_failure_with_a_dead_terminal_never_bootstraps(tmp_path, mode):
+    got, out, log, lines, app = _run_wrapper(tmp_path, dead_stdout=True, real_py=mode)
+    assert (app / "reflow_drain.STORE_CHECK_FAILED").exists()
+    assert _boots(lines, "bootout") == 1 and _boots(lines, "bootstrap") == 0
+    assert "launchctl bootstrap gui/" in log
+
+
+def test_wrapper_real_python_clean_run_bootstraps_once(tmp_path):
+    got, out, log, lines, app = _run_wrapper(tmp_path, real_py="ok")
+    assert got == 0, out
+    assert _boots(lines, "bootstrap") == 1
+    assert not (app / "reflow_drain.STORE_CHECK_FAILED").exists()
+
+
+def test_wrapper_refuses_to_start_when_a_marker_exists(tmp_path):
+    got, out, log, lines, app = _run_wrapper(tmp_path, marker=True)
+    assert got == 2
+    assert _boots(lines, "bootout") == 0 and _boots(lines, "bootstrap") == 0
+    assert "STORE_CHECK_FAILED" in out
+
+
+def test_wrapper_never_starts_a_second_daemon_beside_a_survivor(tmp_path):
+    got, out, log, lines, app = _run_wrapper(tmp_path, FAKE_DAEMON_PID="4242")
+    assert got != 0
+    assert _boots(lines, "bootout") == 1 and _boots(lines, "bootstrap") == 0
+    assert "4242" in out and "launchctl bootstrap gui/" in out
+
+
+def test_wrapper_log_is_not_garbled_by_a_dead_terminal(tmp_path):
+    got, out, log, lines, app = _run_wrapper(tmp_path, dead_stdout=True, FAKE_SIG="HUP",
+                                             FAKE_RC=0)
+    for ln in log.splitlines():
+        assert ln[:4].isdigit(), f"garbled log line: {ln!r}"
+
+
+def test_wrapper_trusts_the_marker_over_a_disturbed_exit_code(tmp_path):
+    """The dead-terminal shape: the store check failed (marker written) but the
+    status the wrapper sees is not 5 -- still no bootstrap."""
+    got, out, log, lines, app = _run_wrapper(tmp_path, FAKE_MARKER=1, FAKE_RC=120)
+    assert _boots(lines, "bootout") == 1 and _boots(lines, "bootstrap") == 0
+    assert "rm " in out and "STORE_CHECK_FAILED" in out

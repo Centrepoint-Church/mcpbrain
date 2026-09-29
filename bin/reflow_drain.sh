@@ -1,6 +1,8 @@
 #!/usr/bin/env bash
 # Attended reflow drain on the LIVE store (docs/RELEASE-RUNBOOK.md §8,
-# "Draining the backlog faster (attended)"). Run it inside tmux/screen.
+# "Draining the backlog faster (attended)"). Run it inside screen:
+#   screen -S reflow        # then run this; Ctrl-A D detaches, `screen -r reflow`
+#                           # reattaches (tmux works too, if installed)
 #
 #   bin/reflow_drain.sh [--max-owners N] [--source reflow:drive ...] [--no-backup-check]
 #
@@ -14,24 +16,31 @@
 # 5. on ANY exit bootstraps the daemon back exactly once -- after the drain
 #    process is gone, and BEFORE printing anything (a closed terminal must not
 #    be able to kill this script between the bootout and the bootstrap) --
-#    EXCEPT when the drain reports a store-check failure (exit 5): then the
-#    daemon stays down and the exact bootstrap command is printed and logged.
+#    EXCEPT when the drain reports a store-check failure (exit 5, or the
+#    STORE_CHECK_FAILED marker it writes -- the marker is what counts, since a
+#    dead terminal can disturb an exit code) or a daemon survived the bootout:
+#    then no daemon is started and the exact bootstrap command is printed and
+#    logged. A marker present at START refuses the run outright.
 set -euo pipefail
 # A dead terminal must turn writes into errors, never kill us (SIGPIPE).
 trap '' PIPE
 
 REPO="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 DRAIN="$REPO/bin/reflow_drain.py"
-PY="${MCPBRAIN_PY:-$HOME/.local/share/uv/tools/mcpbrain/bin/python}"
+PY="${MCPBRAIN_PY:-${UV_TOOL_DIR:-$HOME/.local/share/uv/tools}/mcpbrain/bin/python}"
 LABEL="com.mcpbrain"
 DOMAIN="gui/$(id -u)"
 PLIST="$HOME/Library/LaunchAgents/$LABEL.plist"
 APP_DIR="${MCPBRAIN_HOME:-$HOME/Library/Application Support/mcpbrain}"
 STORE="$APP_DIR/brain.sqlite3"
 LOG="$APP_DIR/logs/reflow_drain.log"
+MARKER="$APP_DIR/reflow_drain.STORE_CHECK_FAILED"
+DAEMON_WAIT_S="${REFLOW_DRAIN_DAEMON_WAIT_S:-30}"
 BOOTSTRAP_CMD="launchctl bootstrap $DOMAIN \"$PLIST\""
 EXIT_STORE_CHECK=5
 SNAP=""
+SNAP_PARTIAL=""
+DAEMON_SURVIVED=""
 BOOTED_OUT=0
 CLEANED=0
 DRAIN_RC=""
@@ -39,9 +48,12 @@ DRAIN_RC=""
 mkdir -p "$APP_DIR/logs" 2>/dev/null || true
 
 # Every line goes to the log first, then (best effort) to the terminal.
+# The terminal copy goes through an external /bin/echo, never a bash builtin:
+# a builtin write that fails on a dead terminal leaves its text in bash's
+# buffer, which the next builtin write (the log line) would then emit.
 say() {
     { printf '%s %s\n' "$(date '+%F %T')" "$*" >>"$LOG"; } 2>/dev/null || true
-    { printf '%s\n' "$*"; } 2>/dev/null || true
+    /bin/echo "$*" 2>/dev/null || true
 }
 
 drain_running() {
@@ -67,10 +79,17 @@ cleanup() {
         if drain_running; then
             say "!! the drain process is still running -- daemon NOT restarted."
             say "!! once it has exited: $BOOTSTRAP_CMD"
-        elif [ "$rc" = "$EXIT_STORE_CHECK" ]; then
-            say "!! store check FAILED (integrity_check / foreign_key_check): the daemon"
-            say "!! was deliberately NOT restarted. Investigate first (CLAUDE.md, 2026-09-10"
-            say "!! incident rules; snapshot below). Only then: $BOOTSTRAP_CMD"
+        elif [ -n "$DAEMON_SURVIVED" ]; then
+            say "!! a daemon process survived the bootout (pid $DAEMON_SURVIVED) -- NOT"
+            say "!! starting a second one beside it. Nothing was drained. Find out what"
+            say "!! started it; once no mcpbrain daemon runs: $BOOTSTRAP_CMD"
+        elif [ "$rc" = "$EXIT_STORE_CHECK" ] || [ -f "$MARKER" ]; then
+            say "!! store check FAILED (integrity_check / foreign_key_check / malformed):"
+            [ -f "$MARKER" ] && say "!! $(tr '\n' ' ' <"$MARKER" 2>/dev/null)"
+            say "!! the daemon was deliberately NOT restarted. Investigate first (CLAUDE.md,"
+            say "!! 2026-09-10 incident rules; snapshot below). Then delete the marker"
+            say "!!   rm \"$MARKER\""
+            say "!! and only then: $BOOTSTRAP_CMD"
         else
             # Bootstrap FIRST, output after.
             local err
@@ -87,6 +106,10 @@ cleanup() {
             say "confirm it is healthy:  mcpbrain doctor   (Reflow line; version; integrity)"
         fi
     fi
+    if [ -z "$SNAP" ] && [ -n "$SNAP_PARTIAL" ] && [ -e "$SNAP_PARTIAL" ]; then
+        rm -f "$SNAP_PARTIAL"
+        say "removed the partial snapshot $SNAP_PARTIAL (interrupted)"
+    fi
     if [ -n "$SNAP" ]; then
         say "snapshot kept at: $SNAP"
         say "delete it once the daemon has completed a backup after this run:  rm \"$SNAP\""
@@ -100,6 +123,13 @@ trap 'exit 143' TERM
 trap 'exit 129' HUP
 
 say "reflow drain wrapper starting (store: $STORE)"
+if [ -e "$MARKER" ]; then
+    say "refusing: $MARKER exists -- an earlier run's store check FAILED:"
+    say "  $(tr '\n' ' ' <"$MARKER" 2>/dev/null)"
+    say "The store is suspect. Investigate (integrity_check, the snapshot), then"
+    say "delete the marker. Nothing was stopped or written."
+    exit 2
+fi
 if [ ! -x "$PY" ]; then
     say "no installed mcpbrain interpreter at $PY (uv tool install mcpbrain first)"
     exit 2
@@ -126,12 +156,13 @@ say "stopping the daemon: launchctl bootout $DOMAIN/$LABEL"
 BOOTED_OUT=1
 launchctl bootout "$DOMAIN/$LABEL" >/dev/null 2>&1 || say "(not loaded)"
 gone=0
-for _ in $(seq 1 30); do
+for _ in $(seq 1 "$DAEMON_WAIT_S"); do
     if ! pgrep -f "mcpbrain[ .]daemon" >/dev/null 2>&1; then gone=1; break; fi
     sleep 1
 done
 if [ "$gone" != 1 ]; then
-    say "a daemon process is still alive after 30 s: $(pgrep -f 'mcpbrain[ .]daemon' | tr '\n' ' ')-- aborting"
+    DAEMON_SURVIVED="$(pgrep -f 'mcpbrain[ .]daemon' | tr '\n' ' ')"
+    say "a daemon process is still alive after $DAEMON_WAIT_S s: $DAEMON_SURVIVED-- aborting"
     exit 1
 fi
 say "no daemon process running."
@@ -148,6 +179,7 @@ if [ "$free_bytes" -lt "$need" ]; then
     exit 1
 fi
 snap_path="$STORE.pre-reflow-drain-$(date +%s)"
+SNAP_PARTIAL="$snap_path"
 say "snapshotting the store to $snap_path ..."
 if ! sqlite3 -readonly "$STORE" "VACUUM INTO '$snap_path'" || [ ! -s "$snap_path" ]; then
     say "snapshot failed or is empty -- aborting"

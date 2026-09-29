@@ -643,14 +643,16 @@ and seeds only while a backup succeeded in the last 24 h. Kill switch:
 
 The daemon works 10 owners / 15 s per cycle; `bin/reflow_drain.sh` drains the
 whole backlog in one sitting on the LIVE store, daemon stopped. **Run it inside
-`tmux` or `screen`** so a closed terminal or dropped SSH session cannot end it:
+`screen`** (it ships with macOS at `/usr/bin/screen`; `tmux` works too if you
+have it) so a closed terminal or dropped SSH session cannot end it:
 
 ```bash
 PY=~/.local/share/uv/tools/mcpbrain/bin/python
 $PY -I bin/reflow_drain.py            # plan only: counts, halt, backup age; writes nothing
-tmux new -s reflow                    # then, inside tmux:
+screen -S reflow                      # then, inside screen:
 bin/reflow_drain.sh                   # the real run (extra args pass through:
                                       #   --max-owners N, --source reflow:drive, ...)
+# Ctrl-A D detaches (it keeps running); `screen -r reflow` reattaches.
 ```
 
 The drain runs with the **installed** tool's interpreter (the daemon's exact
@@ -663,10 +665,15 @@ process is left (aborts after 30 s), takes a `sqlite3 -readonly … VACUUM INTO`
 snapshot (`brain.sqlite3.pre-reflow-drain-<epoch>`; refuses under 2x the store
 in free disk) and runs `reflow_drain.py --yes`. On any exit — once the drain
 process is gone — it `launchctl bootstrap`s the daemon back exactly once,
-before printing anything. **Exception: exit 5** (integrity_check not ok, or
-foreign_key_check > 0 on a rebuilt store) leaves the daemon DOWN and prints
-the bootstrap command: investigate first (CLAUDE.md 2026-09-10 incident rules;
-the snapshot is the recovery point). Everything is also logged to
+before printing anything. **Exceptions:** a store-check failure (exit 5:
+integrity_check not ok, foreign_key_check > 0 on a rebuilt store, or a
+`sqlite3.DatabaseError` such as "database disk image is malformed") leaves the
+daemon DOWN, writes `<app dir>/reflow_drain.STORE_CHECK_FAILED` (reason +
+time; the wrapper trusts this marker even if the exit code was disturbed) and
+prints the bootstrap command: investigate first (CLAUDE.md 2026-09-10 incident
+rules; the snapshot is the recovery point), then delete the marker — while it
+exists, both the wrapper and the drain refuse to run. And if a daemon process
+survives the bootout, the wrapper aborts without starting a second one. Everything is also logged to
 `<app dir>/logs/reflow_drain.log`.
 
 The drain uses the daemon's own seed logic and `work_queue` + `ReflowContext`
@@ -681,13 +688,15 @@ a halt — then step 6. Afterwards `mcpbrain doctor`; the daemon's next seed run
 its own backlog-end integrity check. Delete the snapshot once the daemon has
 completed a backup.
 
-**While it runs, do NOT:** close the terminal outside tmux/screen; log out,
+**While it runs, do NOT:** close the terminal outside screen/tmux; log out,
 sleep-by-lid on battery, or reboot; start a daemon by hand (`mcpbrain daemon`,
 `python -m mcpbrain.daemon`); run `mcpbrain setup`; or `launchctl load` /
 `bootstrap` / `kickstart` the agent yourself. Claude Desktop and Claude Code
-can stay open, but avoid the MCP tools that write the store directly
-(`brain_draft_save`, `brain_meeting_pack_upsert`, `brain_finding_resolve`,
-graph corrections) until the daemon is back.
+can stay open: the store-writing MCP tools (draft save, meeting packs, finding
+resolve, graph corrections) route to the daemon (`tool_exec_in_daemon`, default
+ON) and simply fail cleanly while it is down. Only if `tool_exec_in_daemon` was
+set `false` would they write in-process — then leave them alone until the
+daemon is back.
 
 ## Environment note — repos live outside iCloud
 
