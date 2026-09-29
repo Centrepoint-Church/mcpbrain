@@ -639,6 +639,36 @@ and seeds only while a backup succeeded in the last 24 h. Kill switch:
    Every carry-over path (the reflow handler and the shared-drive cache import)
    waits while halted.
 
+### Draining the backlog faster (attended)
+
+The daemon works 10 owners / 15 s per cycle; `bin/reflow_drain.sh` drains the
+whole backlog in one sitting on the LIVE store, daemon stopped:
+
+```bash
+uv run python bin/reflow_drain.py   # plan only: counts, halt, backup age; writes nothing
+bin/reflow_drain.sh                 # the real run (extra args pass through:
+                                    #   --max-owners N, --source reflow:drive, ...)
+```
+
+The wrapper keeps the Mac awake, `launchctl bootout`s the daemon, waits until no
+`mcpbrain daemon` process is left (aborts after 30 s), takes a `VACUUM INTO`
+snapshot (`brain.sqlite3.pre-reflow-drain-<epoch>`, refuses under 2x the store
+in free disk), runs `bin/reflow_drain.py --yes`, and on ANY exit — once the
+drain process is gone — `launchctl bootstrap`s the daemon back. The drain uses
+the daemon's own seed logic and `work_queue` + `ReflowContext` with the
+per-cycle caps lifted, so DEFER, the enrich-unit guard, give-up stamps, the
+transient-defer bound, the orphan halt and shared-drive pending publishes all
+behave as in the daemon (a changed Shared Drive file is deferred for the
+daemon, which has its fleet storage). It refuses while a daemon is alive (and
+holds the single-writer lock, re-checking every few owners — exit 4 if one
+appears), while halted, with the kill switch off, or without a backup in the
+last 24 h (`--no-backup-check` overrides; discouraged). Ctrl-C finishes the
+current owner and exits 130; re-running is safe. It ends with
+`integrity_check` + `foreign_key_check` (exit 1 if integrity is not ok; 3 on
+a halt — then step 6). Afterwards `mcpbrain doctor`; the daemon's next seed
+runs its own backlog-end integrity check. Delete the snapshot once the daemon
+has completed a backup.
+
 ## Environment note — repos live outside iCloud
 
 All repos now live under `~/GitHub` (moved off the iCloud-synced `~/Documents`
