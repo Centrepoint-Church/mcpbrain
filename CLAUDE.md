@@ -299,6 +299,21 @@ assert_relation / merge / undo, each with `basis` user_stated|inferred) plus
   the elicitation accept path (`confirmed_via='elicitation'`) in an interactive session;
   the dashboard Pending-corrections click-through.
 
+## brain_owner_context (2026-09-29, source-only, NOT released)
+
+**Voice/identity/preferences were unreachable in Claude Desktop and Cowork.** They
+were offered only as MCP *resources*, and those clients give the model no tool to
+read a resource. One reaches the model only when the user attaches it by hand.
+Both the connect-time instructions and the SessionStart hook told the model to
+read them anyway ("no tool call needed"). A Cowork session asked where voice.md was,
+searched the workspace, and found nothing. New tool `brain_owner_context`
+(local, read-only, plain file reads, no daemon): a bare call returns identity,
+voice, preferences and decisions in full (~31 KB on the live records repo) plus a
+list of the rest (`reference/*`, `MEMORY.md`, `CLAUDE.md`, `memory.md`) to fetch by
+`name`. `mcpbrain/owner_context.entries()` is now the ONE allowlist for both the
+tool and `resources/list`, so they cannot disagree. Both instruction texts now
+say "call brain_owner_context". **28 tools** after release (was 27).
+
 ## Shipping caveats
 
 - **Current state (2026-09-28, later): the four version files (+ `uv.lock`) are at

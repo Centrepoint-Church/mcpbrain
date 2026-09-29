@@ -9,7 +9,7 @@ EXPECTED_TOOLS = {
     "brain_proactive", "brain_finding_resolve", "brain_graph_correct",
     "brain_ingest", "brain_action_create",
     "brain_action_update", "brain_decision", "brain_note", "brain_memory_write",
-    "brain_gardener_apply", "brain_draft_context", "brain_draft_save", "brain_routine",
+    "brain_gardener_apply", "brain_draft_context", "brain_draft_save", "brain_routine", "brain_owner_context",
     "brain_enrich_units", "brain_enrich_pull", "brain_enrich_push",
     "brain_enrich_advance", "brain_enrich_claim", "brain_enrich_pending",
     "brain_meetings_today", "brain_meeting_pack_get", "brain_meeting_pack_upsert",
@@ -17,7 +17,7 @@ EXPECTED_TOOLS = {
 
 
 def test_build_server_registers_every_tool(mcp_env):
-    """27 tools, registered, without starting stdio."""
+    """28 tools, registered, without starting stdio."""
     server = build_server(**mcp_env)
     tools = asyncio.run(list_tools_via_handler(server))
     names = {t.name for t in tools}

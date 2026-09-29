@@ -20,6 +20,7 @@ from pathlib import Path
 TOOL_CALLS: dict[str, dict] = {
     "brain_search": {"query": "anything"},
     "brain_read": {"doc_id": "missing-doc"},
+    "brain_owner_context": {},
     "brain_context": {"entity": "Someone"},
     "brain_actions": {"owner": "Someone", "status": "open"},
     "brain_graph": {"entity": "Someone", "hops": 1},

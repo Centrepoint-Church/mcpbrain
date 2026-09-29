@@ -55,8 +55,8 @@ LOCAL_TOOLS = PROGRESS_LOCAL_TOOLS | frozenset({
     "brain_decision", "brain_note", "brain_memory_write",
     # already daemon-executed, via /api/recall rather than /api/tool
     "brain_search",
-    # pure prompt text
-    "brain_routine",
+    # pure prompt text / plain records-file reads
+    "brain_routine", "brain_owner_context",
     # enrichment spool: plain file I/O under MCPBRAIN_HOME
     "brain_enrich_units", "brain_enrich_pull", "brain_enrich_push",
     "brain_enrich_advance", "brain_enrich_claim", "brain_enrich_pending",

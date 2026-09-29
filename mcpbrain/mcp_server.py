@@ -263,28 +263,11 @@ def _progress_reporter(ctx):
 def _resource_entries() -> list[tuple[str, Path]]:
     """(name, resolved_path) for every context resource we expose.
 
-    Two roots: the app-dir context (the daemon-maintained note index, e.g.
-    memory.md) and the per-user records repo (identity, voice, preferences,
-    reference, decisions, MEMORY.md, CLAUDE.md) so the working Cowork project can
-    read standing context through the MCP server without any filesystem paths.
-    Only existing files are returned; a missing file or repo is simply absent.
+    Delegates to owner_context.entries(), which brain_owner_context reads too,
+    so the resource list and the tool can never disagree about what exists.
     """
-    entries: list[tuple[str, Path]] = []
-    app_ctx = config.app_dir() / "context"
-    if app_ctx.is_dir():
-        for md in sorted(app_ctx.glob("*.md")):
-            entries.append((md.name, md.resolve()))
-    records = Path(config.records_dir(str(config.app_dir())))
-    candidates: list[Path] = [records / "CLAUDE.md", records / "MEMORY.md",
-                              records / "state" / "decisions.md"]
-    for sub in ("context", "reference"):
-        sub_dir = records / sub
-        if sub_dir.is_dir():  # guard: never raise if the repo isn't scaffolded yet
-            candidates.extend(sorted(sub_dir.glob("*.md")))
-    for p in candidates:
-        if p.is_file():
-            entries.append((str(p.relative_to(records)), p.resolve()))
-    return entries
+    from mcpbrain import owner_context
+    return owner_context.entries()
 
 
 async def list_context_resources():
@@ -1208,6 +1191,9 @@ def build_server(store, draft_store, client, home: str):
                 final_draft=arguments.get("final_draft", ""),
                 parent_draft_id=arguments.get("parent_draft_id"),
             ))
+        elif name == "brain_owner_context":
+            from mcpbrain.owner_context import owner_context
+            out = owner_context(name=(arguments or {}).get("name", ""))
         elif name == "brain_routine":
             rname = (arguments or {}).get("name", "")
             instructions = _routine_instructions(rname)

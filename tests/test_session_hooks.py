@@ -160,7 +160,8 @@ def test_session_start_includes_tool_reminder(tmp_path, monkeypatch):
     session_hooks.session_start(str(tmp_path / "home"), out=out)
     text = out.getvalue()
     assert "Use mcpbrain proactively" in text
-    assert "ToolSearch(\"select:mcp__mcpbrain__brain_search" in text
+    assert "ToolSearch(\"select:mcp__mcpbrain__brain_owner_context," in text
+    assert "mcp__mcpbrain__brain_search" in text
     # the reminder sets the frame before the continuity/actions data
     assert text.index("Use mcpbrain proactively") < text.index("## Recent continuity")
 

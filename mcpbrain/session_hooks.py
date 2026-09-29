@@ -102,11 +102,12 @@ _STALE_AFTER_DAYS = 730
 # never force-injected, so this hook is the only reliable place to say so.
 _TOOL_REMINDER = """\
 ## Use mcpbrain proactively
-- Identity/voice/preferences/reference/decisions: read directly via the mcpbrain @-resources \
-(context/voice.md, identity.md, preferences.md, reference/*, decisions.md) — no tool call \
-needed. Apply voice to everything you produce for me: emails, documents, slides, any deliverable.
-- Recall: these are deferred tools — load once via ToolSearch("select:mcp__mcpbrain__brain_search,\
-mcp__mcpbrain__brain_context,mcp__mcpbrain__brain_actions,mcp__mcpbrain__brain_graph") then call \
+- Identity/voice/preferences/decisions: call brain_owner_context before writing anything for \
+me (emails, documents, slides, any deliverable) and apply the voice rules to it. It also lists \
+my reference files; fetch one with name=… .
+- These are deferred tools — load once via ToolSearch("select:mcp__mcpbrain__brain_owner_context,\
+mcp__mcpbrain__brain_search,mcp__mcpbrain__brain_context,mcp__mcpbrain__brain_actions,\
+mcp__mcpbrain__brain_graph") then call \
 directly for the rest of the session. Don't wait to be asked: check brain_search / brain_context \
 whenever a question touches a person, org, project, decision, or anything that might already be \
 in memory — even in passing.

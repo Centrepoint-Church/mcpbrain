@@ -1164,6 +1164,27 @@ def _routine_instructions(name: str) -> str | None:
 # output_schema: it carries routine markdown, and structured_content ships
 # ALONGSIDE content, so declaring one would double one of the two largest
 # payloads in the surface for a consumer that reads prose, not JSON.
+# brain_owner_context is dispatched inline in on_call_tool (plain file reads,
+# no Store), so like brain_read it declares itself here.
+declare(
+    "brain_owner_context",
+    description=(
+        "Read the owner's standing context: identity, voice rules, preferences and "
+        "decisions, returned in full, plus a list of further files (reference/*, "
+        "MEMORY.md, CLAUDE.md) you can fetch by passing name. Call this BEFORE "
+        "writing anything for the owner (emails, documents, slides, any "
+        "deliverable) and apply the voice rules to it. Works in every client; "
+        "you do not need the @-resources attached."
+    ),
+    input_schema={"type": "object", "properties": {
+        "name": {"type": "string",
+                 "description": "one file to fetch, e.g. 'reference/projects.md'; "
+                                "omit for identity, voice, preferences and decisions"},
+    }},
+    annotations=_ro("Read owner context"),
+)
+
+
 declare(
     "brain_routine",
     description="Return the full instructions for a recurring mcpbrain routine, to follow verbatim. Use this as the FIRST step of a scheduled task: call it, then do exactly what it returns. name is one of: enrich, meeting-packs, gardener, reference-gardener. Self-contained — do not look for a skill or command or read files.",

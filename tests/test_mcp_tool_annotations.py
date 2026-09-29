@@ -12,7 +12,7 @@ from mcpbrain.tool_registry import registry, spec
 
 READ_ONLY = {
     "brain_search", "brain_read", "brain_context", "brain_actions", "brain_graph",
-    "brain_proactive", "brain_routine", "brain_enrich_pull", "brain_enrich_pending",
+    "brain_proactive", "brain_routine", "brain_owner_context", "brain_enrich_pull", "brain_enrich_pending",
     "brain_meetings_today", "brain_meeting_pack_get", "brain_draft_context",
 }
 DESTRUCTIVE = {"brain_gardener_apply", "brain_enrich_advance", "brain_graph_correct"}
