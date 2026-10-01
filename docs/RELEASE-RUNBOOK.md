@@ -705,8 +705,9 @@ bin/reflow_drain.sh --reset-transient-attempts --retry-gave-up          # inside
 - `--reset-transient-attempts`: queued reflow rows whose stored `last_error`
   is a network failure (`_is_transient_message`: "Unable to find the server",
   "Name or service not known", "nodename nor servname", "Temporary failure in
-  name resolution", "Connection reset", "timed out", "Network is unreachable",
-  "TransportError") get `attempts=0, transient_defers=0, next_attempt_at=NULL,
+  name resolution", "Connection reset", "timed out" — except a subprocess
+  timeout, "Command '…' timed out", which stays permanent — "Network is
+  unreachable") get `attempts=0, transient_defers=0, next_attempt_at=NULL,
   last_error=''`. Other failures keep their attempts.
 - `--retry-gave-up`: every chunk stamped `reflow_skipped="gave_up"` loses
   `reflow_skipped`, `split_version` and `extraction_version` (one

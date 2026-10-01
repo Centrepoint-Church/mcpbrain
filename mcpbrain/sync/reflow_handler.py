@@ -77,32 +77,48 @@ _TRANSIENT_HTTP = frozenset({429, 502, 503, 504})
 _NETWORK_ERRNOS = frozenset({errno.ENETUNREACH, errno.EHOSTUNREACH, errno.ECONNRESET,
                              errno.ECONNREFUSED, errno.ETIMEDOUT, errno.ENETDOWN})
 _NETWORK_TYPES: tuple = (TimeoutError, ConnectionError, socket.gaierror, ssl.SSLError)
+# A certificate that fails verification is configuration, not the network:
+# permanent, even though it is an ssl.SSLError.
+_NOT_NETWORK_TYPES: tuple = (ssl.SSLCertVerificationError,)
 try:
     import httplib2 as _httplib2
-    _NETWORK_TYPES += (_httplib2.HttpLib2Error,)
 except ImportError:  # pragma: no cover
     pass
+else:
+    # Only httplib2's connection-level errors: RedirectLimit,
+    # FailedToDecompressContent, MalformedHeader, RelativeURIError, ... are
+    # about one response or URL and stay permanent.
+    _NETWORK_TYPES += tuple(t for t in (getattr(_httplib2, "ServerNotFoundError", None),
+                                        getattr(_httplib2, "ProxiesUnavailableError", None))
+                            if isinstance(t, type))
 try:
     from google.auth import exceptions as _gauth_exc
 except ImportError:  # pragma: no cover
     _gauth_exc = None
-else:
-    _NETWORK_TYPES += (_gauth_exc.TransportError, _gauth_exc.TimeoutError)
 # How far down __cause__/__context__ (and exception-valued args) to look.
 _CAUSE_DEPTH = 8
 # The same failures as they read once stored in sync_queue.last_error (str(exc)).
 _TRANSIENT_MESSAGES = (
     "unable to find the server", "name or service not known", "nodename nor servname",
     "temporary failure in name resolution", "connection reset", "timed out",
-    "network is unreachable", "transporterror",
+    "network is unreachable",
 )
 
 
+def _gauth_types(*names: str) -> tuple:
+    """google-auth exception classes by name, skipping any this version lacks
+    (read at call time: an older google-auth must never break the handler)."""
+    return tuple(t for t in (getattr(_gauth_exc, n, None) for n in names)
+                 if isinstance(t, type))
+
+
 def _is_network_error(exc) -> bool:
-    if isinstance(exc, _NETWORK_TYPES):
+    if isinstance(exc, _NOT_NETWORK_TYPES):
+        return False
+    if isinstance(exc, _NETWORK_TYPES + _gauth_types("TransportError", "TimeoutError")):
         return True
-    if _gauth_exc is not None and isinstance(exc, _gauth_exc.RefreshError) \
-            and exc.retryable:
+    refresh = _gauth_types("RefreshError")
+    if refresh and isinstance(exc, refresh) and getattr(exc, "retryable", False) is True:
         return True                       # the token endpoint said "retry"
     return isinstance(exc, OSError) and exc.errno in _NETWORK_ERRNOS
 
@@ -112,7 +128,9 @@ def _is_transient(exc) -> bool:
     __context__ and exception-valued args -- google-auth's TransportError(exc)
     and RefreshError carry the real error in args), is a rate limit / gateway
     failure or a network-layer failure. A RefreshError for a revoked grant, a
-    plain 500, and every non-network error stay permanent."""
+    plain 500, and every non-network error stay permanent.
+    _TRANSIENT_DEFER_LIMIT bounds transient defers per ATTEMPT, not per row's
+    lifetime: Store.fail_sync_item resets the counter when an attempt is spent."""
     seen: set[int] = set()
     todo = [exc]
     while todo and len(seen) < _CAUSE_DEPTH:
@@ -132,8 +150,13 @@ def _is_transient(exc) -> bool:
 
 def _is_transient_message(text) -> bool:
     """`_is_transient` for a STORED error (sync_queue.last_error), which keeps
-    only str(exc): recognises the known network-failure texts."""
-    t = (text or "").lower()
+    only str(exc): recognises the known network-failure texts. A
+    subprocess.TimeoutExpired ("Command '...' timed out after N seconds", e.g.
+    a per-file OCR timeout) is the owner's, not the network's: permanent."""
+    t = (text or "").strip()
+    if t.startswith("Command '"):
+        return False
+    t = t.lower()
     return any(m in t for m in _TRANSIENT_MESSAGES)
 
 
