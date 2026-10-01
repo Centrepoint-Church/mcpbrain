@@ -20,7 +20,10 @@ drain applies a unit's extraction to the doc_ids the unit named, and through
 the reflow_map fallback it would otherwise mark enriched a re-chunked chunk
 containing text the extraction never saw.
 """
+import errno
 import logging
+import socket
+import ssl
 import time
 from contextlib import closing, nullcontext
 from datetime import datetime, timedelta, timezone
@@ -65,10 +68,73 @@ def _http_status(exc) -> int | None:
 _TRANSIENT_HTTP = frozenset({429, 502, 503, 504})
 
 
+# Network-layer failures: DNS, reset, unreachable, TLS, token-refresh transport.
+# The network's fault, never the owner's -- 2026-10, a DNS outage during an
+# attended drain counted "Unable to find the server at oauth2.googleapis.com"
+# (httplib2.ServerNotFoundError, via google-auth's TransportError) as
+# permanent and stamped 320 owners gave_up. Imports guarded: either library
+# may be absent in a stripped environment.
+_NETWORK_ERRNOS = frozenset({errno.ENETUNREACH, errno.EHOSTUNREACH, errno.ECONNRESET,
+                             errno.ECONNREFUSED, errno.ETIMEDOUT, errno.ENETDOWN})
+_NETWORK_TYPES: tuple = (TimeoutError, ConnectionError, socket.gaierror, ssl.SSLError)
+try:
+    import httplib2 as _httplib2
+    _NETWORK_TYPES += (_httplib2.HttpLib2Error,)
+except ImportError:  # pragma: no cover
+    pass
+try:
+    from google.auth import exceptions as _gauth_exc
+except ImportError:  # pragma: no cover
+    _gauth_exc = None
+else:
+    _NETWORK_TYPES += (_gauth_exc.TransportError, _gauth_exc.TimeoutError)
+# How far down __cause__/__context__ (and exception-valued args) to look.
+_CAUSE_DEPTH = 8
+# The same failures as they read once stored in sync_queue.last_error (str(exc)).
+_TRANSIENT_MESSAGES = (
+    "unable to find the server", "name or service not known", "nodename nor servname",
+    "temporary failure in name resolution", "connection reset", "timed out",
+    "network is unreachable", "transporterror",
+)
+
+
+def _is_network_error(exc) -> bool:
+    if isinstance(exc, _NETWORK_TYPES):
+        return True
+    if _gauth_exc is not None and isinstance(exc, _gauth_exc.RefreshError) \
+            and exc.retryable:
+        return True                       # the token endpoint said "retry"
+    return isinstance(exc, OSError) and exc.errno in _NETWORK_ERRNOS
+
+
 def _is_transient(exc) -> bool:
-    if isinstance(exc, HttpError):
-        return _http_status(exc) in _TRANSIENT_HTTP
-    return isinstance(exc, (TimeoutError, ConnectionError))
+    """True when `exc`, or anything it wraps (bounded walk of __cause__,
+    __context__ and exception-valued args -- google-auth's TransportError(exc)
+    and RefreshError carry the real error in args), is a rate limit / gateway
+    failure or a network-layer failure. A RefreshError for a revoked grant, a
+    plain 500, and every non-network error stay permanent."""
+    seen: set[int] = set()
+    todo = [exc]
+    while todo and len(seen) < _CAUSE_DEPTH:
+        e = todo.pop(0)
+        if e is None or id(e) in seen:
+            continue
+        seen.add(id(e))
+        if isinstance(e, HttpError):
+            if _http_status(e) in _TRANSIENT_HTTP:
+                return True
+        elif _is_network_error(e):
+            return True
+        todo.extend([e.__cause__, e.__context__,
+                     *(a for a in getattr(e, "args", ()) if isinstance(a, BaseException))])
+    return False
+
+
+def _is_transient_message(text) -> bool:
+    """`_is_transient` for a STORED error (sync_queue.last_error), which keeps
+    only str(exc): recognises the known network-failure texts."""
+    t = (text or "").lower()
+    return any(m in t for m in _TRANSIENT_MESSAGES)
 
 
 class ReflowContext:
