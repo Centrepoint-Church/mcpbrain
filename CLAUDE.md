@@ -334,7 +334,23 @@ say "call brain_owner_context". **28 tools** after release (was 27).
   `sse-starlette` resolves 3.5.0 for the fleet vs 3.4.4 in the lock — only mcp's
   SSE transport uses it (mcpbrain serves stdio), and the live stdio call above ran
   on 3.5.0. **The Windows HARDWARE QA GATE remains OPEN.**
-- **Current state (2026-09-28, later): the four version files (+ `uv.lock`) are at
+- **Current state (2026-10-01): the four version files (+ `uv.lock`) are at `0.7.135`,
+  RELEASED** — source `51bf830d`, gh-pages `24c4c039`, plugin `808159d`; index serves
+  only `mcpbrain-0.7.135-py3-none-any.whl`, `install.ps1` 200. Full suite **4431
+  passed** under the lock and under the fleet's resolution (pymupdf 1.28.2, mcp
+  2.2.0, fastembed 0.8.1, google-auth 2.58.1, httplib2 0.32.0). **Fixes a live
+  defect found during an attended drain:** a DNS outage ("Unable to find the server
+  at oauth2.googleapis.com") was classified permanent, so 2,980 queued reflow rows
+  spent give-up attempts and 320 owners were stamped `gave_up`. Network-layer
+  failures (httplib2 ServerNotFoundError/ProxiesUnavailableError, google-auth
+  TransportError / transport-caused or retryable RefreshError, gaierror, non-cert
+  SSL errors, network errnos, wrapped causes) are now transient; `bin/reflow_drain.sh
+  --reset-transient-attempts --retry-gave-up` recovers the damage (daemon-stopped
+  window only). The reflow was paused meanwhile via the local `reflow_enabled=false`
+  kill switch (rows DEFER, no attempts spent) and re-enabled after install. 0.7.134
+  was another session's release (`brain_owner_context` + the drain tool).
+  Reflow at release: 9,874 of 13,043 owners done.
+- **Earlier (2026-09-28, later): the four version files (+ `uv.lock`) are at
   `0.7.133`, RELEASED** — source `e3b41c09`, gh-pages `5d3f54a2`, plugin `f53988b`;
   index serves only `mcpbrain-0.7.133-py3-none-any.whl`, `install.ps1` 200. Full
   suite **4320 passed** under the lock AND under the fleet's resolution
