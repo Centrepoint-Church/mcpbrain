@@ -688,6 +688,41 @@ a halt — then step 6. Afterwards `mcpbrain doctor`; the daemon's next seed run
 its own backlog-end integrity check. Delete the snapshot once the daemon has
 completed a backup.
 
+**Recovering from a network outage worked as permanent failures.** Before the
+network-classifier fix (`reflow_handler._is_transient` learnt DNS / reset /
+unreachable / TLS / google-auth transport errors), an outage during a drain —
+2026-10: "Unable to find the server at oauth2.googleapis.com" on 2,980 queued
+`reflow:drive` rows — spent each owner's give-up attempts and stamped many
+`reflow_skipped="gave_up"` (320). Two drain flags repair that, once the fixed
+package is installed (they refuse on an older one, where the next outage would
+just do it again):
+
+```bash
+$PY -I bin/reflow_drain.py --reset-transient-attempts --retry-gave-up   # counts only
+bin/reflow_drain.sh --reset-transient-attempts --retry-gave-up          # inside screen
+```
+
+- `--reset-transient-attempts`: queued reflow rows whose stored `last_error`
+  is a network failure (`_is_transient_message`: "Unable to find the server",
+  "Name or service not known", "nodename nor servname", "Temporary failure in
+  name resolution", "Connection reset", "timed out", "Network is unreachable",
+  "TransportError") get `attempts=0, transient_defers=0, next_attempt_at=NULL,
+  last_error=''`. Other failures keep their attempts.
+- `--retry-gave-up`: every chunk stamped `reflow_skipped="gave_up"` loses
+  `reflow_skipped`, `split_version` and `extraction_version` (one
+  transaction), and the owner's `gave_up` outcome row is dropped, so the
+  selector matches it again. `source_gone` / `unsupported` /
+  `source_disabled` are never touched. A genuinely broken owner simply gives
+  up again after five real attempts.
+
+Both honour `--source`, run only after every gate and inside the
+daemon-stopped window (the drain's daemon detection and single-writer lock
+come first; refused otherwise), happen BEFORE the drain loop, and are reported
+in the summary. Without `--yes` they print what they would change and write
+nothing. The kill switch must be back ON (`reflow_enabled`) for the drain to
+run at all; the network must be up, or the reset rows simply defer again
+(transiently, now — no attempts spent).
+
 **While it runs, do NOT:** close the terminal outside screen/tmux; log out,
 sleep-by-lid on battery, or reboot; start a daemon by hand (`mcpbrain daemon`,
 `python -m mcpbrain.daemon`); run `mcpbrain setup`; or `launchctl load` /

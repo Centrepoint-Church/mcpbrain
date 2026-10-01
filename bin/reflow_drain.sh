@@ -5,6 +5,8 @@
 #                           # reattaches (tmux works too, if installed)
 #
 #   bin/reflow_drain.sh [--max-owners N] [--source reflow:drive ...] [--no-backup-check]
+#                       [--reset-transient-attempts] [--retry-gave-up]
+#   (every argument is passed through to both the --check and the --yes run)
 #
 # 1. bin/reflow_drain.py --check (refusal gates) -- a refusal costs nothing;
 # 2. boots the daemon out (launchctl stop is NOT enough -- KeepAlive relaunches

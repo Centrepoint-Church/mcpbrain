@@ -4024,6 +4024,76 @@ class Store:
                        " carried, reenrich, outcome) VALUES(?,?,?,0,0,0,?)",
                        (owner, source, now, outcome))
 
+    def reset_reflow_transient_attempts(self, is_transient_message, *, sources=None,
+                                        apply: bool = True) -> int:
+        """Queued reflow rows whose stored last_error `is_transient_message`
+        recognises as a network failure: attempts, transient_defers and the
+        backoff are cleared (attempts=0, transient_defers=0,
+        next_attempt_at=NULL, last_error=''). Repairs rows that spent give-up
+        attempts on an outage before _is_transient knew network errors.
+        Returns the count (what it would change when not `apply`). Attended
+        only (bin/reflow_drain.py --reset-transient-attempts)."""
+        srcs = list(sources) if sources else None
+        where = "source LIKE 'reflow:%' AND last_error != ''"
+        args: list = []
+        if srcs:
+            where += f" AND source IN ({','.join('?' * len(srcs))})"
+            args = srcs
+        with self._connect(write=apply) as db:
+            keys = [(r["source"], r["ref_id"]) for r in db.execute(
+                f"SELECT source, ref_id, last_error FROM sync_queue WHERE {where}", args)
+                if is_transient_message(r["last_error"])]
+            if apply and keys:
+                db.executemany(
+                    "UPDATE sync_queue SET attempts=0, transient_defers=0, "
+                    "next_attempt_at=NULL, last_error='' WHERE source=? AND ref_id=?", keys)
+        return len(keys)
+
+    # Owner id field per source_type, for counting the owners a retry touches.
+    _REFLOW_OWNER_FIELD = {"gdrive": ("file_id", "drive"), "gmail": ("message_id", "gmail"),
+                           "anarlog": ("session_id", "anarlog"),
+                           "calendar": ("event_id", "calendar")}
+    _REFLOW_SOURCE_TYPE = {"reflow:drive": "gdrive", "reflow:gmail": "gmail",
+                           "reflow:anarlog": "anarlog", "reflow:calendar": "calendar"}
+
+    def retry_reflow_gave_up(self, *, sources=None, apply: bool = True) -> dict:
+        """Undo the `reflow_skipped="gave_up"` stamp: remove reflow_skipped,
+        split_version and extraction_version from every such chunk (so the
+        level-triggered selector matches its owner again) and drop the owners'
+        'gave_up' reflow_owners outcome, in ONE transaction. Other stamps
+        (source_gone / unsupported / source_disabled) are never touched. A
+        genuinely broken owner simply gives up again after five real attempts.
+        Returns {"owners", "chunks"} (what it would change when not `apply`).
+        Attended only (bin/reflow_drain.py --retry-gave-up)."""
+        from mcpbrain.embed import contextual_prefix
+        types = ({self._REFLOW_SOURCE_TYPE[s] for s in sources if s in self._REFLOW_SOURCE_TYPE}
+                 if sources else None)
+        skipped = _meta_extract("$.reflow_skipped")
+        owners: set[tuple[str, str]] = set()
+        updates: list[tuple] = []
+        with self._connect(write=apply) as db:
+            for r in db.execute(f"SELECT doc_id, metadata FROM chunks WHERE {skipped}='gave_up'"):
+                meta = json.loads(r["metadata"])
+                stype = meta.get("source_type")
+                if types is not None and stype not in types:
+                    continue
+                field, kind = self._REFLOW_OWNER_FIELD.get(stype, (None, stype))
+                owner = meta.get(field) if field else None
+                owners.add((kind, owner or r["doc_id"]))
+                before = contextual_prefix(meta)
+                for k in ("reflow_skipped", "split_version", "extraction_version"):
+                    meta.pop(k, None)
+                updates.append((json.dumps(meta), contextual_prefix(meta) != before,
+                                r["doc_id"]))
+            if apply and updates:
+                db.executemany("UPDATE chunks SET metadata=? WHERE doc_id=?",
+                               [(m, d) for m, _, d in updates])
+                db.executemany("UPDATE chunks SET fts_context_version=0 WHERE doc_id=?",
+                               [(d,) for _, changed, d in updates if changed])
+                db.executemany("DELETE FROM reflow_owners WHERE owner=? AND source=? "
+                               "AND outcome='gave_up'", [(o, k) for k, o in owners])
+        return {"owners": len(owners), "chunks": len(updates)}
+
     def reflow_stats(self, *, live_remaining: bool = False,
                      remaining_cap: int = 5000, sources=None) -> dict:
         """{owners_done, by_outcome, chunks_carried, chunks_uncovered,

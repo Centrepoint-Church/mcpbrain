@@ -4,6 +4,12 @@
   bin/reflow_drain.sh                                   # the way to run it
   python bin/reflow_drain.py                            # plan only, writes nothing
   python bin/reflow_drain.py --yes [--max-owners N] [--source reflow:drive ...]
+        [--reset-transient-attempts] [--retry-gave-up]
+
+--reset-transient-attempts / --retry-gave-up repair the damage of a network
+outage worked under a classifier that counted it as permanent: run (after
+every gate, inside the daemon-stopped window) before the drain loop; without
+--yes they only print what they would change. See RELEASE-RUNBOOK §8.
 
 The daemon works the reflow backlog at 10 owners / 15 s per sync cycle, seeded
 200 at a time; ~7,000 owners take days that way. This drains it in one attended
@@ -478,6 +484,8 @@ def _print_summary(s: dict, checks: dict | None) -> None:
     if s["reselected_after_done"]:
         print(f"reselected:         {s['reselected_after_done']} owner(s) completed but "
               "still match the selector (not re-queued this run)")
+    for line in _recovery_lines(s.get("recovery") or {}, apply=True):
+        print(line)
     print(f"failures:           {len(s['failures'])}")
     for f in s["failures"][:20]:
         print(f"  {f['source']} {f['ref_id']}: {f['error']}")
@@ -511,7 +519,57 @@ def _gates(store, home, ns) -> str | None:
             return ("refusing: no backup succeeded in the last 24 h "
                     f"({'never' if age is None else f'{age / 3600:.1f} h ago'}). Let the "
                     "daemon back up first (mcpbrain doctor shows it).")
+    unsupported = _recovery_unsupported(ns)
+    if unsupported:
+        return unsupported
     return None
+
+
+def _recovering(ns) -> bool:
+    return bool(ns.reset_transient_attempts or ns.retry_gave_up)
+
+
+def _recovery_unsupported(ns) -> str | None:
+    """The recovery flags need the installed package's network classifier and
+    store methods (shipped together with the _is_transient fix): resetting
+    attempts under the OLD classifier would just spend them on the next outage."""
+    if not _recovering(ns):
+        return None
+    from mcpbrain.store import Store
+    from mcpbrain.sync import reflow_handler
+    if not (hasattr(reflow_handler, "_is_transient_message")
+            and hasattr(Store, "reset_reflow_transient_attempts")
+            and hasattr(Store, "retry_reflow_gave_up")):
+        return ("refusing: --reset-transient-attempts / --retry-gave-up need an installed "
+                "mcpbrain that classifies network failures as transient (upgrade first).")
+    return None
+
+
+def _recover(store, ns, *, apply: bool) -> dict:
+    """--reset-transient-attempts / --retry-gave-up. Runs only after every
+    gate, and with --yes only inside the daemon-stopped window (main's daemon
+    detection + single-writer lock come first)."""
+    from mcpbrain.sync.reflow_handler import _is_transient_message
+    r: dict = {}
+    if ns.reset_transient_attempts:
+        r["reset"] = store.reset_reflow_transient_attempts(
+            _is_transient_message, sources=ns.sources, apply=apply)
+    if ns.retry_gave_up:
+        r["retry"] = store.retry_reflow_gave_up(sources=ns.sources, apply=apply)
+    return r
+
+
+def _recovery_lines(r: dict, *, apply: bool) -> list[str]:
+    w = "" if apply else "would "
+    out = []
+    if "reset" in r:
+        out.append(f"recovery: {w}reset {r['reset']} network-failed queued reflow row(s) "
+                   "(attempts, transient_defers, backoff, last_error cleared)")
+    if "retry" in r:
+        out.append(f"recovery: {w}retry {r['retry']['owners']} gave-up owner(s) "
+                   f"({r['retry']['chunks']} chunk(s); reflow_skipped/split_version/"
+                   "extraction_version removed)")
+    return out
 
 
 def main(argv=None) -> int:
@@ -526,6 +584,12 @@ def main(argv=None) -> int:
                     help="restrict to this reflow source, e.g. reflow:drive (repeatable)")
     ap.add_argument("--no-backup-check", action="store_true",
                     help="skip the 24 h backup gate (discouraged)")
+    ap.add_argument("--reset-transient-attempts", action="store_true",
+                    help="before draining: clear attempts/backoff of queued reflow rows "
+                         "whose last_error is a network failure (DNS, reset, timeout)")
+    ap.add_argument("--retry-gave-up", action="store_true",
+                    help="before draining: un-stamp reflow_skipped=gave_up owners so the "
+                         "selector matches them again (other stamps untouched)")
     ns = ap.parse_args(argv)
     _STOP.reset()
 
@@ -579,6 +643,11 @@ def main(argv=None) -> int:
         st = store.reflow_stats()
         left = len(store.reflow_candidates(REFLOW_REMAINING_CAP, sources=ns.sources))
         alive = _daemon_alive()
+        if _recovering(ns):
+            unsupported = _recovery_unsupported(ns)
+            for line in ([unsupported] if unsupported
+                         else _recovery_lines(_recover(store, ns, apply=False), apply=False)):
+                print(line)
         print(f"plan: drain the reflow backlog of {path} (live store) through the "
               f"daemon's own seed + work_queue path, caps lifted"
               f"{f', at most {ns.max_owners} owner(s)' if ns.max_owners else ''}"
@@ -650,6 +719,9 @@ def _run_yes(ns, *, store_path, dim, home, prev, restore_signals) -> int:
         print(f"refusing: embedder dim {embedder.dim} != store dim {dim}", file=sys.stderr)
         return 2
     services = _build_services() or {}
+    recovery = _recover(store, ns, apply=True)
+    for line in _recovery_lines(recovery, apply=True):
+        print(line, flush=True)
 
     handler = _make_signal_handler()
     for sig in (signal.SIGINT, signal.SIGTERM, signal.SIGHUP):
@@ -668,6 +740,7 @@ def _run_yes(ns, *, store_path, dim, home, prev, restore_signals) -> int:
         restore_signals()                 # the checks below run with default handlers
     checks = _checks(store, home)
     if summary is not None:
+        summary["recovery"] = recovery
         _print_summary(summary, checks)
     else:
         print(f"integrity_check: {checks['integrity_check']}; "

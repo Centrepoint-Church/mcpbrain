@@ -634,3 +634,113 @@ def test_wrapper_trusts_the_marker_over_a_disturbed_exit_code(tmp_path):
     got, out, log, lines, app = _run_wrapper(tmp_path, FAKE_MARKER=1, FAKE_RC=120)
     assert _boots(lines, "bootout") == 1 and _boots(lines, "bootstrap") == 0
     assert "rm " in out and "STORE_CHECK_FAILED" in out
+
+
+# -- recovery: --reset-transient-attempts / --retry-gave-up ---------------------
+
+_DNS = "Unable to find the server at oauth2.googleapis.com"
+
+
+def _queue_failed(s, fid, error, attempts=5):
+    s.enqueue_items([{"ref_id": fid, "event": "reflow",
+                      "modified_at": "1970-01-01T00:00:00"}], source="reflow:drive")
+    with s._connect(write=True) as db:
+        db.execute("UPDATE sync_queue SET attempts=?, last_error=?, transient_defers=3, "
+                   "next_attempt_at='2999-01-01T00:00:00' WHERE ref_id=?",
+                   (attempts, error, fid))
+
+
+def _stamp(s, fid, reason):
+    from mcpbrain.chunking import SPLIT_VERSION
+    for r in s.owner_chunks([f"gdrive-{fid}-"]):
+        s.patch_chunk_metadata(r["doc_id"], split_version=SPLIT_VERSION,
+                               reflow_skipped=reason, extraction_version=99)
+    s.record_reflow_outcome(fid, "drive", reason)
+
+
+def _row(s, fid):
+    with s._connect() as db:
+        r = db.execute("SELECT attempts, transient_defers, next_attempt_at, last_error "
+                       "FROM sync_queue WHERE ref_id=?", (fid,)).fetchone()
+    return dict(r) if r else None
+
+
+def _skipped(s, fid):
+    return {r["metadata"].get("reflow_skipped") for r in s.owner_chunks([f"gdrive-{fid}-"])}
+
+
+def test_reset_transient_attempts_rescues_network_failed_rows_only(home, monkeypatch, capsys):
+    s = _live(owners=[("NET", None), ("BAD", None)])
+    _queue_failed(s, "NET", _DNS)
+    _queue_failed(s, "BAD", "RuntimeError: reflow drive BAD: partial re-extraction")
+    with s._connect(write=True) as db:            # due now, attempts still at the cap
+        db.execute("UPDATE sync_queue SET next_attempt_at=NULL WHERE ref_id='BAD'")
+    _fakes(monkeypatch)
+    assert drain.main(["--yes", "--reset-transient-attempts"]) == 0
+    out = capsys.readouterr().out
+    assert "reset 1 network-failed" in out
+    st = s.reflow_stats()["by_outcome"]
+    assert st == {"carried": 1, "gave_up": 1}
+    assert _skipped(s, "BAD") == {"gave_up"} and _skipped(s, "NET") == {None}
+
+
+def test_without_the_flag_a_network_failed_row_at_the_cap_gives_up(home, monkeypatch):
+    s = _live(owners=[("NET", None)])
+    _queue_failed(s, "NET", _DNS)
+    with s._connect(write=True) as db:
+        db.execute("UPDATE sync_queue SET next_attempt_at=NULL")
+    _fakes(monkeypatch)
+    assert drain.main(["--yes"]) == 0
+    assert _skipped(s, "NET") == {"gave_up"}
+
+
+def test_retry_gave_up_unstamps_only_gave_up_owners(home, monkeypatch, capsys):
+    s = _live(owners=[("G", None), ("SG", None), ("UN", None)])
+    _stamp(s, "G", "gave_up")
+    _stamp(s, "SG", "source_gone")
+    _stamp(s, "UN", "unsupported")
+    assert s.reflow_candidates(10) == []
+    _fakes(monkeypatch)
+    assert drain.main(["--yes", "--retry-gave-up"]) == 0
+    out = capsys.readouterr().out
+    assert "retry 1 gave-up owner(s) (2 chunk(s)" in out
+    assert _skipped(s, "G") == {None}
+    assert _skipped(s, "SG") == {"source_gone"} and _skipped(s, "UN") == {"unsupported"}
+    assert s.reflow_stats()["by_outcome"] == {"carried": 1, "source_gone": 1,
+                                              "unsupported": 1}
+    for r in s.owner_chunks(["gdrive-SG-"]):
+        assert r["metadata"]["extraction_version"] == 99    # untouched
+
+
+def test_recovery_plan_counts_and_writes_nothing(home, monkeypatch, capsys):
+    s = _live(owners=[("NET", None), ("G", None)])
+    _queue_failed(s, "NET", _DNS)
+    _stamp(s, "G", "gave_up")
+    _fakes(monkeypatch)
+    before = config.store_path().read_bytes()
+    assert drain.main(["--reset-transient-attempts", "--retry-gave-up"]) == 0
+    out = capsys.readouterr().out
+    assert "would reset 1 network-failed" in out
+    assert "would retry 1 gave-up owner(s) (2 chunk(s)" in out
+    assert config.store_path().read_bytes() == before
+    assert _row(s, "NET")["attempts"] == 5 and _skipped(s, "G") == {"gave_up"}
+
+
+def test_recovery_refuses_when_a_daemon_is_alive(home, monkeypatch):
+    s = _live(owners=[("NET", None), ("G", None)])
+    _queue_failed(s, "NET", _DNS)
+    _stamp(s, "G", "gave_up")
+    _fakes(monkeypatch)
+    monkeypatch.setattr(drain, "_daemon_alive", lambda: "pid 4242 (mcpbrain daemon)")
+    assert drain.main(["--yes", "--reset-transient-attempts", "--retry-gave-up"]) == 2
+    assert _row(s, "NET")["attempts"] == 5 and _skipped(s, "G") == {"gave_up"}
+
+
+def test_recovery_flags_refused_when_the_installed_package_predates_them(home, monkeypatch):
+    from mcpbrain.sync import reflow_handler
+    _live()
+    _fakes(monkeypatch)
+    assert drain.main(["--check", "--retry-gave-up"]) == 0
+    monkeypatch.delattr(reflow_handler, "_is_transient_message")
+    assert drain.main(["--check", "--retry-gave-up"]) == 2
+    assert drain.main(["--check"]) == 0
