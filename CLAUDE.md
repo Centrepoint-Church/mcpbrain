@@ -334,7 +334,16 @@ say "call brain_owner_context". **28 tools** after release (was 27).
   `sse-starlette` resolves 3.5.0 for the fleet vs 3.4.4 in the lock — only mcp's
   SSE transport uses it (mcpbrain serves stdio), and the live stdio call above ran
   on 3.5.0. **The Windows HARDWARE QA GATE remains OPEN.**
-- **Current state (2026-10-05): the four version files (+ `uv.lock`) are at `0.7.136`,
+- **Current state (2026-10-05, later): the four version files (+ `uv.lock`) are at
+  `0.7.137`, RELEASED** — source `5afda50d`, plugin `f0a57cc`; index serves only
+  `mcpbrain-0.7.137-py3-none-any.whl`, `install.ps1` 200; fleet resolves the same
+  tested set (full suite 4440 passed under it). **Auto-update's check now counts
+  time asleep too** (`_last_auto_update_wall`, max of monotonic and wall-clock
+  elapsed), mirroring 0.7.136's backup fix. Auto-update persists no last-check
+  record, so the first check after a restart was always due; the bug only bit a
+  daemon left running across long sleeps. The other daily cadences (action_hygiene,
+  communities, review, …) still count awake time — judged not worth it.
+- **Earlier (2026-10-05): the four version files (+ `uv.lock`) are at `0.7.136`,
   RELEASED** — source `4ed799a1`, gh-pages `22539dca`, plugin `cb5b6ab`; index serves
   only `mcpbrain-0.7.136-py3-none-any.whl`, `install.ps1` 200; fleet resolves
   mcp 2.2.0 / fastembed 0.8.1 / pymupdf 1.28.2 / google-auth 2.58.1 / httplib2
