@@ -224,6 +224,101 @@ def test_selector_guard_is_only_for_ordinary_outcomes(tmp_path):
     assert ("reflow:drive", "H") in s.reflow_candidates(50)
 
 
+def test_held_owner_is_counted_not_hidden(tmp_path):
+    """A guarded owner leaves the SEED but stays in remaining, reported as held."""
+    s = _store(tmp_path)
+    _unstamped_owner(s)
+    _set_outcome(s, "H", "ordinary", datetime.now(timezone.utc) - timedelta(hours=1))
+    assert ("reflow:drive", "H") not in s.reflow_candidates(50)           # seed: held
+    assert ("reflow:drive", "H") in s.reflow_candidates(50, hold_recent_ordinary=False)
+    st = s.reflow_stats(live_remaining=True)
+    assert st["held"] == 1 and st["remaining"] == 1
+    assert s.reflow_live_counts(50) == (1, 1)
+
+
+def test_held_count_is_zero_once_the_guard_expires(tmp_path):
+    s = _store(tmp_path)
+    _unstamped_owner(s)
+    _set_outcome(s, "H", "ordinary", datetime.now(timezone.utc) - timedelta(hours=25))
+    st = s.reflow_stats(live_remaining=True)
+    assert st["held"] == 0 and st["remaining"] == 1
+
+
+def _seed_daemon(tmp_path, monkeypatch, s):
+    import time
+    from mcpbrain import daemon as dmod
+    (tmp_path / "backup_state.json").write_text(json.dumps({"last_success": time.time()}))
+    d = dmod.Daemon.__new__(dmod.Daemon)
+    d._store, d._clock = s, time.monotonic
+    d._reflow_seed_interval_s, d._last_reflow_seed = 1.0, None
+    d._services, d._services_resolved = {"gmail_service": object(), "drive_service": object(),
+                                         "calendar_service": object()}, True
+    monkeypatch.setattr(dmod, "app_dir", lambda: tmp_path)
+    return d
+
+
+def test_held_owner_blocks_backlog_empty_and_integrity_check(tmp_path, monkeypatch):
+    s = _store(tmp_path)
+    _unstamped_owner(s)
+    _set_outcome(s, "H", "ordinary", datetime.now(timezone.utc) - timedelta(hours=1))
+    calls = []
+    monkeypatch.setattr("mcpbrain.doctor._run_integrity_check",
+                        lambda home: calls.append(home) or [])
+    d = _seed_daemon(tmp_path, monkeypatch, s)
+    assert d._run_reflow_seed() == {"reflow_seed": "ok", "enqueued": 0}   # not re-seeded
+    assert calls == [] and not s.get_cursor("reflow:integrity_checked")
+    last = json.loads(s.get_cursor("reflow:last_seed"))
+    assert last["remaining"] == 1 and last["held"] == 1
+    # The non-live status (/api/status) carries the seed's held figure too.
+    assert s.reflow_status()["held"] == 1
+
+
+def test_doctor_warns_on_held_owners(tmp_path):
+    from mcpbrain.doctor import reflow_line
+    s = _store(tmp_path)
+    _unstamped_owner(s)
+    _set_outcome(s, "H", "ordinary", datetime.now(timezone.utc) - timedelta(hours=1))
+    line = reflow_line(s)
+    assert line.startswith("⚠️")
+    assert "1 owner(s) held: ordinary path did not converge" in line
+
+
+# -- bootstrap robustness -----------------------------------------------------
+
+def test_bootstrap_prefers_an_older_valid_split_artifact_over_a_newer_base_one(tmp_path):
+    fs = LocalDirFleetStorage(tmp_path / "fleet")
+    _write_raw_artifact(fs, "H1", "md5s", texts=("new split text",),
+                        chunker=ingest_cache.effective_chunker_version(PIN, HTML),
+                        extra={"split_version": SPLIT_VERSION}, published_at="2026-07-01")
+    _write_raw_artifact(fs, "H1", "md5b", texts=("old base text",),
+                        chunker=ingest_cache.effective_chunker_version(PIN),
+                        published_at="2026-08-01")
+    B = _store(tmp_path, "B.sqlite3")
+    summary = ingest_cache.bootstrap_drive(B, fs, "D1", PIN)
+    assert summary["imported"] == 1 and summary["skipped"] == 0
+    assert B.get_chunk("gdrive-H1-0")["text"] == "new split text"
+
+
+def test_split_stamp_check_survives_malformed_metadata():
+    assert ingest_cache._carries_split_stamp([{"split_version": "abc"}]) is False
+    assert ingest_cache._carries_split_stamp([{"split_version": [1]}]) is False
+    assert ingest_cache._carries_split_stamp(["not a dict"]) is False
+    assert ingest_cache._carries_split_stamp([{"split_version": SPLIT_VERSION}, 7]) is False
+
+
+def test_bootstrap_continues_past_a_malformed_split_artifact(tmp_path):
+    fs = LocalDirFleetStorage(tmp_path / "fleet")
+    cur = ingest_cache.effective_chunker_version(PIN, HTML)
+    _write_raw_artifact(fs, "BAD", "md5x", chunker=cur, extra={"split_version": "abc"})
+    _write_raw_artifact(fs, "GOOD", "md5g", chunker=cur,
+                        extra={"split_version": SPLIT_VERSION})
+    B = _store(tmp_path, "B.sqlite3")
+    summary = ingest_cache.bootstrap_drive(B, fs, "D1", PIN)
+    assert summary["imported"] == 1 and summary["skipped"] == 1
+    assert B.get_chunk("gdrive-GOOD-0") is not None
+    assert B.get_chunk("gdrive-BAD-0") is None
+
+
 # -- end to end ---------------------------------------------------------------
 
 class _Emb:

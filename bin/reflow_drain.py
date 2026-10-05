@@ -440,8 +440,12 @@ def drain(store, *, home, services: dict, embedder, sources_filter=None,
     if skip_report:
         flush_skip_report(store, skip_report, source="drive")
     if seed_sources:
+        # Unguarded: an owner this run sent down the ordinary path is exactly
+        # what the 24 h loop guard holds -- and exactly what "reselected"
+        # exists to catch (it did not converge).
         tally["reselected"] = sum(1 for k in store.reflow_candidates(
-            REFLOW_REMAINING_CAP, sources=seed_sources) if k in handled)
+            REFLOW_REMAINING_CAP, sources=seed_sources, hold_recent_ordinary=False)
+            if k in handled)
     progress(final=True)
     return {
         "elapsed_s": round(time.monotonic() - t0, 1),

@@ -3231,7 +3231,7 @@ class Daemon:
         seeding without anyone having to notice and flip a switch by hand.
 
         Every run records its outcome in the `reflow:last_seed` cursor
-        ({status, at, enqueued?, remaining?}) so doctor and /api/status can say
+        ({status, at, enqueued?, remaining?, held?}) so doctor and /api/status can say
         WHY nothing is moving, instead of reading a gated seed as idle.
         """
         if not self._is_due("_reflow_seed_interval_s", "_last_reflow_seed"):
@@ -3247,22 +3247,23 @@ class Daemon:
             # rows would be freed and an empty backlog could be declared done.
             log.warning("reflow_seed: could not resolve sources: %s", exc)
             out = {"reflow_seed": False, "error": f"could not resolve reflow sources: {exc}"}
-            self._record_reflow_seed(out, prev.get("remaining"), prev.get("sources"))
+            self._record_reflow_seed(out, prev.get("remaining"), prev.get("sources"),
+                                     held=prev.get("held"))
             return out
         out = self._reflow_seed_once(home, now, workable)
         if "remaining" in out:
-            remaining = out["remaining"]
+            remaining, held = out["remaining"], out.get("held")
         elif out.get("reflow_seed") in ("disabled", "halted") and "remaining" in prev:
             # A disabled/halted seed ticks hourly for as long as it stays that
             # way and nothing it gates changes the backlog: reuse the last
             # known figure instead of re-running the chunk-table scans.
-            remaining = prev["remaining"]
+            remaining, held = prev["remaining"], prev.get("held")
         else:
             # Every other branch -- gated or failed included -- records what is
             # left, so the dashboard/doctor never read a blocked seed as idle.
-            remaining = self._reflow_remaining(workable)
-        self._record_reflow_seed(out, remaining, sorted(workable))
-        return {k: v for k, v in out.items() if k != "remaining"}
+            remaining, held = self._reflow_counts(workable)
+        self._record_reflow_seed(out, remaining, sorted(workable), held=held)
+        return {k: v for k, v in out.items() if k not in ("remaining", "held")}
 
     def _last_reflow_seed_record(self) -> dict:
         try:
@@ -3271,7 +3272,7 @@ class Daemon:
         except Exception:  # noqa: BLE001 — a bad record is just "unknown"
             return {}
 
-    def _record_reflow_seed(self, out: dict, remaining, sources) -> None:
+    def _record_reflow_seed(self, out: dict, remaining, sources, *, held=None) -> None:
         try:
             import datetime as _dt
             rec = {"status": out.get("reflow_seed") if out.get("reflow_seed") is not False
@@ -3280,19 +3281,27 @@ class Daemon:
                 if k in out:
                     rec[k] = out[k]
             rec["remaining"] = remaining
+            if held is not None:
+                rec["held"] = held
             if sources is not None:
                 rec["sources"] = sources
             self._store.set_cursor("reflow:last_seed", json.dumps(rec))
         except Exception as exc:  # noqa: BLE001 — visibility must never kill the cycle
             log.debug("reflow_seed: could not record last status: %s", exc)
 
-    def _reflow_remaining(self, sources) -> int | None:
+    def _reflow_counts(self, sources) -> tuple[int | None, int | None]:
+        """(remaining, held) via Store.reflow_live_counts: remaining INCLUDES
+        the owners the selector's 24 h loop guard holds out of the seed, so a
+        stuck owner never makes the backlog read empty."""
         if sources is None:
-            return None
+            return None, None
         try:
-            return len(self._store.reflow_candidates(REFLOW_REMAINING_CAP, sources=sources))
+            return self._store.reflow_live_counts(REFLOW_REMAINING_CAP, sources=sources)
         except Exception:  # noqa: BLE001
-            return None
+            return None, None
+
+    def _reflow_remaining(self, sources) -> int | None:
+        return self._reflow_counts(sources)[0]
 
     def _reflow_seed_once(self, home, now: set[str], workable: set[str]) -> dict:
         if not config.reflow_enabled(home):
@@ -3318,23 +3327,29 @@ class Daemon:
             # is not work, and counting it lets a long outage stall the rest.
             room = REFLOW_WINDOW - self._store.reflow_due_count()
             if room <= 0:
+                remaining, held = self._reflow_counts(workable)
                 return {"reflow_seed": "window_full", "enqueued": 0,
-                        "remaining": self._reflow_remaining(workable)}
+                        "remaining": remaining, "held": held}
             by_src: dict[str, list[dict]] = {}
             for src, owner in self._store.reflow_candidates(room, sources=now):
                 by_src.setdefault(src, []).append(
                     {"ref_id": owner, "event": "reflow", "modified_at": "1970-01-01T00:00:00"})
             n = sum(self._store.enqueue_items(items, source=src) for src, items in by_src.items())
-            remaining = self._reflow_remaining(workable)
+            remaining, held = self._reflow_counts(workable)
             if n:
                 # New work: the backlog's end must be integrity-checked again
                 # (e.g. after a future EXTRACTION_VERSIONS bump).
                 self._store.set_cursor("reflow:integrity_checked", "")
-            elif self._store.reflow_stats()["queued"] == 0 and not remaining:
-                # Truly done: nothing queued and nothing left for any workable
-                # source (a source that failed transiently still counts).
+            elif (self._store.reflow_stats()["queued"] == 0 and not remaining
+                  and not held):
+                # Truly done: nothing queued, nothing left for any workable
+                # source (a source that failed transiently still counts), and
+                # no owner merely held by the loop guard -- a held owner did
+                # not converge, so the backlog is NOT done. (remaining already
+                # includes held; `not held` states the rule outright.)
                 self._reflow_backlog_empty()
-            return {"reflow_seed": "ok", "enqueued": n, "remaining": remaining}
+            return {"reflow_seed": "ok", "enqueued": n, "remaining": remaining,
+                    "held": held}
         except Exception as exc:  # noqa: BLE001 — a cadence pass must never kill the cycle
             log.warning("reflow_seed failed: %s", exc, exc_info=True)
             return {"reflow_seed": False, "error": str(exc)}

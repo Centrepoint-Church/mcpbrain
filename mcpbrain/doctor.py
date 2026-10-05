@@ -710,13 +710,24 @@ def reflow_line(store) -> str:
         # Carried anyway (spec §3: nearest-mapped); counted so a normaliser
         # that silently drops text shows up as a number, not nothing.
         detail += f"; {st['owners_text_differed']} owner(s) whose text differed"
+    # remaining INCLUDES held owners (Store.reflow_stats), so pending counts
+    # them as work; held is the subset the loop guard keeps out of the seed.
     pending = st["queued"] + (st["remaining"] or 0)
+    held = st.get("held") or 0
+    held_note = (f"{held} owner(s) held: ordinary path did not converge "
+                 f"(retried once a day)") if held else ""
     last = (st.get("last_seed") or {}).get("status")
     # Blocked = work remains (queued rows or unseeded owners) AND the last
     # seed was gated. The dashboard's reflowText applies the same rule: once
     # the backlog is done, a stale backup is not a block.
     if pending and last in _REFLOW_SEED_BLOCKED:
         return (f"⚠️ {'Reflow':<16} BLOCKED: last seed {last} — {st['queued']} queued, "
+                f"{st['remaining'] or 0} owner(s) waiting"
+                f"{f'; {held_note}' if held_note else ''}; {detail}")
+    if held:
+        # Never ✅ or a plain ⏳: these owners went through the ordinary path
+        # and still match the selector, so they will not finish on their own.
+        return (f"⚠️ {'Reflow':<16} {held_note} — {st['queued']} queued, "
                 f"{st['remaining'] or 0} owner(s) waiting; {detail}")
     if pending:
         gate = f"; last seed {last}" if last and last != "ok" else ""

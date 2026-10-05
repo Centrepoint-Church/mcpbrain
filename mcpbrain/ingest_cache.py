@@ -124,10 +124,16 @@ def split_suffixed_mimes() -> frozenset[str]:
 
 def _carries_split_stamp(chunk_metas) -> bool:
     """Every chunk carries split_version >= SPLIT_VERSION, i.e. it really is
-    the current splitter's output (normalise_drive stamps it on every chunk)."""
-    metas = list(chunk_metas)
-    return bool(metas) and all(
-        int((m or {}).get("split_version") or 0) >= SPLIT_VERSION for m in metas)
+    the current splitter's output (normalise_drive stamps it on every chunk).
+    A malformed peer artifact (non-dict metadata, a non-numeric
+    split_version) is simply not stamped: False, never an exception, so one
+    bad artifact cannot abort a bootstrap."""
+    try:
+        metas = list(chunk_metas)
+        return bool(metas) and all(
+            int((m or {}).get("split_version") or 0) >= SPLIT_VERSION for m in metas)
+    except (TypeError, ValueError, AttributeError):
+        return False
 
 
 def _pf8(pin, mime: str = "") -> str:
@@ -170,7 +176,8 @@ def _artifact_mime(art: CacheArtifact) -> str:
     always be traced back to one specific MIME."""
     if not art.chunks:
         return ""
-    return (art.chunks[0].metadata or {}).get("mime_type", "")
+    meta = art.chunks[0].metadata
+    return str(meta.get("mime_type") or "") if isinstance(meta, dict) else ""
 
 
 def _parse_name(name: str):
@@ -522,9 +529,11 @@ def try_import(store, fleet_storage, drive_id, file_id, content_hash, pin,
     pipeline mismatch and falls back to False. Default None = don't check
     (backward compatible with callers unaware of the flag).
 
-    `mime`, when passed, selects the +x<N>-suffixed fingerprint for a
-    block-extracted MIME (see effective_chunker_version); default "" preserves
-    today's behaviour for callers unaware of the flag."""
+    `mime`, when passed, selects the suffixed fingerprint
+    effective_chunker_version gives it: +x<N> for a block-extracted MIME,
+    +s<SPLIT_VERSION> for a chunk_text prose MIME (text/html, text/plain,
+    ...); default "" selects the base fingerprint, today's behaviour for
+    callers unaware of the flag."""
     if not pin.is_pinned:
         return False
     art = _load(fleet_storage, _artifact_path(file_id, content_hash, pin, mime))
@@ -785,18 +794,26 @@ def bootstrap_drive(store, fleet_storage, drive_id, pin, *, home=None) -> dict:
         return summary
     cur_pf8s = _current_pipeline_fingerprints(pin)
     best: dict[str, tuple[str, CacheArtifact]] = {}   # file_id -> (published_at, art)
+    mismatched: set[str] = set()
     for path, (fid, _h12, pf8) in _cache_names(fleet_storage):
         # A pf8 outside the current set is a genuinely different pipeline
         # (embed_model/dim/chunker_version) and coexists untouched — never
-        # counted as skipped. A pf8 IN the set but for a block MIME whose
-        # artifact turns out to be a stale pre-suffix one is handled below,
-        # by _import_artifact's own version check (mime derived from the
-        # artifact), and DOES count as skipped: it was a real candidate that
-        # was correctly rejected, not silently filtered out here.
+        # counted as skipped. A pf8 IN the set but whose artifact turns out
+        # to be a stale pre-suffix one for its MIME (+x / +s) is dropped from
+        # the newest-wins race below and DOES count as skipped when the file
+        # has no valid candidate: it was a real candidate that was correctly
+        # rejected, not silently filtered out.
         if pf8 not in cur_pf8s:
             continue
         art = _load(fleet_storage, path)
         if art is None:
+            continue
+        # Only an artifact under its OWN MIME's current version competes for
+        # newest: a newer base-fingerprint (pre-split) artifact must not
+        # shadow an older valid +s one for the same file. A file whose every
+        # candidate is version-mismatched still counts as skipped below.
+        if art.chunker_version != effective_chunker_version(pin, _artifact_mime(art)):
+            mismatched.add(fid)
             continue
         prev = best.get(fid)
         if prev is None or (art.published_at or "") > prev[0]:
@@ -820,6 +837,7 @@ def bootstrap_drive(store, fleet_storage, drive_id, pin, *, home=None) -> dict:
             summary["chunks"] += len(art.chunks)
         else:
             summary["skipped"] += 1
+    summary["skipped"] += len(mismatched - best.keys())
     summary["cache_hits"] = summary["imported"]
     return summary
 

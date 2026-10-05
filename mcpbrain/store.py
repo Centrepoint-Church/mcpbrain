@@ -4098,7 +4098,7 @@ class Store:
                      remaining_cap: int = 5000, sources=None) -> dict:
         """{owners_done, by_outcome, chunks_carried, chunks_uncovered,
         chunks_inherited_unenriched, owners_text_differed (carried owners with
-        at least one lineage whose old and new text differed), queued, remaining, total, last_seed}.
+        at least one lineage whose old and new text differed), queued, remaining, held, total, last_seed}.
 
         owners_done counts every owner with a terminal outcome (by_outcome
         splits it). chunks_carried = new chunks covered AND enriched;
@@ -4113,6 +4113,14 @@ class Store:
         first seed). total = owners_done + queued + remaining (None when
         remaining is unknown). last_seed = the seed's last recorded status
         dict ({status, at, enqueued?, remaining?, sources?}) or None.
+
+        `held` = how many of `remaining` the selector's 24 h loop guard keeps
+        out of the seed (a recent 'ordinary' outcome that did not converge).
+        remaining INCLUDES them, so every consumer of remaining (doctor's
+        pending, the daemon's backlog-empty check, total) still sees held
+        owners as work; held is the subset to warn about. Live like
+        remaining when live_remaining, else the last seed's figure (None
+        before a seed recorded one).
 
         A live `remaining` counts only `sources` -- by default the workable
         set the seed last recorded (reflow.workable_reflow_sources), so an
@@ -4139,14 +4147,15 @@ class Store:
         if live_remaining:
             if sources is None and (last_seed or {}).get("sources") is not None:
                 sources = set(last_seed["sources"])
-            remaining = len(self.reflow_candidates(remaining_cap, sources=sources))
+            remaining, held = self.reflow_live_counts(remaining_cap, sources=sources)
         else:
             remaining = (last_seed or {}).get("remaining")
+            held = (last_seed or {}).get("held")
         total = (o["n"] + q + remaining) if remaining is not None else None
         return {"owners_done": o["n"], "by_outcome": by, "chunks_carried": o["c"],
                 "chunks_uncovered": o["u"], "chunks_inherited_unenriched": o["i"],
                 "owners_text_differed": o["d"], "queued": q, "remaining": remaining,
-                "total": total, "last_seed": last_seed}
+                "held": held, "total": total, "last_seed": last_seed}
 
     def reflow_due_count(self, now: str | None = None) -> int:
         """Queued reflow rows that are DUE (next_attempt_at unset or <= now),
@@ -4185,7 +4194,31 @@ class Store:
             return db.execute(f"DELETE FROM sync_queue WHERE source IN "
                               f"({','.join('?' * len(srcs))})", srcs).rowcount
 
-    def reflow_candidates(self, limit: int, *, sources=None) -> list[tuple[str, str]]:
+    @staticmethod
+    def _reflow_hold_cutoff() -> str:
+        """The reflow_candidates loop guard's window start: an 'ordinary'
+        outcome recorded after this is held (24 h)."""
+        return (datetime.now(timezone.utc) - timedelta(hours=24)).isoformat()
+
+    def reflow_live_counts(self, cap: int, *, sources=None) -> tuple[int, int]:
+        """(remaining, held), counted now. remaining = unqueued owners the
+        selector matches WITHOUT the loop guard, capped at `cap` -- so it
+        INCLUDES held owners; held = how many of those the guard keeps out
+        of the seed (a recent 'ordinary' outcome that did not converge).
+        Every counting caller goes through this, never through the guarded
+        reflow_candidates: a held owner is still work, and a backlog that
+        hides it reads empty while it is stuck."""
+        found = self.reflow_candidates(cap, sources=sources, hold_recent_ordinary=False)
+        if not found:
+            return 0, 0
+        with self._connect() as db:
+            recent = {(f"reflow:{r['source']}", str(r["owner"])) for r in db.execute(
+                "SELECT owner, source FROM reflow_owners WHERE outcome='ordinary' "
+                "AND at > ?", (self._reflow_hold_cutoff(),))}
+        return len(found), sum(1 for k in found if k in recent)
+
+    def reflow_candidates(self, limit: int, *, sources=None,
+                          hold_recent_ordinary: bool = True) -> list[tuple[str, str]]:
         """Level-triggered reflow selector (spec §4): (source, owner) pairs,
         source in reflow:drive|gmail|anarlog|calendar, excluding owners already
         queued. An owner stops matching once its chunks carry the current
@@ -4208,9 +4241,14 @@ class Store:
         again in the query, so an unavailable source's owners cannot fill the
         LIMIT.
 
-        An owner whose reflow_owners outcome is 'ordinary' and less than 24 h
-        old is also excluded in the query (loop guard: it gets one retry a
-        day, not one per cycle)."""
+        hold_recent_ordinary (default True, what the SEED wants): an owner
+        whose reflow_owners outcome is 'ordinary' and less than 24 h old is
+        also excluded in the query (loop guard: it gets one retry a day, not
+        one per cycle). Counting callers must pass False -- or use
+        reflow_live_counts -- because a held owner is NOT done: the ordinary
+        path failed to converge it, and hiding it would let the backlog read
+        empty (and the end-of-backlog integrity check fire) while it is
+        stuck."""
         from mcpbrain.chunking import SPLIT_VERSION
         from mcpbrain.sync.blocks import EXTRACTION_VERSIONS
         if limit <= 0:
@@ -4258,21 +4296,24 @@ class Store:
         # an extractor that still yields old shape) re-seeding every cycle is a
         # tight re-fetch loop that also keeps the backlog from ever reaching
         # zero. One retry a day, not one a cycle.
-        cutoff = (datetime.now(timezone.utc) - timedelta(hours=24)).isoformat()
+        cutoff = self._reflow_hold_cutoff()
         with self._connect() as db:
             for src, fld, where, args, *having in rules:
                 owner = _meta_extract(fld)
                 tail = f"GROUP BY {owner} {having[0]} " if having else ""
                 pick = f"{owner} AS o" if having else f"DISTINCT {owner} AS o"
+                hold, hold_args = "", []
+                if hold_recent_ordinary:
+                    hold = (f"AND {owner} NOT IN (SELECT owner FROM reflow_owners "
+                            f"WHERE outcome='ordinary' AND source=? AND at > ?) ")
+                    hold_args = [src.split(":", 1)[1], cutoff]
                 for r in db.execute(
                         f"SELECT {pick} FROM chunks WHERE {where} "
                         f"AND {owner} IS NOT NULL AND {owner} != '' "
                         f"AND {owner} NOT IN (SELECT ref_id FROM sync_queue "
                         f"WHERE source LIKE 'reflow:%') "
-                        f"AND {owner} NOT IN (SELECT owner FROM reflow_owners "
-                        f"WHERE outcome='ordinary' AND source=? AND at > ?) "
-                        f"{tail}LIMIT ?",
-                        [*args, src.split(":", 1)[1], cutoff, limit]):
+                        f"{hold}{tail}LIMIT ?",
+                        [*args, *hold_args, limit]):
                     key = (src, str(r["o"]))
                     if key in seen:
                         continue

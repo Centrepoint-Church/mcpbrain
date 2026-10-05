@@ -404,8 +404,11 @@ function reflowText(r){
   const gated = ["no_recent_backup", "disabled", "error"].includes(last);
   if(gated && (pending || r.remaining == null))
     return "blocked: " + last.replace(/_/g, " ");
+  // remaining includes owners the loop guard holds (ordinary path did not
+  // converge); say so rather than letting them read as ordinary progress.
+  const held = r.held ? " · " + fmt(r.held) + " held" : "";
   if(pending)
-    return fmt(done) + (r.total != null ? " of " + fmt(r.total) : "") + " done";
+    return fmt(done) + (r.total != null ? " of " + fmt(r.total) : "") + " done" + held;
   return done ? "done (" + fmt(done) + ")" : "idle";
 }
 
