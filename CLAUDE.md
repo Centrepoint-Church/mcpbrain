@@ -334,7 +334,35 @@ say "call brain_owner_context". **28 tools** after release (was 27).
   `sse-starlette` resolves 3.5.0 for the fleet vs 3.4.4 in the lock — only mcp's
   SSE transport uses it (mcpbrain serves stdio), and the live stdio call above ran
   on 3.5.0. **The Windows HARDWARE QA GATE remains OPEN.**
-- **Current state (2026-10-05, later): the four version files (+ `uv.lock`) are at
+- **Current state (2026-10-05, latest): the four version files (+ `uv.lock`) are at
+  `0.7.138`, RELEASED** — source `66d1ce4c`, gh-pages `960b5983`, plugin `4196ecc`;
+  index serves only `mcpbrain-0.7.138-py3-none-any.whl`, `install.ps1` 200. **Fleet
+  drift caught: `mcp`/`mcp-types` now resolve 2.3.0 (was 2.2.0) and google-auth
+  2.59.1**; full suite **4462 passed** under exactly that set (+ fastembed 0.8.1,
+  pymupdf 1.28.2, httplib2 0.32.0). 2.3.0 renamed client-side result attributes to
+  snake_case (`server_info`, `is_error`); mcpbrain reads none of the old names
+  (grepped), and a live stdio call through the INSTALLED server returned 28 tools and a
+  real `brain_search`. Installed from the published index (bootout → `--reinstall
+  --force` → clear `__pycache__` → bootstrap): `/api/status` 0.7.138, `stalled: None`;
+  doctor integrity ok. **Fixes a live reflow re-queue loop:** shared-drive
+  `text/html` (and other chunk_text prose MIMEs) re-imported pre-`SPLIT_VERSION`
+  ingest-cache artifacts under the base fingerprint, so their chunks never got
+  `split_version` and the selector re-seeded them every cycle (66 of 80 queued drive
+  owners, 200–750 chunks each). Prose MIMEs now get a `+s<SPLIT_VERSION>` fingerprint
+  (`effective_chunker_version`, MIME set derived from drive routing); import refuses
+  an unstamped `+s` artifact and publish never labels unstamped chunks `+s`; GC and
+  bootstrap know the new fingerprints, and bootstrap only lets an artifact under its
+  OWN MIME's current version compete for newest. **Fleet cost:** shared-drive cache
+  artifacts for those MIMEs go stale and are re-extracted once per install.
+  `reflow_candidates` holds an owner whose 'ordinary' outcome is <24 h old OUT OF THE
+  SEED ONLY. **Review caught that the first version also hid held owners from the
+  counts**, so doctor read ✅ and the end-of-backlog integrity check fired while
+  owners were stuck, daily. Counting now goes through `Store.reflow_live_counts` →
+  `(remaining, held)`, `remaining` INCLUDES held, the backlog is done only with
+  `held == 0`, and doctor shows `⚠️ N owner(s) held: ordinary path did not converge`.
+  Live right after install: 27 held, 112 queued, 12,915 of 13,054 owners done.
+  **The Windows HARDWARE QA GATE remains OPEN.**
+- **Earlier (2026-10-05, later): the four version files (+ `uv.lock`) are at
   `0.7.137`, RELEASED** — source `5afda50d`, plugin `f0a57cc`; index serves only
   `mcpbrain-0.7.137-py3-none-any.whl`, `install.ps1` 200; fleet resolves the same
   tested set (full suite 4440 passed under it). **Auto-update's check now counts
