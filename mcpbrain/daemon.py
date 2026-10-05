@@ -911,6 +911,7 @@ class Daemon:
                  auto_update_interval_s: float | None = None,
                  verify_interval_s: float | None = None,
                  clock=time.monotonic,
+                 wall_clock=time.time,
                  enrich_mode: str = "off"):
         self._store = store
         # Tool handlers for the routed-execution path (/api/tool), built on first
@@ -974,7 +975,20 @@ class Daemon:
         # globally, so a constructor that read it would make the daemon tests
         # depend on the developer's real backup history. See
         # last_backup_attempt_epoch for the wiring the entry point uses.
+        #
+        # The backup cadence also keeps a WALL-CLOCK stamp (_last_backup_wall)
+        # beside the monotonic one, stamped at the same points; maybe_backup
+        # measures elapsed as the MAX of the two. On macOS time.monotonic()
+        # (mach_absolute_time) does not advance while the machine sleeps, so a
+        # monotonic-only "daily" backup needed 24h of AWAKE time -- live
+        # 2026-10-05, no backup was even attempted for ~2 days across a slept
+        # weekend. Monotonic is kept because it still counts correctly when
+        # the wall clock is set backwards; the max only ever makes a backup
+        # MORE due, never less. Backup ONLY: the other cadences count awake
+        # time by design.
+        self._wall_clock = wall_clock
         self._last_backup = None
+        self._last_backup_wall = None
         if last_backup_attempt_epoch is not None:
             # Convert wall-clock (persisted) into this process's clock frame --
             # self._clock defaults to time.monotonic, whose epoch is arbitrary
@@ -982,8 +996,10 @@ class Daemon:
             # backwards system-clock adjustment, which makes the stamp look
             # future-dated, reads as "just attempted" instead of yielding a
             # negative elapsed that would park the cadence indefinitely.
-            elapsed = max(0.0, time.time() - float(last_backup_attempt_epoch))
+            now_wall = self._wall_clock()
+            elapsed = max(0.0, now_wall - float(last_backup_attempt_epoch))
             self._last_backup = self._clock() - elapsed
+            self._last_backup_wall = now_wall - elapsed
         # Set for the duration of _backup_under_bulk_lock's maybe_backup() call
         # (Task 3). The watchdog's _recover_from_stall checks this and defers
         # recovery while it is set: os._exit bypasses `finally`, so firing mid
@@ -2336,6 +2352,12 @@ class Daemon:
 
         if self._last_backup is not None:
             elapsed = self._clock() - self._last_backup
+            if self._last_backup_wall is not None:
+                # Wall-clock elapsed counts time asleep (see __init__). A
+                # backwards wall-clock jump makes this small or negative, and
+                # the max falls back to monotonic, so it can never suppress a
+                # backup monotonic already considers due.
+                elapsed = max(elapsed, self._wall_clock() - self._last_backup_wall)
             if elapsed < interval:
                 return None
 
@@ -2361,6 +2383,7 @@ class Daemon:
         # the cycle thread so no heartbeat or maintenance pass ran for an hour.
         # Backing off on attempt bounds a broken backup to one attempt/interval.
         self._last_backup = self._clock()
+        self._last_backup_wall = self._wall_clock()
         home = str(app_dir())
         try:
             # Bundle the whole system: store + the local records repo (world-model,
@@ -2413,6 +2436,7 @@ class Daemon:
         # needed: the attempt one bounds a FAILING backup, this one spaces a
         # SUCCEEDING but slow one.
         self._last_backup = self._clock()
+        self._last_backup_wall = self._wall_clock()
         write_backup_state(home, ok=True)
         return {"backed_up": True, "file_id": file_id, "path": str(path)}
 

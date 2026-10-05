@@ -1220,6 +1220,104 @@ def test_recorded_attempt_in_the_future_does_not_wedge_the_cadence(tmp_path):
     assert daemon.maybe_backup() is None
 
 
+# ---------------------------------------------------------------------------
+# the backup cadence must count SLEEP, not just awake time
+#
+# On macOS time.monotonic() (mach_absolute_time) does not advance while the
+# machine sleeps, so a monotonic-only "daily" backup needed 24h of AWAKE time.
+# Live 2026-10-05: last_attempt == last_success 49.6h old, 0 failures -- no
+# backup ATTEMPTED for ~2 days across a slept weekend; a restart (which
+# re-seeds from the wall clock) ran it immediately. Elapsed is now
+# max(monotonic, wall-clock): sleep makes a backup MORE due, never less.
+# ---------------------------------------------------------------------------
+
+
+def test_backup_due_after_sleep_when_monotonic_clock_is_frozen(tmp_path, monkeypatch):
+    import mcpbrain.daemon as daemon_module
+    monkeypatch.setattr(daemon_module, "_mac_user_is_active", lambda: True)
+    store = _store_with_chunk(tmp_path)
+    files = FakeFiles(list_response={"files": []})
+    cfg = _backup_config(tmp_path, files)
+    mono = _Clock(1000.0)
+    wall = _Clock(1_790_000_000.0)
+    daemon = Daemon(store, FakeEmbedder(), services={},
+                    lock=SingleWriterLock(tmp_path / "d.lock"),
+                    backup=cfg, backup_interval_s=86400.0, clock=mono,
+                    wall_clock=wall)
+
+    first = daemon.maybe_backup()
+    assert first is not None and first["backed_up"] is True
+    assert daemon.maybe_backup() is None  # just ran
+
+    # The machine sleeps for 25h: monotonic does not move, wall clock does.
+    wall.advance(25 * 3600)
+    again = daemon.maybe_backup()
+    assert again is not None and again["backed_up"] is True, (
+        "a slept day did not count toward the daily backup cadence")
+
+
+def test_backup_due_after_sleep_when_seeded_from_persisted_attempt(tmp_path, monkeypatch):
+    """The restart-seeded path too: seed 1h ago, then sleep 24h."""
+    import mcpbrain.daemon as daemon_module
+    monkeypatch.setattr(daemon_module, "_mac_user_is_active", lambda: True)
+    store = _store_with_chunk(tmp_path)
+    files = FakeFiles(list_response={"files": []})
+    cfg = _backup_config(tmp_path, files)
+    mono = _Clock(1000.0)
+    wall = _Clock(1_790_000_000.0)
+    daemon = Daemon(store, FakeEmbedder(), services={},
+                    lock=SingleWriterLock(tmp_path / "d.lock"),
+                    backup=cfg, backup_interval_s=86400.0, clock=mono,
+                    wall_clock=wall,
+                    last_backup_attempt_epoch=wall() - 3600)
+    assert daemon.maybe_backup() is None
+
+    wall.advance(24 * 3600)  # asleep; monotonic frozen
+    summary = daemon.maybe_backup()
+    assert summary is not None and summary["backed_up"] is True
+
+
+def test_backwards_wall_clock_jump_does_not_suppress_a_due_backup(tmp_path, monkeypatch):
+    import mcpbrain.daemon as daemon_module
+    monkeypatch.setattr(daemon_module, "_mac_user_is_active", lambda: True)
+    store = _store_with_chunk(tmp_path)
+    files = FakeFiles(list_response={"files": []})
+    cfg = _backup_config(tmp_path, files)
+    mono = _Clock(1000.0)
+    wall = _Clock(1_790_000_000.0)
+    daemon = Daemon(store, FakeEmbedder(), services={},
+                    lock=SingleWriterLock(tmp_path / "d.lock"),
+                    backup=cfg, backup_interval_s=86400.0, clock=mono,
+                    wall_clock=wall)
+    assert daemon.maybe_backup()["backed_up"] is True
+
+    # 25h awake, but the wall clock is set back two days meanwhile.
+    mono.advance(25 * 3600)
+    wall.advance(25 * 3600 - 2 * 86400)
+    summary = daemon.maybe_backup()
+    assert summary is not None and summary["backed_up"] is True, (
+        "a backwards wall-clock jump suppressed a backup monotonic says is due")
+
+
+def test_failed_attempt_still_advances_the_cadence_on_both_clocks(tmp_path, monkeypatch):
+    """Retry semantics unchanged: a failure backs off a full interval."""
+    import mcpbrain.daemon as daemon_module
+    monkeypatch.setattr(daemon_module, "_mac_user_is_active", lambda: True)
+    monkeypatch.setattr(daemon_module, "app_dir", lambda: tmp_path)
+    store = _store_with_chunk(tmp_path)
+    cfg = _backup_config(tmp_path, _RaisingFiles(list_response={"files": []}))
+    mono = _Clock(1000.0)
+    wall = _Clock(1_790_000_000.0)
+    daemon = Daemon(store, FakeEmbedder(), services={},
+                    lock=SingleWriterLock(tmp_path / "d.lock"),
+                    backup=cfg, backup_interval_s=86400.0, clock=mono,
+                    wall_clock=wall)
+    assert daemon.maybe_backup()["backed_up"] is False
+    mono.advance(3600)
+    wall.advance(3600)
+    assert daemon.maybe_backup() is None, "a failed attempt is retried early"
+
+
 def test_last_backup_attempt_epoch_reads_the_state_file(tmp_path):
     """The wiring helper the daemon entry point uses to seed the cadence."""
     from mcpbrain.daemon import last_backup_attempt_epoch
