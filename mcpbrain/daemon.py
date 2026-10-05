@@ -1116,6 +1116,13 @@ class Daemon:
         # Silent auto-update cadence: OFF unless auto_update_interval_s is set.
         self._auto_update_interval_s: float | None = auto_update_interval_s
         self._last_auto_update = None
+        # Wall-clock twin of _last_auto_update, stamped at the same point;
+        # _run_auto_update measures elapsed as the MAX of the two, so time
+        # asleep counts (macOS monotonic pauses during sleep -- same defect
+        # and same fix as the backup cadence, see _last_backup_wall). There is
+        # no persisted last-attempt record to seed from: the first check after
+        # a (re)start is always due, so both stamps start None together.
+        self._last_auto_update_wall = None
         # Pending update version: set by maybe_auto_update (detect-only); consumed
         # by run() AFTER the write lock is released so uv install + restart never
         # happen under the held lock.
@@ -2658,9 +2665,24 @@ class Daemon:
             interval = 86400.0 if config.is_configured(home) else None
         if interval is None:
             return None
-        if self._last_auto_update is not None and (self._clock() - self._last_auto_update) < interval:
-            return None
+        if self._last_auto_update is not None:
+            elapsed = self._clock() - self._last_auto_update
+            # getattr: an instance built without __init__ (or a path that sets
+            # _last_auto_update alone) has no wall twin -- fall back to
+            # monotonic. Wall-clock elapsed counts time asleep; a backwards
+            # wall-clock jump makes it small or negative and the max falls back
+            # to monotonic, so it can never suppress a check monotonic
+            # already considers due.
+            last_wall = getattr(self, "_last_auto_update_wall", None)
+            if last_wall is not None:
+                wall_clock = getattr(self, "_wall_clock", time.time)
+                elapsed = max(elapsed, wall_clock() - last_wall)
+            if elapsed < interval:
+                return None
+        # Stamped BEFORE the check (unchanged): a failing check backs off a
+        # full interval on both clocks rather than retrying every tick.
         self._last_auto_update = self._clock()
+        self._last_auto_update_wall = getattr(self, "_wall_clock", time.time)()
         try:
             from mcpbrain import update as upd
             idx = upd._index_url()
