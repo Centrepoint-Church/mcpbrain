@@ -240,8 +240,11 @@ def test_backfill_shared_drive_cache_hit_skips_extraction(tmp_path):
     s, fs = _store(tmp_path), LocalDirFleetStorage(tmp_path / "drv")
     # pre-publish an artifact for FID's current version so try_import hits
     src = _store(tmp_path, "src.sqlite3")
+    # Stamped as normalise_drive stamps a text/plain chunk, so it publishes
+    # under the +s<SPLIT_VERSION> fingerprint a text/plain read asks for.
     src.import_cached_chunk("gdrive-FID-0", "cached body", "c0",
-                            {"source_type": "gdrive", "file_id": "FID", "chunk_index": 0}, [0.5]*4)
+                            {"source_type": "gdrive", "file_id": "FID", "chunk_index": 0,
+                             "mime_type": "text/plain", "split_version": 1}, [0.5]*4)
     fm = {"id": "FID", "name": "Doc", "mimeType": "text/plain",
           "modifiedTime": "2026-05-01T10:00:00Z", "md5Checksum": "abc",
           "owners": [{"displayName": "X"}]}

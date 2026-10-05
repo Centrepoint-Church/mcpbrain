@@ -4206,7 +4206,11 @@ class Store:
 
         `sources`, when given, restricts the rules to those reflow sources --
         again in the query, so an unavailable source's owners cannot fill the
-        LIMIT."""
+        LIMIT.
+
+        An owner whose reflow_owners outcome is 'ordinary' and less than 24 h
+        old is also excluded in the query (loop guard: it gets one retry a
+        day, not one per cycle)."""
         from mcpbrain.chunking import SPLIT_VERSION
         from mcpbrain.sync.blocks import EXTRACTION_VERSIONS
         if limit <= 0:
@@ -4248,6 +4252,13 @@ class Store:
         seen: set[tuple[str, str]] = set()
         if sources is not None:
             rules = [r for r in rules if r[0] in sources]
+        # Loop guard: an owner the reflow routed to the ORDINARY path within
+        # the last 24 h is not re-seeded yet. The ordinary path is supposed to
+        # write current-version chunks; when it cannot (a stale peer artifact,
+        # an extractor that still yields old shape) re-seeding every cycle is a
+        # tight re-fetch loop that also keeps the backlog from ever reaching
+        # zero. One retry a day, not one a cycle.
+        cutoff = (datetime.now(timezone.utc) - timedelta(hours=24)).isoformat()
         with self._connect() as db:
             for src, fld, where, args, *having in rules:
                 owner = _meta_extract(fld)
@@ -4257,7 +4268,11 @@ class Store:
                         f"SELECT {pick} FROM chunks WHERE {where} "
                         f"AND {owner} IS NOT NULL AND {owner} != '' "
                         f"AND {owner} NOT IN (SELECT ref_id FROM sync_queue "
-                        f"WHERE source LIKE 'reflow:%') {tail}LIMIT ?", [*args, limit]):
+                        f"WHERE source LIKE 'reflow:%') "
+                        f"AND {owner} NOT IN (SELECT owner FROM reflow_owners "
+                        f"WHERE outcome='ordinary' AND source=? AND at > ?) "
+                        f"{tail}LIMIT ?",
+                        [*args, src.split(":", 1)[1], cutoff, limit]):
                     key = (src, str(r["o"]))
                     if key in seen:
                         continue

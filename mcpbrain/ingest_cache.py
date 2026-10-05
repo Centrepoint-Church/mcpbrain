@@ -23,7 +23,7 @@ import re
 import struct
 from datetime import datetime, timezone
 
-from mcpbrain.chunking import CHUNKER_VERSION
+from mcpbrain.chunking import CHUNKER_VERSION, SPLIT_VERSION
 from mcpbrain.chunking import content_hash as _text_hash
 from mcpbrain.org_contracts import (
     CacheArtifact, CacheChunk, DRIVE_ID_META_KEY,
@@ -78,18 +78,56 @@ def effective_chunker_version(pin, mime: str = "") -> str:
     artifacts stay shareable — installs on older code simply keep using their
     own, differently-fingerprinted path, and the two coexist without churn.
 
-    `mime` appends the file type's extraction_version so an extractor change
-    invalidates only that type's artifacts, never spreadsheets. Empty/unknown
-    mimes (extraction_version 0, e.g. spreadsheets or no mime known) leave the
-    base version untouched, so every existing caller that doesn't pass `mime`
-    keeps today's exact fingerprint.
+    `mime` appends the file type's extraction_version (`+x<N>`) so an
+    extractor change invalidates only that type's artifacts, never
+    spreadsheets. A prose MIME chunked by chunking.chunk_text
+    (split_suffixed_mimes: text/html, text/plain, .eml, ...) appends
+    `+s<SPLIT_VERSION>` instead: its chunk text changed with SPLIT_VERSION, and
+    without the suffix a reflowed file kept re-importing its pre-split
+    artifact (unstamped chunks the reflow selector re-selects forever).
+    Tabular, empty and unknown mimes leave the base version untouched, so every
+    caller that doesn't pass `mime` keeps today's exact fingerprint.
     """
     base = (str(pin.chunker_version)
             if _version_int(pin.chunker_version) >= CHUNKER_VERSION
             else str(CHUNKER_VERSION))
     from mcpbrain.sync.blocks import extraction_version
     xv = extraction_version(mime)
-    return f"{base}+x{xv}" if xv else base
+    if xv:
+        return f"{base}+x{xv}"
+    if mime in split_suffixed_mimes():
+        return f"{base}+s{SPLIT_VERSION}"
+    return base
+
+
+def split_suffixed_mimes() -> frozenset[str]:
+    """The Drive MIMEs whose chunks come out of chunking.chunk_text -- the
+    prose path of drive.normalise_drive -- and so changed with SPLIT_VERSION:
+    everything drive.fetch_content fetches as TEXT (_DOWNLOAD_TEXT, plus the
+    _DOWNLOAD_BINARY text extractors such as .eml) that is neither tabular
+    (tabular.render_chunks, unaffected by the splitter) nor block-extracted.
+
+    Block MIMEs carry `+x<N>` instead and deliberately NOT `+s`: their chunks
+    come from blocks.render, which shipped with the new splitter in the same
+    release (0.7.132) that introduced both SPLIT_VERSION 1 and the +x suffix,
+    so no +x1 artifact can hold pre-split output. A future SPLIT_VERSION bump
+    that changes blocks.render must bump EXTRACTION_VERSIONS for those MIMEs
+    (sync/blocks.py's header already requires it).
+
+    Derived from drive.py's routing tables rather than listed by hand, so a new
+    text MIME wired into fetch_content is suffixed automatically."""
+    from mcpbrain.sync import drive, tabular
+    from mcpbrain.sync.blocks import EXTRACTION_VERSIONS
+    return frozenset((set(drive._DOWNLOAD_TEXT) | set(drive._DOWNLOAD_BINARY))
+                     - set(tabular.TABLE_MIMES) - set(EXTRACTION_VERSIONS))
+
+
+def _carries_split_stamp(chunk_metas) -> bool:
+    """Every chunk carries split_version >= SPLIT_VERSION, i.e. it really is
+    the current splitter's output (normalise_drive stamps it on every chunk)."""
+    metas = list(chunk_metas)
+    return bool(metas) and all(
+        int((m or {}).get("split_version") or 0) >= SPLIT_VERSION for m in metas)
 
 
 def _pf8(pin, mime: str = "") -> str:
@@ -118,6 +156,8 @@ def _current_pipeline_fingerprints(pin) -> set[str]:
     from mcpbrain.sync.blocks import EXTRACTION_VERSIONS
     out = {_pf8(pin)}
     out.update(_pf8(pin, mime) for mime in EXTRACTION_VERSIONS)
+    # And every prose MIME's +s<SPLIT_VERSION> one (split_suffixed_mimes).
+    out.update(_pf8(pin, mime) for mime in split_suffixed_mimes())
     return out
 
 
@@ -366,6 +406,14 @@ def _import_artifact(store, drive_id: str, art: CacheArtifact, pin,
             or art.chunker_version != effective_chunker_version(pin, mime)
             or int(art.dim) != int(store.dim)):
         return False
+    if (mime in split_suffixed_mimes()
+            and not _carries_split_stamp(cc.metadata for cc in art.chunks)):
+        # Old-shape (pre-SPLIT_VERSION) chunks under the +s fingerprint:
+        # importing them would hand the reflow selector the same unstamped
+        # owner again. Treat as a miss -> local extraction.
+        log.info("ingest_cache: %s artifact lacks the split_version stamp "
+                 "(fallback to local)", art.file_id)
+        return False
     try:
         # Guard enrich field access; if malformed (e.g. string instead of dict),
         # fall back rather than raise.
@@ -611,6 +659,12 @@ def publish_file(store, fleet_storage, drive_id, file_id, content_hash, pin,
                 log.debug("ingest_cache: withholding malformed enrich payload for %s",
                           file_id)
     mime = (chunks[0].metadata or {}).get("mime_type", "")
+    if mime in split_suffixed_mimes() and not _carries_split_stamp(
+            c.metadata for c in chunks):
+        # Chunks written by pre-SPLIT_VERSION code (e.g. a pending publish
+        # recorded before the upgrade): publish them under the base pipeline
+        # they actually belong to, never under the +s fingerprint.
+        mime = ""
     publish(store, fleet_storage, drive_id, file_id, content_hash, chunks, pin,
             enrich=enrich, published_by=published_by,
             contextual_retrieval=contextual_retrieval, skip_gc=skip_gc, mime=mime)
