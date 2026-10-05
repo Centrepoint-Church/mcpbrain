@@ -2022,3 +2022,21 @@ def test_resolve_google_account_get_profile_passes_num_retries(tmp_path):
 
     assert email == "sam@example.com"
     assert calls == [daemon_mod._NUM_RETRIES]
+
+
+def test_maybe_backup_without_wall_twin_falls_back_to_monotonic():
+    """A Daemon built via __new__ (or any path that sets _last_backup alone)
+    has no _last_backup_wall; maybe_backup must decide on monotonic only."""
+    import threading
+
+    d = Daemon.__new__(Daemon)
+    d._backfill_active = threading.Event()
+    d._config_lock = threading.Lock()
+    d._backup = object()  # configured; never reached when not due
+    d._backup_interval_s = 3600.0
+    clock = _Clock(10_000.0)
+    d._clock = clock
+    d._last_backup = clock() - 60  # 1 min ago by monotonic
+    assert not hasattr(d, "_last_backup_wall")
+
+    assert d.maybe_backup() is None  # not due, and no AttributeError

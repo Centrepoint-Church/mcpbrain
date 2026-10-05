@@ -2352,12 +2352,16 @@ class Daemon:
 
         if self._last_backup is not None:
             elapsed = self._clock() - self._last_backup
-            if self._last_backup_wall is not None:
+            # getattr: an instance built without __init__ (or a path that sets
+            # _last_backup alone) has no wall twin -- fall back to monotonic.
+            last_wall = getattr(self, "_last_backup_wall", None)
+            if last_wall is not None:
                 # Wall-clock elapsed counts time asleep (see __init__). A
                 # backwards wall-clock jump makes this small or negative, and
                 # the max falls back to monotonic, so it can never suppress a
                 # backup monotonic already considers due.
-                elapsed = max(elapsed, self._wall_clock() - self._last_backup_wall)
+                wall_clock = getattr(self, "_wall_clock", time.time)
+                elapsed = max(elapsed, wall_clock() - last_wall)
             if elapsed < interval:
                 return None
 
