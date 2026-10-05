@@ -334,7 +334,20 @@ say "call brain_owner_context". **28 tools** after release (was 27).
   `sse-starlette` resolves 3.5.0 for the fleet vs 3.4.4 in the lock — only mcp's
   SSE transport uses it (mcpbrain serves stdio), and the live stdio call above ran
   on 3.5.0. **The Windows HARDWARE QA GATE remains OPEN.**
-- **Current state (2026-10-01): the four version files (+ `uv.lock`) are at `0.7.135`,
+- **Current state (2026-10-05): the four version files (+ `uv.lock`) are at `0.7.136`,
+  RELEASED** — source `4ed799a1`, gh-pages `22539dca`, plugin `cb5b6ab`; index serves
+  only `mcpbrain-0.7.136-py3-none-any.whl`, `install.ps1` 200; fleet resolves
+  mcp 2.2.0 / fastembed 0.8.1 / pymupdf 1.28.2 / google-auth 2.58.1 / httplib2
+  0.32.0 and the full suite passed under that set (4436). **The backup cadence now
+  counts time asleep:** on macOS `time.monotonic()` pauses during sleep, so the
+  "daily" backup needed 24 h of AWAKE time — live, a sleepy laptop went ~50 h with
+  no backup attempted, which also blocked the reflow seed's 24 h wall-clock backup
+  gate. `maybe_backup` now uses max(monotonic, wall-clock) elapsed (`_last_backup_wall`).
+  **`auto_update` and the other daily cadences still count awake time only** — a
+  sleepy laptop can lag days behind a release; worth the same fix for auto_update.
+  Reflow at release: 12,914 of 13,053 owners done, final 139 queued; gave_up 6
+  (genuinely unreadable files — old chunks kept).
+- **Earlier (2026-10-01): the four version files (+ `uv.lock`) are at `0.7.135`,
   RELEASED** — source `51bf830d`, gh-pages `24c4c039`, plugin `808159d`; index serves
   only `mcpbrain-0.7.135-py3-none-any.whl`, `install.ps1` 200. Full suite **4431
   passed** under the lock and under the fleet's resolution (pymupdf 1.28.2, mcp
