@@ -825,3 +825,61 @@ def test_put_bytes_still_raises_on_a_transient_failure():
     import pytest as _pt
     with _pt.raises(Exception):
         st.put_bytes("a/leaf", b"data")
+
+
+def _deleting_storage(fs, exc):
+    """A DriveFleetStorage whose files().delete().execute() raises `exc`,
+    counting how many delete requests and child lookups it makes."""
+    st = fs.DriveFleetStorage.__new__(fs.DriveFleetStorage)
+    calls = {"find": 0, "delete": 0}
+    st._resolve_file = lambda path, create_parents=False: ("PARENT", path.rsplit("/", 1)[-1])
+
+    def _find(parent, leaf, folder):
+        calls["find"] += 1
+        return "FID"
+    st._find_child = _find
+
+    class _Req:
+        def execute(self, num_retries=0):
+            calls["delete"] += 1
+            raise exc
+
+    class _Files:
+        def delete(self, **kw):
+            return _Req()
+
+    st._svc = type("Svc", (), {"files": lambda self: _Files()})()
+    return st, calls
+
+
+def test_delete_absorbs_a_permanent_refusal_once_then_skips_without_network(caplog):
+    """Cache GC lists with drive.readonly reach and finds superseded artifacts
+    another install created; drive.file refuses the delete forever. Live, 124 of
+    them were retried 11,858 times (~3 s each), spending every sync cycle's
+    budget before the work queue ran. The first refusal is reported once; every
+    later delete of that path makes no Drive call at all."""
+    from mcpbrain import fleet_storage as fs
+    fs._forget_permanent_refusals()
+    st, calls = _deleting_storage(fs, _Forbidden(
+        "The user has not granted the app 611747560976 write access to the file X."))
+    with caplog.at_level("WARNING"):
+        st.delete(".mcpbrain-cache/f.abc.94185f8d.mbc.gz")     # must NOT raise
+        st.delete(".mcpbrain-cache/f.abc.94185f8d.mbc.gz")
+        st.delete(".mcpbrain-cache/f.abc.94185f8d.mbc.gz")
+    assert calls == {"find": 1, "delete": 1}
+    hits = [r for r in caplog.records if "f.abc.94185f8d" in r.getMessage()]
+    assert len(hits) == 1, f"expected exactly one warning, got {len(hits)}"
+
+
+def test_delete_still_raises_on_a_transient_failure():
+    """Only permanent refusals are absorbed: a 500 still surfaces (and is not
+    remembered), so the next attempt tries again."""
+    import pytest as _pt
+    from mcpbrain import fleet_storage as fs
+    fs._forget_permanent_refusals()
+    boom = _Forbidden("Backend Error"); boom.resp.status = 500
+    st, calls = _deleting_storage(fs, boom)
+    for _ in range(2):
+        with _pt.raises(Exception):
+            st.delete(".mcpbrain-cache/g.abc.94185f8d.mbc.gz")
+    assert calls == {"find": 2, "delete": 2}

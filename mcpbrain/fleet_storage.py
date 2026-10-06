@@ -396,16 +396,37 @@ class DriveFleetStorage:
         return sorted(p for p in out if p.startswith(prefix))
 
     def delete(self, path: str) -> None:
+        # Same permanent-refusal rule as put_bytes, and the same failure shape:
+        # cache GC lists with drive.readonly reach, finds superseded artifacts
+        # another install created, and drive.file refuses the delete forever.
+        # Unrecognised, every sync cycle re-tried all of them (~3 s each, a
+        # traceback apiece) -- live, 124 artifacts retried 11,858 times, which
+        # spent each cycle's budget before the work queue ran. A known-refused
+        # path is skipped with no network call at all.
+        if path in _PERMANENT_REFUSALS:
+            return
         parent, leaf = self._resolve_file(path, create_parents=False)
         if parent is None:
             return
         fid = self._find_child(parent, leaf, folder=False)
         if fid is None:
             return
-        self._exec(
-            self._svc.files().delete(fileId=fid, supportsAllDrives=True),
-            context=f"delete {path!r}",
-        )
+        request = self._svc.files().delete(fileId=fid, supportsAllDrives=True)
+        try:
+            request.execute(num_retries=5)
+        except Exception as exc:  # noqa: BLE001 — re-raised unless permanent
+            if is_permanent_write_refusal(exc):
+                _PERMANENT_REFUSALS.add(path)
+                log.warning(
+                    "fleet_storage: cannot delete %r — this app did not create "
+                    "it, so the drive.file scope refuses it. The superseded "
+                    "artifact stays in Drive (harmless: importers check the "
+                    "content hash); delete it by hand to tidy up. Suppressing "
+                    "further attempts.", path)
+                return
+            log.warning("fleet_storage: Drive operation failed (delete %r)", path,
+                        exc_info=True)
+            raise
 
 
 # -- factories (the storage instances B and C acquire) ----------------------
