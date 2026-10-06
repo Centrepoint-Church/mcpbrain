@@ -334,7 +334,32 @@ say "call brain_owner_context". **28 tools** after release (was 27).
   `sse-starlette` resolves 3.5.0 for the fleet vs 3.4.4 in the lock — only mcp's
   SSE transport uses it (mcpbrain serves stdio), and the live stdio call above ran
   on 3.5.0. **The Windows HARDWARE QA GATE remains OPEN.**
-- **Current state (2026-10-05, latest): the four version files (+ `uv.lock`) are at
+- **Current state (2026-10-06): the four version files (+ `uv.lock`) are at
+  `0.7.139`, RELEASED** — source `f15ed121`, gh-pages `d8763cee`, plugin `5de829d`;
+  index serves only `mcpbrain-0.7.139-py3-none-any.whl`, `install.ps1` 200. Fleet
+  resolves mcp/mcp-types 2.3.0, **google-auth 2.60.0** (drifted again), fastembed
+  0.8.1, pymupdf 1.28.2, httplib2 0.32.0; full suite **4464 passed** under exactly
+  that set. Installed from the published index (bootout → `--reinstall --force` →
+  clear `__pycache__` → bootstrap); `/api/status` 0.7.139, `stalled: None`.
+  **Fixes the shared-drive cache GC starving every sync cycle.**
+  `DriveFleetStorage.delete` had no permanent-refusal handling (`put_bytes` has had
+  it since 0.7.128): GC lists with drive.readonly reach, finds superseded artifacts
+  another install created, and drive.file refuses the delete forever. Since
+  2026-10-02, 124 such artifacts were retried **11,858 times at ~3 s each**, spending
+  each cycle's budget before the work queue ran — the reflow queue sat unattempted
+  for long stretches (due Gmail rows untouched for an hour). Now a refused delete is
+  recorded in `_PERMANENT_REFUSALS`, logged once, and later deletes of that path make
+  no Drive call; transient failures still raise. Verified live: one `cannot delete`
+  line per artifact, 0 repeats, 0 `failed to delete` tracebacks. The first pass after
+  each restart still pays ~3 s per foreign artifact once (~6 min for 124); deleting
+  them by hand in Drive removes even that. **The 27 held drive owners from 0.7.138
+  were released by hand** (their `reflow_owners.at` backdated past 24 h, daemon
+  booted out, integrity ok; originals saved to `reflow_held_release_backup.json` in
+  the app dir) and **all converged under 0.7.138** — 4,028 chunks now carry
+  `split_version` 1, which confirms the `+s` fix on the exact owners that looped.
+  Reflow then: 12,963 owners done, 8 Gmail queued, 0 remaining, 0 held.
+  **The Windows HARDWARE QA GATE remains OPEN.**
+- **Earlier (2026-10-05, latest): the four version files (+ `uv.lock`) are at
   `0.7.138`, RELEASED** — source `66d1ce4c`, gh-pages `960b5983`, plugin `4196ecc`;
   index serves only `mcpbrain-0.7.138-py3-none-any.whl`, `install.ps1` 200. **Fleet
   drift caught: `mcp`/`mcp-types` now resolve 2.3.0 (was 2.2.0) and google-auth
