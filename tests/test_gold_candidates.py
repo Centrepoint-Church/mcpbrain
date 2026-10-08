@@ -1,6 +1,8 @@
 import importlib.util
+import os
 import pathlib
 
+import pytest
 import yaml
 
 from mcpbrain.store import Store
@@ -65,6 +67,60 @@ def test_draft_refuses_an_out_path_inside_this_repo(tmp_path):
     finally:
         if bad_out.exists():
             bad_out.unlink()
+
+
+def test_draft_allows_a_path_outside_the_repo(tmp_path):
+    s = Store(tmp_path / "b.sqlite3", dim=4)
+    s.init()
+    for i in range(3):
+        s.upsert_chunk(f"gdrive-F1-{i}", "text", f"h{i}", {"file_id": "F1"})
+    out = tmp_path / "outside" / "c.yaml"
+    gc.draft(str(tmp_path / "b.sqlite3"), str(out), n=5)
+    assert out.exists()
+
+
+def test_draft_refuses_a_case_varied_path_into_the_repo(tmp_path):
+    repo_root = pathlib.Path(__file__).resolve().parents[1]
+    s_root = str(repo_root)
+    idx = s_root.rfind(os.sep)
+    varied_root = s_root[: idx + 1] + s_root[idx + 1 :].upper()
+    if not os.path.exists(varied_root):
+        pytest.skip("filesystem is case-sensitive")
+
+    s = Store(tmp_path / "b.sqlite3", dim=4)
+    s.init()
+    for i in range(3):
+        s.upsert_chunk(f"gdrive-F1-{i}", "text", f"h{i}", {"file_id": "F1"})
+    bad_out = pathlib.Path(varied_root) / "tests" / "_should_not_exist_case.yaml"
+    real_bad = repo_root / "tests" / "_should_not_exist_case.yaml"
+    try:
+        with pytest.raises(SystemExit) as exc_info:
+            gc.draft(str(tmp_path / "b.sqlite3"), str(bad_out), n=5)
+        assert exc_info.value.code == 2
+        assert not real_bad.exists()
+    finally:
+        if real_bad.exists():
+            real_bad.unlink()
+
+
+def test_draft_refuses_a_symlink_into_the_repo(tmp_path):
+    repo_root = pathlib.Path(__file__).resolve().parents[1]
+    s = Store(tmp_path / "b.sqlite3", dim=4)
+    s.init()
+    for i in range(3):
+        s.upsert_chunk(f"gdrive-F1-{i}", "text", f"h{i}", {"file_id": "F1"})
+    link = tmp_path / "repo_tests_link"
+    link.symlink_to(repo_root / "tests")
+    bad_out = link / "_should_not_exist_symlink.yaml"
+    real_bad = repo_root / "tests" / "_should_not_exist_symlink.yaml"
+    try:
+        with pytest.raises(SystemExit) as exc_info:
+            gc.draft(str(tmp_path / "b.sqlite3"), str(bad_out), n=5)
+        assert exc_info.value.code == 2
+        assert not real_bad.exists()
+    finally:
+        if real_bad.exists():
+            real_bad.unlink()
 
 
 def test_verify_reports_missing_ids(tmp_path):

@@ -24,6 +24,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import re
 import sys
 from pathlib import Path
@@ -67,11 +68,58 @@ def _snippet(text: str | None) -> str:
     return (text or "")[:120]
 
 
+def _nearest_existing_ancestor(path: Path) -> Path:
+    """path itself if it exists, else the first ancestor that does. --out
+    names a file that normally doesn't exist yet, so this is almost always a
+    directory -- but the walk is content-free either way, just filesystem
+    lookups."""
+    candidate = path
+    while not candidate.exists():
+        parent = candidate.parent
+        if parent == candidate:  # reached the filesystem root
+            break
+        candidate = parent
+    return candidate
+
+
+def _is_within_repo(ancestor: Path) -> bool:
+    """True when `ancestor`, or any of its parents, IS the repo root -- by
+    device+inode, not by string/Path comparison.
+
+    Path.resolve() on POSIX does not case-fold: on a case-insensitive
+    filesystem (e.g. this Mac's default APFS), a path spelled with different
+    case than the repo's own (GitHub/MCPBRAIN vs GitHub/mcpbrain) normalizes
+    to a DIFFERENT string that nonetheless names the SAME file -- so a plain
+    `==`/`in .parents` check misses it. os.stat() resolves a path through the
+    filesystem's own case-folding, so stat'ing the case-varied spelling still
+    returns the real inode; comparing (st_dev, st_ino) catches that case AND
+    a symlink that points into the repo from outside it, since `ancestor` is
+    already the resolved (symlink-followed) path by the time it gets here.
+    """
+    try:
+        repo_stat = os.stat(_REPO_ROOT)
+    except OSError:
+        return False  # the repo root always exists in practice; defensive only
+    current = ancestor
+    while True:
+        try:
+            st = os.stat(current)
+        except OSError:
+            st = None
+        if st is not None and (st.st_dev, st.st_ino) == (repo_stat.st_dev, repo_stat.st_ino):
+            return True
+        parent = current.parent
+        if parent == current:
+            return False
+        current = parent
+
+
 def _refuse_if_in_repo(out_path: Path) -> None:
     """Gold candidates are private tenant data; never let one land where a
     public clone of this repo would pick it up."""
     resolved = out_path.resolve()
-    if resolved == _REPO_ROOT or _REPO_ROOT in resolved.parents:
+    ancestor = _nearest_existing_ancestor(resolved)
+    if _is_within_repo(ancestor):
         print(f"refusing to write {resolved}: it is inside this repo ({_REPO_ROOT}); "
               "gold candidates are private tenant data and must be written elsewhere "
               "(e.g. ../mcpbrain-tenant/eval/)", file=sys.stderr)
