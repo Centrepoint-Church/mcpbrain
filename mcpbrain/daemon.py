@@ -1745,6 +1745,7 @@ class Daemon:
             home = str(app_dir())
             # B3: three-axis weights (safe no-op when importance_recall is off)
             search_kwargs: dict = {"query_vec": qv}
+            search_kwargs["collapse_documents"] = config.retrieval_collapse_documents_enabled(home)
             if config.importance_recall_enabled(home):
                 w = config.importance_weights(home)
                 search_kwargs.update({

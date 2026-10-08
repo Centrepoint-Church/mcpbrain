@@ -311,12 +311,55 @@ def _dedupe_by_cluster(hits: list[dict]) -> list[dict]:
     return out
 
 
+def _document_key(hit: dict) -> str:
+    """The document a hit belongs to, for one-result-per-document collapse
+    (spec 2026-10-07 §3.2). A Drive chunk -> its file; an `enriched-` digest ->
+    its own cluster (so a file's digest and its raw chunks are ONE document);
+    anything else (a Gmail MESSAGE, calendar event, note) -> its positional root.
+    Gmail is never grouped by thread: the gold spike measured that hiding a
+    thread's other messages loses the expected message."""
+    d = hit.get("doc_id", "")
+    meta = hit.get("metadata") or {}
+    if isinstance(meta, str):
+        try:
+            meta = json.loads(meta)
+        except Exception:
+            meta = {}
+    if not isinstance(meta, dict):
+        meta = {}
+    if d.startswith("enriched-"):
+        key = _cluster_key({"metadata": meta})
+        return f"doc:{key}" if key else d
+    if d.startswith("gdrive-") and meta.get("file_id"):
+        return f"doc:{meta['file_id']}"
+    return _doc_root(d)
+
+
+def _collapse_documents(hits: list[dict]) -> list[dict]:
+    """Keep each document's best-ranked hit (MaxP: `hits` arrive best-first) and
+    record how many of its chunks were in the pool as `doc_hits`. No score
+    aggregation: summing or bonusing extra chunks lost on the gold set (long
+    threads and many-chunk documents crowd out the precise answer)."""
+    kept: dict[str, dict] = {}
+    out: list[dict] = []
+    for h in hits:
+        k = _document_key(h)
+        if k in kept:
+            kept[k]["doc_hits"] += 1
+            continue
+        h["doc_hits"] = 1
+        kept[k] = h
+        out.append(h)
+    return out
+
+
 def hybrid_search(store, embedder, query: str, limit: int = 10, *,
                   rrf_k: int = _RRF_K, vec_weight: float = _VEC_WEIGHT,
                   kw_weight: float = _KW_WEIGHT, query_vec: list | None = None,
                   recency_weight: float = 0.0, importance_weight: float = 0.0,
                   decay_weight: float = 0.0, recency_alpha: float = 0.01,
-                  exclude_cold: bool = False) -> list[dict]:
+                  exclude_cold: bool = False,
+                  collapse_documents: bool = False) -> list[dict]:
     """Hybrid RRF search with optional three-axis reranking.
 
     New keyword-only params (all default to off so existing callers are unaffected):
@@ -325,14 +368,18 @@ def hybrid_search(store, embedder, query: str, limit: int = 10, *,
       decay_weight    — additive decay-factor boost weight (B5)
       recency_alpha   — exp decay rate for the recency term (0.01 → ~69d half-life)
       exclude_cold    — when True, skip memory_tier='cold' chunks (B2)
+      collapse_documents — when True, collapse to one hit per document, best
+        chunk (MaxP), with a `doc_hits` count on the survivor; fetches
+        limit*6 per ranker instead of limit*2 (spec 2026-10-07 §3.2).
 
     query_vec lets a caller that already embedded the query (e.g. the recall
     distance gate in daemon.search) reuse it, avoiding a second embed_query —
     the slow part of a search. Identical results either way.
     """
     qv = query_vec if query_vec is not None else embedder.embed_query(query)
-    sem = [d for d, _ in store.vec_knn(qv, limit * 2)]
-    kw = [d for d, _ in store.fts_search(query, limit * 2)]
+    depth = limit * 6 if collapse_documents else limit * 2
+    sem = [d for d, _ in store.vec_knn(qv, depth)]
+    kw = [d for d, _ in store.fts_search(query, depth)]
     fused = _rrf([sem, kw], k=rrf_k, vec_weight=vec_weight, kw_weight=kw_weight)
     ordered = sorted(fused, key=lambda d: -fused[d])
     # `score` is an INTRA-QUERY confidence: each fused score divided by this
@@ -514,6 +561,9 @@ def hybrid_search(store, embedder, query: str, limit: int = 10, *,
         kept_pairs.add(pair)
         kept.append(c)
     candidates = kept
+
+    if collapse_documents:
+        candidates = _collapse_documents(candidates)
 
     results = []
     for c in candidates:

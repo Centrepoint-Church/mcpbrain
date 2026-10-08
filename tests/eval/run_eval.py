@@ -267,7 +267,9 @@ def production_search_kwargs(home=None) -> dict:
     from mcpbrain import config
     if home is None:
         home = str(config.app_dir())
-    return {"exclude_cold": False, **config.importance_weights(home)}
+    return {"exclude_cold": False,
+            "collapse_documents": config.retrieval_collapse_documents_enabled(home),
+            **config.importance_weights(home)}
 
 
 def main() -> None:

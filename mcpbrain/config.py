@@ -730,6 +730,13 @@ def retrieval_expand_enabled(home) -> bool:
     return bool(fleet_flag(home, "retrieval_expand", False))
 
 
+def retrieval_collapse_documents_enabled(home) -> bool:
+    """One search result per document (MaxP), spec 2026-10-07 §3.2. Fleet-
+    flippable via org-config.json {"flags": {"retrieval_collapse_documents":
+    false}}; a local False is the kill switch. Default ON."""
+    return bool(fleet_flag(home, "retrieval_collapse_documents", True))
+
+
 def tool_exec_in_daemon(home) -> bool:
     """Whether Store-touching MCP tools execute in the DAEMON rather than in the
     MCP server process.
