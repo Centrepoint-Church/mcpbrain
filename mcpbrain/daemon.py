@@ -1784,12 +1784,21 @@ class Daemon:
                 pass
         # Shape the ranked hits into compact result dicts. Use the existing
         # distance field (set by router for synthetic results like community
-        # summaries) when present; otherwise look it up from KNN.
+        # summaries) when present; otherwise look it up from KNN. A hit outside
+        # the KNN window (keyword-only, or ranked deep in the limit*6 collapse
+        # pool) has no measured distance: report None, never the BEST distance,
+        # which would claim it is as close as the nearest chunk. No consumer
+        # reads it as a float (prompt_recall/feedback rank on score;
+        # maybe_expand passes it through).
+        def _distance(c):
+            if c.get("distance") is not None:
+                return round(float(c["distance"]), 3)
+            d = dist.get(c.get("doc_id"))
+            return round(float(d), 3) if d is not None else None
+
         result_hits = [{"doc_id": c.get("doc_id"),
                         "score": round(float(c.get("score") or 0.0), 3),
-                        "distance": round(
-                            float(c["distance"]) if c.get("distance") is not None
-                            else float(dist.get(c.get("doc_id"), knn[0][1])), 3),
+                        "distance": _distance(c),
                         "text": c.get("text") or ""} for c in hits]
         from mcpbrain.retrieval_expand import maybe_expand
         try:

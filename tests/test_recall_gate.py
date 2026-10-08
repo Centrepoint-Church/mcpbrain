@@ -57,6 +57,21 @@ def test_gate_passes_on_topic_and_attaches_distance(tmp_path, monkeypatch):
     assert out[0]["score"] == 1.0
 
 
+def test_hit_outside_the_knn_window_reports_no_distance(tmp_path, monkeypatch):
+    """A survivor the KNN window never measured (keyword-only, or deep in the
+    limit*6 collapse pool) gets distance None -- not the BEST distance, which
+    would claim it is as close as the nearest chunk."""
+    monkeypatch.setenv("MCPBRAIN_HOME", str(tmp_path))
+    d = _daemon(tmp_path, knn=[("d1", 0.62), ("d2", 0.70)])
+    monkeypatch.setattr(daemon_mod, "hybrid_search", lambda *a, **k: [
+        {"doc_id": "d1", "score": 1.0, "text": "near"},
+        {"doc_id": "deep", "score": 0.4, "text": "far"},
+        {"doc_id": "synthetic", "score": 0.3, "text": "s", "distance": 1.0}])
+    out = d.search("on topic query")
+    assert [h["distance"] for h in out] == [0.62, None, 1.0]
+    json.dumps(out)    # /api/recall serialises it: None -> null
+
+
 def test_gate_respects_config_override(tmp_path, monkeypatch):
     monkeypatch.setenv("MCPBRAIN_HOME", str(tmp_path))
     (tmp_path / "config.json").write_text(json.dumps({"recall_max_distance": 1.2}))
