@@ -7,10 +7,12 @@ import pytest
 
 from mcpbrain.store import ReflowOrphanError, Store
 from mcpbrain.sync import queue
+from mcpbrain.sync.blocks import extraction_version
 from mcpbrain.sync.normalise import Chunk
 from mcpbrain.sync.reflow_handler import HALT_CURSOR, ReflowContext
 
 PDF = "application/pdf"
+XV = extraction_version(PDF)
 
 
 class _Emb:
@@ -87,7 +89,7 @@ def test_reflow_drive_unchanged_carries_over(tmp_path, monkeypatch):
     assert ctx.handle({"source": "reflow:drive", "ref_id": "F", "attempts": 0}) is None
     rows = s.owner_chunks(["gdrive-F-"])
     assert len(rows) == 1 and rows[0]["enriched"] == 1
-    assert rows[0]["metadata"]["extraction_version"] == 1
+    assert rows[0]["metadata"]["extraction_version"] == XV
     assert rows[0]["metadata"]["heading_trail"] == "Budget"
     assert s.reflow_stats()["owners_done"] == 1
 
@@ -149,7 +151,7 @@ def test_reflow_gmail_changed_pdf_attachment_still_carries_over(tmp_path, monkey
     s = _store(tmp_path); _seed_gmail_with_pdf(s)
     att = Chunk("gmail-M-att-0-0", "Table\nItem: Chairs; Cost: 120", "a1",
                 {"source_type": "gmail", "message_id": "M", "attachment_mime": PDF,
-                 "extraction_version": 1, "chunk_index": 0, "chunk_total": 1},
+                 "extraction_version": XV, "chunk_index": 0, "chunk_total": 1},
                 ["Item", "Cost", "Chairs", "120"])
     monkeypatch.setattr(gmail, "_fetch_one", lambda *a, **k: ({"id": "M"}, [att]))
     monkeypatch.setattr(nm, "normalise_gmail", lambda raw, **k: [_gmail_body()])
@@ -159,7 +161,7 @@ def test_reflow_gmail_changed_pdf_attachment_still_carries_over(tmp_path, monkey
     assert ctx.handle({"source": "reflow:gmail", "ref_id": "M", "attempts": 0}) is None
     assert "n" not in called                       # did NOT take the ordinary path
     rows = {r["doc_id"]: r for r in s.owner_chunks(["gmail-M-"])}
-    assert rows["gmail-M-att-0-0"]["metadata"]["extraction_version"] == 1
+    assert rows["gmail-M-att-0-0"]["metadata"]["extraction_version"] == XV
     assert rows["gmail-M-att-0-0"]["enriched"] == 1   # every cell was already extracted
 
 
@@ -264,7 +266,7 @@ def test_gmail_lineage_gone_backs_off_through_work_queue_then_gives_up(tmp_path,
     rows = s.owner_chunks(["gmail-M-"])
     assert len(rows) == 2                               # nothing deleted, ever
     assert all(r["metadata"]["reflow_skipped"] == "gave_up" for r in rows)
-    assert rows[1]["metadata"]["extraction_version"] == 1   # selector stops matching
+    assert rows[1]["metadata"]["extraction_version"] == XV   # selector stops matching
     assert s.reflow_stats()["queued"] == 0
 
 
@@ -503,7 +505,7 @@ def test_drive_404_stamps_source_gone(tmp_path):
     rows = s.owner_chunks(["gdrive-F-"])
     assert len(rows) == 2
     assert all(r["metadata"]["reflow_skipped"] == "source_gone"
-               and r["metadata"]["extraction_version"] == 1 for r in rows)
+               and r["metadata"]["extraction_version"] == XV for r in rows)
 
 
 def test_drive_transient_error_raises(tmp_path):
@@ -693,7 +695,7 @@ def test_gmail_with_attachment_never_takes_the_ordinary_handler(tmp_path, monkey
                   "split_version": 1, "chunk_index": 0, "chunk_total": 1})
     new_att = Chunk("gmail-M-att-0-0", "Invoice\n\nline 0 line 1", "a-new",
                     {"source_type": "gmail", "message_id": "M", "attachment_mime": PDF,
-                     "content_type": "email_attachment", "extraction_version": 1,
+                     "content_type": "email_attachment", "extraction_version": XV,
                      "chunk_index": 0, "chunk_total": 1}, ["Invoice line 0", "line 1"])
     monkeypatch.setattr(gmail, "_fetch_one", lambda *a, **k: ({"id": "M"}, [new_att]))
     monkeypatch.setattr(nm, "normalise_gmail", lambda raw, **k: [body])

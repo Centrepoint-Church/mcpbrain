@@ -6,7 +6,7 @@ from mcpbrain.sync.extractors import is_partial
 
 
 def test_extraction_versions():
-    assert extraction_version("application/pdf") == 1
+    assert extraction_version("application/pdf") == 2
     assert extraction_version("text/plain") == 0
 
 

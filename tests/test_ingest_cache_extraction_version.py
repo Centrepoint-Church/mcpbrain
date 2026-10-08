@@ -13,6 +13,7 @@ import struct
 from mcpbrain import ingest_cache
 from mcpbrain.org_contracts import CacheArtifact, CacheChunk, FleetPin, artifact_filename
 from mcpbrain.store import Store
+from mcpbrain.sync.blocks import extraction_version
 from tests.helpers.org_fleet import LocalDirFleetStorage
 
 PIN = FleetPin(embed_model="bge-small", dim=4, chunker_version="v1",
@@ -21,7 +22,8 @@ PIN = FleetPin(embed_model="bge-small", dim=4, chunker_version="v1",
 
 def test_block_mime_suffixes_version():
     base = ingest_cache.effective_chunker_version(PIN)
-    assert ingest_cache.effective_chunker_version(PIN, "application/pdf") == base + "+x1"
+    xv = extraction_version("application/pdf")
+    assert ingest_cache.effective_chunker_version(PIN, "application/pdf") == base + f"+x{xv}"
 
 
 def test_non_block_mime_unchanged():

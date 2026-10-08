@@ -19,6 +19,7 @@ from mcpbrain.chunking import SPLIT_VERSION
 from mcpbrain.org_contracts import (DRIVE_ID_META_KEY, CacheArtifact, CacheChunk,
                                     FleetPin, artifact_filename)
 from mcpbrain.store import Store
+from mcpbrain.sync.blocks import extraction_version
 from tests.helpers.org_fleet import LocalDirFleetStorage
 
 PIN = FleetPin(embed_model="bge-small", dim=4, chunker_version="v1",
@@ -72,7 +73,8 @@ def test_tabular_block_and_unknown_mimes_keep_their_fingerprint():
                  "application/vnd.ms-excel", "application/vnd.google-apps.spreadsheet",
                  "", "image/png"):
         assert ingest_cache.effective_chunker_version(PIN, mime) == base
-    assert ingest_cache.effective_chunker_version(PIN, PDF) == base + "+x1"
+    assert (ingest_cache.effective_chunker_version(PIN, PDF)
+            == base + f"+x{extraction_version(PDF)}")
 
 
 def test_split_mimes_are_derived_from_drive_routing():

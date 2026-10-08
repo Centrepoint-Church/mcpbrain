@@ -14,6 +14,7 @@ import pytest
 from mcpbrain import ingest_cache
 from mcpbrain.org_contracts import FleetPin
 from mcpbrain.store import ENRICH_LOGIC_VERSION, ReflowOrphanError, Store
+from mcpbrain.sync.blocks import extraction_version
 from tests.helpers.org_fleet import LocalDirFleetStorage
 
 PIN = FleetPin(embed_model="bge-small", dim=4, chunker_version="v1",
@@ -68,7 +69,7 @@ def _publish(tmp_path, fs, texts, modified=M, enriched=True, fid="F"):
             f"gdrive-{fid}-{i}", t, f"n{i}",
             {"source_type": "gdrive", "file_id": fid, "chunk_index": i,
              "chunk_total": len(texts), "drive_id": "D1", "mime_type": PDF,
-             "modified": modified, "extraction_version": 1},
+             "modified": modified, "extraction_version": extraction_version(PDF)},
             V, enriched=enriched, enriched_version=ENRICH_LOGIC_VERSION if enriched else 0)
     if enriched:
         extraction = {
@@ -133,7 +134,7 @@ def test_same_modified_import_carries_enrichment_and_provenance(tmp_path):
         nvec = db.execute("SELECT count(*) FROM vec_chunks").fetchone()[0]
         src = db.execute("SELECT source FROM reflow_owners WHERE owner='F'").fetchone()[0]
         ent = db.execute("SELECT 1 FROM entities WHERE name='Marcus Reyes'").fetchone()
-    assert meta["extraction_version"] == 1 and meta["drive_id"] == "D1"
+    assert meta["extraction_version"] == extraction_version(PDF) and meta["drive_id"] == "D1"
     assert nvec == 1
     assert src == "drive_import"
     assert ent is None

@@ -7,7 +7,7 @@ from docx import Document
 from mcpbrain.chunking import SPLIT_VERSION
 from mcpbrain.embed import contextual_prefix
 from mcpbrain.sync import drive
-from mcpbrain.sync.blocks import Heading, Paragraph
+from mcpbrain.sync.blocks import Heading, Paragraph, extraction_version
 from mcpbrain.sync.normalise import normalise_gmail
 
 DOCX = "application/vnd.openxmlformats-officedocument.wordprocessingml.document"
@@ -77,7 +77,8 @@ def test_docx_drive_file_uses_blocks_and_stamps_versions():
     chunks = drive.normalise_drive(meta, content.text, blocks=content.blocks)
     assert chunks[0].text == "Budget\n\nLine one\nLine two"
     md = chunks[0].metadata
-    assert md["extraction_version"] == 1 and md["split_version"] == SPLIT_VERSION
+    assert (md["extraction_version"] == extraction_version(DOCX)
+            and md["split_version"] == SPLIT_VERSION)
     assert md["heading_trail"] == "Budget"
     assert chunks[0].spans == ["Budget", "Line one\nLine two"]
 
@@ -117,7 +118,7 @@ def test_google_doc_default_path_is_docx():
     content = drive.fetch_content(_Svc(files), meta)
     assert files.export_calls == [DOCX]
     chunks = drive.normalise_drive(meta, content.text, blocks=content.blocks)
-    assert chunks[0].metadata["extraction_version"] == 1
+    assert chunks[0].metadata["extraction_version"] == extraction_version(GDOC)
     assert chunks[0].metadata["heading_trail"] == "Budget"
 
 
@@ -143,7 +144,7 @@ def test_rtf_drive_file_goes_through_decoder_not_verbatim():
     assert "\\rtf1" not in content.text and "Arial" not in content.text
     assert "Hello été" in content.text and "Second para" in content.text
     chunks = drive.normalise_drive(meta, content.text, blocks=content.blocks)
-    assert chunks[0].metadata["extraction_version"] == 1
+    assert chunks[0].metadata["extraction_version"] == extraction_version("application/rtf")
 
 
 def test_extract_blocks_from_rtf_happy_path():
@@ -213,7 +214,7 @@ def test_handle_drive_item_threads_blocks_through(tmp_path):
                             {"ref_id": "f1", "event": "upsert"})
     rows = s.owner_chunks(["gdrive-f1-"])
     assert rows and rows[0]["metadata"]["heading_trail"] == "Budget"
-    assert rows[0]["metadata"]["extraction_version"] == 1
+    assert rows[0]["metadata"]["extraction_version"] == extraction_version(DOCX)
 
 
 def test_cache_first_extract_passes_mime_to_both_try_imports(monkeypatch, tmp_path):
@@ -264,7 +265,8 @@ def test_pdf_attachment_uses_blocks_and_stamps_versions(monkeypatch):
     chunks = attachments.normalise_attachment(raw, part, b"%PDF")
     md = chunks[0].metadata
     assert chunks[0].doc_id == "gmail-M-att-0-0"
-    assert md["extraction_version"] == 1 and md["split_version"] == SPLIT_VERSION
+    assert (md["extraction_version"] == extraction_version("application/pdf")
+            and md["split_version"] == SPLIT_VERSION)
     assert md["heading_trail"] == "Invoice"
     assert chunks[0].spans == ["Invoice", "Chairs 120\nTables 80"]
 
@@ -275,7 +277,7 @@ def test_docx_attachment_real_bytes_and_non_block_attachment_stamp():
     chunks = attachments.normalise_attachment(
         raw, {"filename": "b.docx", "mime": DOCX, "index": 1}, _docx_bytes())
     assert chunks[0].text == "Budget\n\nLine one\nLine two"
-    assert chunks[0].metadata["extraction_version"] == 1
+    assert chunks[0].metadata["extraction_version"] == extraction_version(DOCX)
     txt = attachments.normalise_attachment(
         raw, {"filename": "n.txt", "mime": "text/plain", "index": 2}, b"Just a note")
     assert txt[0].metadata["split_version"] == SPLIT_VERSION
@@ -290,7 +292,7 @@ def test_rtf_attachment_is_supported():
         raw, {"filename": "n.rtf", "mime": "application/rtf", "index": 0},
         rb"{\rtf1\ansi Plan for the week\par}")
     assert chunks[0].text == "Plan for the week"
-    assert chunks[0].metadata["extraction_version"] == 1
+    assert chunks[0].metadata["extraction_version"] == extraction_version("application/rtf")
 
 
 def test_contextual_prefix_includes_heading_trail():

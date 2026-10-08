@@ -1,4 +1,7 @@
 from mcpbrain.store import Store
+from mcpbrain.sync.blocks import extraction_version as _extraction_version
+
+XV = _extraction_version("application/pdf")
 
 
 def _store(tmp_path):
@@ -16,7 +19,7 @@ def test_selector_rules(tmp_path):
     _c(s, "gdrive-A-0", source_type="gdrive", file_id="A", mime_type="application/pdf",
        chunk_total=1)                                            # rule 1 (single chunk still)
     _c(s, "gdrive-B-0", source_type="gdrive", file_id="B", mime_type="application/pdf",
-       chunk_total=1, extraction_version=1)                       # current -> skip
+       chunk_total=1, extraction_version=XV)                       # current -> skip
     _c(s, "gdrive-C-0", source_type="gdrive", file_id="C", mime_type="text/plain",
        chunk_total=2)                                            # rule 3
     _c(s, "gdrive-D-0", source_type="gdrive", file_id="D", mime_type="text/plain",

@@ -6,9 +6,11 @@ import pytest
 
 from mcpbrain import reflow
 from mcpbrain.store import Store
+from mcpbrain.sync.blocks import extraction_version
 
 PDF = "application/pdf"
 M = "2026-01-01T00:00:00Z"
+XV = extraction_version(PDF)
 
 
 def _store(tmp_path):
@@ -64,7 +66,7 @@ def test_needs_reflow_mirrors_the_selector(tmp_path):
     s = _store(tmp_path)
     _seed_pdf(s)
     assert reflow.needs_reflow(s.owner_chunks(["gdrive-F-"]))
-    _seed_pdf(s, fid="G", extra={"extraction_version": 1, "split_version": 1})
+    _seed_pdf(s, fid="G", extra={"extraction_version": XV, "split_version": 1})
     assert not reflow.needs_reflow(s.owner_chunks(["gdrive-G-"]))
 
 
@@ -94,7 +96,7 @@ def test_my_drive_changed_file_takes_todays_path(tmp_path, monkeypatch):
 def test_current_file_is_not_handed_off(tmp_path, monkeypatch):
     from mcpbrain.sync import drive
     s = _store(tmp_path)
-    _seed_pdf(s, extra={"extraction_version": 1, "split_version": 1})
+    _seed_pdf(s, extra={"extraction_version": XV, "split_version": 1})
     monkeypatch.setattr(drive, "fetch_content", lambda *a, **k: None)
     drive.handle_drive_item(_Svc(M), s, {"ref_id": "F", "event": "upsert"})
     assert not _queued(s)
@@ -105,7 +107,7 @@ def test_stamped_unchanged_file_is_left_alone(tmp_path, monkeypatch):
     unchanged source must still not be re-chunked destructively."""
     from mcpbrain.sync import drive
     s = _store(tmp_path)
-    _seed_pdf(s, extra={"extraction_version": 1, "split_version": 1,
+    _seed_pdf(s, extra={"extraction_version": XV, "split_version": 1,
                         "reflow_skipped": "gave_up"})
     before = _state(s)
     _no_fetch(monkeypatch)
@@ -277,7 +279,7 @@ def test_stamped_unchanged_file_gets_renamed_and_moved_metadata(tmp_path, monkey
     ordinary path's patch_chunk_metadata does for any content-unchanged file."""
     from mcpbrain.sync import drive
     s = _store(tmp_path)
-    _seed_pdf(s, extra={"extraction_version": 1, "split_version": 1,
+    _seed_pdf(s, extra={"extraction_version": XV, "split_version": 1,
                         "reflow_skipped": "gave_up", "file_name": "old.pdf",
                         "folder_path": "Old"})
     before = _state(s)
@@ -293,7 +295,7 @@ def test_stamped_unchanged_file_gets_renamed_and_moved_metadata(tmp_path, monkey
 def test_backfill_refreshes_a_stamped_owners_metadata(tmp_path, monkeypatch):
     from mcpbrain.sync import drive
     s = _store(tmp_path)
-    _seed_pdf(s, extra={"extraction_version": 1, "split_version": 1,
+    _seed_pdf(s, extra={"extraction_version": XV, "split_version": 1,
                         "reflow_skipped": "unsupported", "file_name": "old.pdf"})
     _no_fetch(monkeypatch)
     monkeypatch.setattr(drive, "folder_path", lambda *a, **k: "Board")

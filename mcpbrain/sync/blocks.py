@@ -19,13 +19,14 @@ from mcpbrain.sync import tabular
 # Bump a MIME's number whenever its extractor's OUTPUT changes; the reflow
 # selector re-chunks every owner of that MIME below the new number, and the
 # shared-drive ingest-cache fingerprint includes it.
+# 2 (2026-10-07): two-stream packing in render -- prose flows across tables.
 EXTRACTION_VERSIONS: dict[str, int] = {
-    "application/pdf": 1,
-    "application/vnd.openxmlformats-officedocument.wordprocessingml.document": 1,
-    "application/vnd.openxmlformats-officedocument.presentationml.presentation": 1,
-    "application/rtf": 1,
-    "application/vnd.google-apps.document": 1,
-    "application/vnd.google-apps.presentation": 1,
+    "application/pdf": 2,
+    "application/vnd.openxmlformats-officedocument.wordprocessingml.document": 2,
+    "application/vnd.openxmlformats-officedocument.presentationml.presentation": 2,
+    "application/rtf": 2,
+    "application/vnd.google-apps.document": 2,
+    "application/vnd.google-apps.presentation": 2,
 }
 
 TRAIL_SEP = " › "
@@ -266,10 +267,19 @@ def render(blocks, *, max_chars: int | None = None) -> list[Rendered]:
         elif isinstance(b, TableBlock):
             pieces.extend(_table_pieces(b, tr, max_chars))
 
-    out: list[Rendered] = []
-    cur: list[_Piece] = []
+    # Two open chunks (spec 2026-10-07 §3.1). Tables mid-document used to flush
+    # the open prose chunk, so prose either side of a table landed in different
+    # chunks and no single chunk matched a query spanning them (gold MRR
+    # 0.548 -> 0.464 after the extraction-fidelity reflow). Prose and table
+    # pieces now pack independently; a heading closes the open TABLE chunk so
+    # tables never pack across sections; emitted chunks are ordered by their
+    # first piece, so output order is still document order by chunk start.
+    out: list[tuple[int, Rendered]] = []
+    open_: dict[str, list[_Piece]] = {"prose": [], "table": []}
+    first: dict[str, int] = {}
 
-    def flush():
+    def flush(stream: str) -> None:
+        cur = open_[stream]
         if not cur:
             return
         text = "\n\n".join(p.text for p in cur)
@@ -277,17 +287,22 @@ def render(blocks, *, max_chars: int | None = None) -> list[Rendered]:
         tr = cur[0].trail
         if tr:
             meta["heading_trail"] = tr[:300]
-        out.append(Rendered(text, meta, [s for p in cur for s in p.spans]))
-        cur.clear()
+        out.append((first.pop(stream), Rendered(text, meta, [s for p in cur for s in p.spans])))
+        open_[stream] = []
 
-    for p in pieces:
+    for seq, p in enumerate(pieces):
+        stream = "table" if p.kind == "table" else "prose"
+        if p.kind == "heading":
+            flush("table")
+        cur = open_[stream]
         size = sum(len(x.text) + 2 for x in cur) + len(p.text)
-        # (A former third clause, `p.kind == "table" and ... and size >
-        # max_chars`, was subsumed by the first and has been removed: same
-        # output, by boolean absorption.)
         if cur and (size > max_chars
                     or (p.kind == "heading" and size - len(p.text) > max_chars // 2)):
-            flush()
-        cur.append(p)
-    flush()
-    return [r for r in out if has_content(r.text)]
+            flush(stream)
+        if not open_[stream]:
+            first[stream] = seq
+        open_[stream].append(p)
+    flush("prose")
+    flush("table")
+    out.sort(key=lambda t: t[0])
+    return [r for _, r in out if has_content(r.text)]
