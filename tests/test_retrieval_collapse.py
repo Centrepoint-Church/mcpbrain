@@ -87,3 +87,48 @@ def test_flag_defaults_on_and_honours_local_kill_switch(tmp_path):
     assert config.retrieval_collapse_documents_enabled(str(tmp_path)) is True
     config.write_config(str(tmp_path), {"retrieval_collapse_documents": False})
     assert config.retrieval_collapse_documents_enabled(str(tmp_path)) is False
+
+
+# -- digest-vs-raw horizon under the deep collapse pool (M1) -----------------
+
+def _pool_with_sibling_at(pos, n=60):
+    """A #1 digest for thread T, its only raw sibling at index `pos`, and
+    unrelated filler everywhere else."""
+    hits = [_hit("enriched-T", 1.0, thread_id="T")]
+    for i in range(1, n):
+        hits.append(_hit(f"gmail-X{i}-body-0", 1.0 - i / 100, thread_id=f"X{i}"))
+    hits[pos] = _hit("gmail-T1-body-0", 1.0 - pos / 100, thread_id="T")
+    return hits
+
+
+def test_digest_survives_when_its_only_raw_sibling_is_beyond_limit_x2():
+    from mcpbrain.retrieval import _dedupe_by_cluster
+    hits = _pool_with_sibling_at(40)              # limit 10 -> horizon 20
+    out = _dedupe_by_cluster(hits, limit=10)
+    assert out[0]["doc_id"] == "enriched-T"
+    # Collapse off (no limit) keeps today's whole-pool behaviour.
+    assert _dedupe_by_cluster(hits)[0]["doc_id"] != "enriched-T"
+
+
+def test_digest_is_still_dropped_when_its_raw_sibling_is_inside_limit_x2():
+    from mcpbrain.retrieval import _dedupe_by_cluster
+    hits = _pool_with_sibling_at(19)              # last position inside the horizon
+    out = _dedupe_by_cluster(hits, limit=10)
+    assert "enriched-T" not in [h["doc_id"] for h in out]
+    assert "gmail-T1-body-0" in [h["doc_id"] for h in out]
+
+
+def test_hybrid_search_threads_the_horizon_only_when_collapsing(tmp_path, monkeypatch):
+    from mcpbrain import retrieval
+    seen = []
+    real = retrieval._dedupe_by_cluster
+
+    def spy(hits, limit=None):
+        seen.append(limit)
+        return real(hits, limit)
+
+    monkeypatch.setattr(retrieval, "_dedupe_by_cluster", spy)
+    s = _seed(tmp_path)
+    hybrid_search(s, _Emb(), "budget", limit=5, collapse_documents=True)
+    hybrid_search(s, _Emb(), "budget", limit=5)
+    assert seen == [5, None]

@@ -274,7 +274,7 @@ def _cluster_key(chunk: dict) -> str | None:
     return key
 
 
-def _dedupe_by_cluster(hits: list[dict]) -> list[dict]:
+def _dedupe_by_cluster(hits: list[dict], limit: int | None = None) -> list[dict]:
     """Drop a digest (`enriched-<cluster>`) when its own cluster's raw chunk
     is also in the pool.
 
@@ -292,9 +292,17 @@ def _dedupe_by_cluster(hits: list[dict]) -> list[dict]:
     would be content loss, not duplicate removal. Two raw chunks of the same
     cluster are never collapsed against each other; only a digest-vs-raw
     pair is redundant.
+
+    `limit`, when given, bounds what counts as "in the pool" to the first
+    limit*2 positions — the horizon the pool had before collapse_documents
+    deepened it to limit*6. Without it, a raw sibling ranked far down the
+    deep pool (#40, say) would drop a #1 digest even though that sibling
+    never reaches the top `limit` — losing the thread from the results.
+    None (collapse off) keeps the whole pool, today's exact behaviour.
     """
+    horizon = hits if limit is None else hits[:limit * 2]
     raw_clusters: set[str] = set()
-    for hit in hits:
+    for hit in horizon:
         if hit.get("doc_id", "").startswith("enriched-"):
             continue
         key = _cluster_key(hit)
@@ -459,7 +467,8 @@ def hybrid_search(store, embedder, query: str, limit: int = 10, *,
     # BEFORE the content-hash dedup below: a digest's content_hash never
     # matches its raw sibling's (it's synthesized text, not a copy), so the
     # content-hash pass can't see this redundancy on its own.
-    candidates = _dedupe_by_cluster(candidates)
+    candidates = _dedupe_by_cluster(
+        candidates, limit=limit if collapse_documents else None)
 
     # Dedup by content_hash AFTER ranking (the order above must be preserved so
     # the best-ranked copy of a duplicate survives) and BEFORE the limit
