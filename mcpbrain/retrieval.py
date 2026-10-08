@@ -339,15 +339,25 @@ def _collapse_documents(hits: list[dict]) -> list[dict]:
     """Keep each document's best-ranked hit (MaxP: `hits` arrive best-first) and
     record how many of its chunks were in the pool as `doc_hits`. No score
     aggregation: summing or bonusing extra chunks lost on the gold set (long
-    threads and many-chunk documents crowd out the precise answer)."""
+    threads and many-chunk documents crowd out the precise answer).
+
+    Each incoming hit contributes its OWN `doc_hits` (default 1 for a raw,
+    not-yet-collapsed chunk) to the survivor's running total. This makes the
+    function safe to re-run on a list whose entries are themselves already
+    the collapsed survivors of separate pools — e.g. query_router.route
+    merging a primary search's collapsed results with a CRAG-rewrite
+    search's collapsed results: each side's `doc_hits` already counts that
+    side's pool, so the merged survivor's count is the sum of both, not a
+    re-count of 1 per entry."""
     kept: dict[str, dict] = {}
     out: list[dict] = []
     for h in hits:
         k = _document_key(h)
+        inc = h.get("doc_hits", 1)
         if k in kept:
-            kept[k]["doc_hits"] += 1
+            kept[k]["doc_hits"] += inc
             continue
-        h["doc_hits"] = 1
+        h["doc_hits"] = inc
         kept[k] = h
         out.append(h)
     return out

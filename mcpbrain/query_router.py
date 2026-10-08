@@ -29,7 +29,7 @@ import logging
 import re
 import subprocess
 
-from mcpbrain.retrieval import hybrid_search  # module-level so tests can patch it
+from mcpbrain.retrieval import _collapse_documents, hybrid_search  # module-level so tests can patch it
 
 log = logging.getLogger("mcpbrain.query_router")
 
@@ -315,6 +315,19 @@ def route(store, embedder, query: str, limit: int, *,
                     for r in secondary:
                         r["provenance"] = "crag_rewrite"
                     results = _merge_crag(results, secondary, limit)
+                    # The primary and CRAG-rewrite searches each ran their own
+                    # hybrid_search call, so when collapse_documents is on each
+                    # side already collapsed to one hit per document on its own
+                    # pool — but the two sides can still disagree on WHICH chunk
+                    # of the same document is best (e.g. primary's best chunk for
+                    # file F1 is gdrive-F1-0, the rewrite's is gdrive-F1-3), and
+                    # _merge_crag dedupes by raw doc_id, not by document, so both
+                    # would survive the merge. Re-collapsing here restores the
+                    # one-result-per-document guarantee for the routed path too;
+                    # _collapse_documents sums each side's own `doc_hits` rather
+                    # than re-counting, so the total still reflects both pools.
+                    if search_kwargs.get("collapse_documents"):
+                        results = _collapse_documents(results)
             except Exception:  # noqa: BLE001
                 pass
 

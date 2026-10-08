@@ -271,6 +271,56 @@ def test_route_crag_on_fires_on_low_score(tmp_path):
     assert result[0]["doc_id"] == "secondary"
 
 
+def test_route_crag_collapses_duplicate_document_when_flag_on(tmp_path):
+    """A primary and a CRAG-rewrite search can each pick a different best
+    chunk of the SAME document; with collapse_documents on, route() must
+    still return one row per document (spec 2026-10-07 §3.2)."""
+    home = _make_home(tmp_path, retrieval_crag=True, crag_min_score=0.50)
+    store = _make_store()
+    embedder = MagicMock()
+    primary = [{"doc_id": "gdrive-F1-0", "score": 0.3,
+                "metadata": {"file_id": "F1"}}]  # below threshold
+    secondary = [{"doc_id": "gdrive-F1-3", "score": 0.8,
+                  "metadata": {"file_id": "F1"}}]
+
+    call_count = [0]
+    def mock_hybrid(*a, **kw):
+        call_count[0] += 1
+        return primary if call_count[0] == 1 else secondary
+
+    with patch("mcpbrain.query_router.hybrid_search", side_effect=mock_hybrid):
+        with patch("mcpbrain.query_router._crag_rewrite", return_value="better query"):
+            result = route(store, embedder, "vague query", 5, home=home,
+                          collapse_documents=True)
+
+    assert len(result) == 1
+    assert result[0]["doc_id"] == "gdrive-F1-3"  # the higher-scored chunk survives
+
+
+def test_route_crag_keeps_both_chunks_when_collapse_off(tmp_path):
+    """Same shape as above, but collapse_documents off (today's behaviour):
+    both chunks of F1 survive the CRAG merge."""
+    home = _make_home(tmp_path, retrieval_crag=True, crag_min_score=0.50)
+    store = _make_store()
+    embedder = MagicMock()
+    primary = [{"doc_id": "gdrive-F1-0", "score": 0.3,
+                "metadata": {"file_id": "F1"}}]
+    secondary = [{"doc_id": "gdrive-F1-3", "score": 0.8,
+                  "metadata": {"file_id": "F1"}}]
+
+    call_count = [0]
+    def mock_hybrid(*a, **kw):
+        call_count[0] += 1
+        return primary if call_count[0] == 1 else secondary
+
+    with patch("mcpbrain.query_router.hybrid_search", side_effect=mock_hybrid):
+        with patch("mcpbrain.query_router._crag_rewrite", return_value="better query"):
+            result = route(store, embedder, "vague query", 5, home=home)
+
+    assert len(result) == 2
+    assert {r["doc_id"] for r in result} == {"gdrive-F1-0", "gdrive-F1-3"}
+
+
 def test_route_crag_skips_on_high_score(tmp_path):
     home = _make_home(tmp_path, retrieval_crag=True, crag_min_score=0.50)
     store = _make_store()
