@@ -146,3 +146,34 @@ def test_hybrid_search_connection_count_is_bounded(tmp_path, monkeypatch):
 
     assert len(out) > 0
     assert calls["n"] <= 6, f"expected a bounded connection count, got {calls['n']}"
+
+
+def test_pre_phase2_schema_falls_back_like_get_chunk(tmp_path):
+    """A raw `chunks` table with neither memory_tier nor salience (the
+    upgrade -> init() migration window): get_chunks degrades exactly as
+    get_chunk / get_chunk_salience do -- memory_tier "" and salience 0.0 --
+    instead of raising."""
+    import json
+    import sqlite3
+    path = tmp_path / "old.sqlite3"
+    raw = sqlite3.connect(path)
+    raw.execute("CREATE TABLE chunks (doc_id TEXT PRIMARY KEY, text TEXT,"
+                " metadata TEXT, content_hash TEXT)")
+    raw.executemany("INSERT INTO chunks VALUES (?,?,?,?)",
+                    [("d1", "first", json.dumps({"a": 1}), "h1"),
+                     ("d2", "second", json.dumps({}), "h2")])
+    raw.commit()
+    raw.close()
+    s = Store(path, dim=4)          # deliberately NOT init(): no migration
+
+    got = s.get_chunks(["d1", "d2", "missing"], with_salience=True)
+
+    assert set(got) == {"d1", "d2"}
+    for d in ("d1", "d2"):
+        assert got[d]["memory_tier"] == ""
+        assert got[d]["salience"] == 0.0 == s.get_chunk_salience(d)
+        assert {k: v for k, v in got[d].items() if k != "salience"} == s.get_chunk(d)
+    assert s.get_chunks(["d1"]) == {"d1": s.get_chunk("d1")}
+    # The fallbacks really ran: nothing migrated the table behind our back.
+    cols = {r[1] for r in sqlite3.connect(path).execute("PRAGMA table_info(chunks)")}
+    assert not cols & {"memory_tier", "salience"}
