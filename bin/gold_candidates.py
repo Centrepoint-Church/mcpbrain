@@ -1,0 +1,194 @@
+#!/usr/bin/env python3
+"""Draft gold-retrieval-set candidates for the owner to review.
+
+mcpbrain measures retrieval quality against hand-curated "gold" cases: a query
+plus the chunk ids that should come back. This tool proposes new candidates
+from documents that already have several chunks, so the owner can write a
+query that spans two parts of the same document -- it never invents a query
+itself, and it never scores anything.
+
+    python bin/gold_candidates.py draft --store <path> --out <yaml> --n 20
+    python bin/gold_candidates.py verify --store <path> <yaml>
+
+This file is PUBLIC and holds no data -- it only reads a store at a path it is
+given and writes/reads a YAML file at a path it is given. Gold files are
+private tenant data (see tests/eval/run_eval.py::load_gold_cases), so `draft`
+refuses to write anywhere inside this repository: the one thing it must never
+do is leave a copy of someone's content where a public clone would pick it up.
+
+`--store` is opened read-only; this tool never writes to the brain store. The
+live store is normally daemon-owned -- do not run this against it while the
+daemon is also writing (see CLAUDE.md's store-corruption incident).
+"""
+from __future__ import annotations
+
+import argparse
+import json
+import re
+import sys
+from pathlib import Path
+
+sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+
+from mcpbrain.store import Store, store_dim_from_path  # noqa: E402
+
+_REPO_ROOT = Path(__file__).resolve().parents[1]
+_DEFAULT_DIM = 384
+
+# A chunk's doc_id is <owner>-<...>-<i>; stripping the trailing index groups
+# chunks back to their parent document. Mirrors tests/eval/run_eval.py's
+# gold_eval._doc_key, which relies on the same convention.
+_TRAILING_INDEX_RE = re.compile(r"-(\d+)$")
+
+
+def _doc_root(doc_id: str) -> str:
+    return _TRAILING_INDEX_RE.sub("", doc_id)
+
+
+def _suffix_index(doc_id: str) -> int:
+    m = _TRAILING_INDEX_RE.search(doc_id)
+    return int(m.group(1)) if m else 0
+
+
+def _ordered_group(doc_ids: list[tuple[str, dict]]) -> list[str]:
+    """Deterministic order within one document's chunks, so a re-run picks the
+    same two ids: metadata.chunk_index when a chunk carries one (the
+    authoritative logical order), else the doc_id's own trailing index."""
+    def key(item: tuple[str, dict]):
+        doc_id, meta = item
+        idx = meta.get("chunk_index")
+        if idx is None:
+            idx = _suffix_index(doc_id)
+        return (int(idx), doc_id)
+    return [doc_id for doc_id, _meta in sorted(doc_ids, key=key)]
+
+
+def _snippet(text: str | None) -> str:
+    return (text or "")[:120]
+
+
+def _refuse_if_in_repo(out_path: Path) -> None:
+    """Gold candidates are private tenant data; never let one land where a
+    public clone of this repo would pick it up."""
+    resolved = out_path.resolve()
+    if resolved == _REPO_ROOT or _REPO_ROOT in resolved.parents:
+        print(f"refusing to write {resolved}: it is inside this repo ({_REPO_ROOT}); "
+              "gold candidates are private tenant data and must be written elsewhere "
+              "(e.g. ../mcpbrain-tenant/eval/)", file=sys.stderr)
+        raise SystemExit(2)
+
+
+def _resolve_dim(path: Path, dim: int | None) -> int:
+    if dim is not None:
+        return dim
+    return store_dim_from_path(path) or _DEFAULT_DIM
+
+
+def _open_store(store_path: str, dim: int | None) -> Store:
+    path = Path(store_path)
+    return Store(path, dim=_resolve_dim(path, dim), read_only=True)
+
+
+def _chunk_groups(store: Store) -> dict[str, list[tuple[str, dict]]]:
+    """{doc_root: [(doc_id, metadata), ...]} for every chunk in the store."""
+    groups: dict[str, list[tuple[str, dict]]] = {}
+    with store._connect() as db:
+        for row in db.execute("SELECT doc_id, metadata FROM chunks"):
+            meta = json.loads(row["metadata"]) if row["metadata"] else {}
+            groups.setdefault(_doc_root(row["doc_id"]), []).append((row["doc_id"], meta))
+    return groups
+
+
+def draft(store_path: str, out_path: str, n: int, *, dim: int | None = None) -> list[dict]:
+    """Write up to `n` candidate stubs to out_path (YAML list), one per
+    multi-chunk document (>= 3 chunks, any source -- see the task brief's
+    ruling: cold/tabular chunks are not excluded, to keep selection simple and
+    deterministic). Each stub has an EMPTY query for the owner to write.
+
+    Deterministic: documents are visited in sorted doc-root order, and the two
+    expected_chunk_ids are the first and last chunk of the document in its own
+    logical order -- a re-run against an unchanged store yields identical
+    output.
+    """
+    out = Path(out_path)
+    _refuse_if_in_repo(out)
+
+    store = _open_store(store_path, dim)
+    groups = _chunk_groups(store)
+
+    candidates: list[dict] = []
+    for root in sorted(groups):
+        members = groups[root]
+        if len(members) < 3:
+            continue
+        ordered = _ordered_group(members)
+        first_id, last_id = ordered[0], ordered[-1]
+        first_chunk = store.get_chunk(first_id)
+        last_chunk = store.get_chunk(last_id)
+        candidates.append({
+            "id": f"cand_{root}",
+            "query": "",
+            "expected_chunk_ids": [first_id, last_id],
+            "notes": f"{_snippet(first_chunk['text'] if first_chunk else '')} || "
+                     f"{_snippet(last_chunk['text'] if last_chunk else '')}",
+        })
+        if len(candidates) >= n:
+            break
+
+    import yaml  # pyyaml -- dev dependency, same as tests/eval/run_eval.py
+    out.parent.mkdir(parents=True, exist_ok=True)
+    out.write_text(yaml.safe_dump(candidates, sort_keys=False, allow_unicode=True))
+    return candidates
+
+
+def verify(store_path: str, yaml_path: str, *, dim: int | None = None) -> tuple[int, int]:
+    """(present, total) -- how many expected_chunk_ids across every case in
+    yaml_path still have a chunk row in the store. Read-only, no writes."""
+    import yaml  # pyyaml -- dev dependency
+
+    store = _open_store(store_path, dim)
+    cases = yaml.safe_load(Path(yaml_path).read_text()) or []
+    present = total = 0
+    for case in cases:
+        for doc_id in case.get("expected_chunk_ids") or []:
+            total += 1
+            if store.get_chunk(doc_id) is not None:
+                present += 1
+    return present, total
+
+
+def main(argv=None) -> int:
+    ap = argparse.ArgumentParser(
+        prog="gold_candidates",
+        description="Draft gold-retrieval-set candidates for owner review, "
+                     "or verify an existing candidates/gold YAML against a store.")
+    sub = ap.add_subparsers(dest="cmd", required=True)
+
+    d = sub.add_parser("draft", help="propose candidates from multi-chunk documents")
+    d.add_argument("--store", required=True, help="path to the sqlite store (opened read-only)")
+    d.add_argument("--out", required=True,
+                   help="output YAML path -- must be OUTSIDE this repo (private tenant data)")
+    d.add_argument("--n", type=int, default=20, help="max candidates to draft (default: 20)")
+    d.add_argument("--dim", type=int, default=None,
+                   help="embedding dim; default: read from the store, else 384")
+
+    v = sub.add_parser("verify", help="report how many expected_chunk_ids still exist")
+    v.add_argument("--store", required=True, help="path to the sqlite store (opened read-only)")
+    v.add_argument("yaml_path", help="candidates/gold YAML file to check")
+    v.add_argument("--dim", type=int, default=None,
+                   help="embedding dim; default: read from the store, else 384")
+
+    ns = ap.parse_args(argv)
+
+    if ns.cmd == "draft":
+        candidates = draft(ns.store, ns.out, ns.n, dim=ns.dim)
+        print(f"wrote {len(candidates)} candidate(s) to {ns.out}")
+        return 0
+
+    present, total = verify(ns.store, ns.yaml_path, dim=ns.dim)
+    print(f"{present}/{total} expected_chunk_ids present in {ns.store}")
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())
