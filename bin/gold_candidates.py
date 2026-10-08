@@ -23,6 +23,7 @@ daemon is also writing (see CLAUDE.md's store-corruption incident).
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 import os
 import re
@@ -32,6 +33,7 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from mcpbrain.store import Store, store_dim_from_path  # noqa: E402
+from mcpbrain.sync.blocks import EXTRACTION_VERSIONS  # noqa: E402
 
 _REPO_ROOT = Path(__file__).resolve().parents[1]
 _DEFAULT_DIM = 384
@@ -147,41 +149,115 @@ def _chunk_groups(store: Store) -> dict[str, list[tuple[str, dict]]]:
     return groups
 
 
-def draft(store_path: str, out_path: str, n: int, *, dim: int | None = None) -> list[dict]:
-    """Write up to `n` candidate stubs to out_path (YAML list), one per
-    multi-chunk document (>= 3 chunks, any source -- see the task brief's
-    ruling: cold/tabular chunks are not excluded, to keep selection simple and
-    deterministic). Each stub has an EMPTY query for the owner to write.
+def _doc_kind(root: str) -> str | None:
+    """"drive" | "gmail" | None (not a document kind this tool drafts from).
 
-    Deterministic: documents are visited in sorted doc-root order, and the two
-    expected_chunk_ids are the first and last chunk of the document in its own
-    logical order -- a re-run against an unchanged store yields identical
-    output.
+    Only an ORIGINAL Drive file or Gmail message makes a useful gold case --
+    a query the owner writes should name real content the owner recognises.
+    Everything else a live store also chunks (`enriched-<thread>` synthesized
+    digests, `anarlog-` meeting notes, `cal-` calendar events, `note-`
+    captures) is explicitly excluded, never just left to fail some other
+    filter -- a live run that drafted 20 enriched-/anarlog-/cal- candidates
+    and zero real documents is exactly the failure this guards against.
+
+    A Gmail message's root must end in `-body`: attachment chunks
+    (`gmail-<id>-att-<idx>-<i>`) strip to `gmail-<id>-att-<idx>`, which does
+    not match, so they are excluded the same way regardless of chunk count.
+    """
+    if root.startswith("gdrive-"):
+        return "drive"
+    if root.startswith("gmail-") and root.endswith("-body"):
+        return "gmail"
+    return None
+
+
+def _qualifying_documents(store: Store) -> list[dict]:
+    """[{root, kind, members}] for every Drive file in a block MIME (per
+    mcpbrain.sync.blocks.EXTRACTION_VERSIONS) with >= 3 chunks, or Gmail
+    message with >= 2 body chunks. members is the group's (doc_id, metadata)
+    pairs, as returned by _chunk_groups."""
+    out: list[dict] = []
+    for root, members in _chunk_groups(store).items():
+        kind = _doc_kind(root)
+        if kind is None:
+            continue
+        if kind == "drive":
+            if len(members) < 3:
+                continue
+            mime = next((meta.get("mime_type") for _doc_id, meta in members
+                         if meta.get("mime_type")), None)
+            if mime not in EXTRACTION_VERSIONS:
+                continue
+        elif len(members) < 2:  # kind == "gmail"
+            continue
+        out.append({"root": root, "kind": kind, "members": members})
+    return out
+
+
+def _hash_key(root: str) -> str:
+    """sha1 of the doc root -- the ordering key for both picking and listing
+    candidates, so a re-run against an unchanged store is byte-identical and
+    the spread across the corpus doesn't just track insertion/alphabetical
+    order."""
+    return hashlib.sha1(root.encode("utf-8")).hexdigest()
+
+
+def _select_candidates(documents: list[dict], n: int) -> list[dict]:
+    """Up to `n` documents, ordered by sha1(doc_root). When both Drive and
+    Gmail documents are available, aims for about half of each (n may be
+    odd -- the extra slot, and any shortfall in one kind, goes to whichever
+    kind still has supply) rather than letting one kind crowd out the other."""
+    by_kind: dict[str, list[dict]] = {"drive": [], "gmail": []}
+    for doc in documents:
+        by_kind[doc["kind"]].append(doc)
+    for pool in by_kind.values():
+        pool.sort(key=lambda d: _hash_key(d["root"]))
+
+    take = {"drive": min(n - n // 2, len(by_kind["drive"])),
+            "gmail": min(n // 2, len(by_kind["gmail"]))}
+    remaining = n - take["drive"] - take["gmail"]
+    for kind in sorted(by_kind, key=lambda k: len(by_kind[k]) - take[k], reverse=True):
+        if remaining <= 0:
+            break
+        extra = min(remaining, len(by_kind[kind]) - take[kind])
+        take[kind] += extra
+        remaining -= extra
+
+    selected = by_kind["drive"][:take["drive"]] + by_kind["gmail"][:take["gmail"]]
+    selected.sort(key=lambda d: _hash_key(d["root"]))
+    return selected
+
+
+def draft(store_path: str, out_path: str, n: int, *, dim: int | None = None) -> list[dict]:
+    """Write up to `n` candidate stubs to out_path (YAML list): one per
+    qualifying Drive file or Gmail message (see _qualifying_documents) --
+    never an enriched-/anarlog-/cal-/note- document or a non-block-MIME Drive
+    file. Each stub has an EMPTY query for the owner to write.
+
+    Deterministic: candidates are selected and ordered by sha1(doc_root) (see
+    _select_candidates), and the two expected_chunk_ids are the first and
+    last chunk of the document in its own logical order -- a re-run against
+    an unchanged store yields identical output.
     """
     out = Path(out_path)
     _refuse_if_in_repo(out)
 
     store = _open_store(store_path, dim)
-    groups = _chunk_groups(store)
+    selected = _select_candidates(_qualifying_documents(store), n)
 
     candidates: list[dict] = []
-    for root in sorted(groups):
-        members = groups[root]
-        if len(members) < 3:
-            continue
-        ordered = _ordered_group(members)
+    for doc in selected:
+        ordered = _ordered_group(doc["members"])
         first_id, last_id = ordered[0], ordered[-1]
         first_chunk = store.get_chunk(first_id)
         last_chunk = store.get_chunk(last_id)
         candidates.append({
-            "id": f"cand_{root}",
+            "id": f"cand_{doc['root']}",
             "query": "",
             "expected_chunk_ids": [first_id, last_id],
             "notes": f"{_snippet(first_chunk['text'] if first_chunk else '')} || "
                      f"{_snippet(last_chunk['text'] if last_chunk else '')}",
         })
-        if len(candidates) >= n:
-            break
 
     import yaml  # pyyaml -- dev dependency, same as tests/eval/run_eval.py
     out.parent.mkdir(parents=True, exist_ok=True)
