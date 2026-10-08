@@ -334,7 +334,60 @@ say "call brain_owner_context". **28 tools** after release (was 27).
   `sse-starlette` resolves 3.5.0 for the fleet vs 3.4.4 in the lock — only mcp's
   SSE transport uses it (mcpbrain serves stdio), and the live stdio call above ran
   on 3.5.0. **The Windows HARDWARE QA GATE remains OPEN.**
-- **Current state (2026-10-06): the four version files (+ `uv.lock`) are at
+- **Current state (2026-10-08): the four version files (+ `uv.lock`) are at
+  `0.7.140`, RELEASED** — source `0edca490`, gh-pages `6181bfac`, plugin `34c291c`;
+  index serves only `mcpbrain-0.7.140-py3-none-any.whl`, `install.ps1` 200. Fleet
+  resolves mcp/mcp-types 2.3.0, **fastembed 0.9.0** (drifted from 0.8.1 — embeddings
+  verified BIT-IDENTICAL to 0.8.1 on sample passages and a query, max diff 0.0),
+  google-auth 2.61.0, pymupdf 1.28.2, httplib2 0.32.0; full suite under exactly that
+  set **4514 passed, 1 failed** — the failure is
+  `test_gold_three_axis_does_not_regress_on_production_path` against the LIVE store
+  (three-axis MRR 0.439 vs relevance-only 0.446 without collapse) and it fails
+  IDENTICALLY on the pre-branch code `b65bf521`: live-data drift, not this release.
+  **OPEN: the three-axis weights no longer beat relevance-only on today's store** —
+  investigate separately (do not loosen that test's epsilon).
+  Installed from the published index (bootout → reinstall → clear `__pycache__` →
+  bootstrap); `/api/status` 0.7.140; live stdio `brain_search` OK, 28 tools.
+  **0.7.140 = table flow + document collapse** (spec
+  `docs/superpowers/specs/2026-10-07-table-flow-and-document-collapse-design.md`),
+  which fixes the extraction-fidelity gold failure (live MRR 0.548 pre-drain → 0.464
+  after). **Cause:** the new block extractors keep tables in true document order, and
+  a table mid-document flushed the open prose chunk, splitting related prose across
+  chunks. **Fix:** `blocks.render` packs prose and table pieces in two streams (prose
+  flows across tables; tables pack together within a section; a heading closes the
+  table chunk; chunks ordered by first piece) → `EXTRACTION_VERSIONS` 1 → 2 for all
+  six block MIMEs, i.e. **one more reflow of every Word/Google-Doc/PDF/PPTX/RTF owner
+  on every install** (10,426 Drive files / 67,446 chunks here; enrichment carries
+  over). Plus **one search result per document** (`hybrid_search(collapse_documents)`,
+  MaxP — best chunk represents the document, `doc_hits` counts the rest, 6× fetch
+  depth; Gmail grouped by MESSAGE, never thread; fleet flag
+  `retrieval_collapse_documents` default ON, local False = kill switch; re-collapsed
+  after the CRAG merge). Summed/bonus aggregation was measured and LOST — do not add
+  it. `Store.get_chunks` batches the candidate fetch (latency on/off p95 1.04-1.05×;
+  per-candidate connections had made it 1.5-1.65×). `+x<N>` cache artifacts now carry
+  the same stamp guard `+s` got in 0.7.138 (`_carries_extraction_stamp`). New attended
+  `bin/gold_candidates.py` drafts multi-part gold candidates into the PRIVATE tenant
+  repo (inode-based guard refuses any path inside this repo — a string check was
+  bypassable by case on APFS).
+  **Measured before release** (fair 344-file competition set re-rendered on a store
+  copy, n=20 per set, MRR / recall@10): main 0.506/0.85 live → **0.543/0.90**; ops
+  0.283/0.40 → **0.315/0.40**. Dry run (250 owners): 243 carried, 7 deferred, 0
+  failed, no new orphans, integrity ok, nothing published.
+  **Known effects, not defects:** `unequal_lineages` / doctor's "owner(s) whose text
+  differed" reads HIGH during this reflow (chunks are no longer contiguous in source
+  order); 8.7% of re-rendered chunks are under 600 chars (whole small tables standing
+  alone — accepted, collapse prevents flooding); injected prompt context shows one
+  window per large file (collapse) instead of several; `brain_search` `distance` is
+  `null` for hits the KNN window never measured; `+x1` artifacts stay in the fleet
+  folder until cleaned by hand.
+  **Binding gold bar CHANGED by the owner (2026-10-08):** at backlog 0, recall@10 ≥
+  0.850 AND MRR no worse than the pre-drain snapshot measured the same day on the
+  same harness (0.548 on 2026-10-06) by more than one rank step; no ops regression.
+  The fixed 0.546 floor is retired (n=20: one rank step = 0.01-0.05). 20 draft gold
+  candidates (10 Drive, 10 Gmail) await owner queries in
+  `mcpbrain-tenant/eval/candidates-2026-10.yaml`.
+  **The Windows HARDWARE QA GATE remains OPEN.**
+- **Earlier (2026-10-06): the four version files (+ `uv.lock`) are at
   `0.7.139`, RELEASED** — source `f15ed121`, gh-pages `d8763cee`, plugin `5de829d`;
   index serves only `mcpbrain-0.7.139-py3-none-any.whl`, `install.ps1` 200. Fleet
   resolves mcp/mcp-types 2.3.0, **google-auth 2.60.0** (drifted again), fastembed
