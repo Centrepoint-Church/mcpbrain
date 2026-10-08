@@ -3318,6 +3318,77 @@ class Store:
                 "content_hash": r["content_hash"],
             }
 
+    def get_chunks(self, doc_ids: list[str], *,
+                   with_salience: bool = False) -> dict[str, dict]:
+        """Batched get_chunk (+ optional get_chunk_salience): one connection,
+        not one per id.
+
+        hybrid_search's collapse_documents candidate pool is limit*6 per
+        ranker (~90 ids) and used to call get_chunk/get_chunk_salience once
+        PER CANDIDATE -- each a separate SQLite connection open. Measured:
+        6.6k -> 18.2k connection opens over 50 queries, pushing p95 latency
+        1.5-1.65x over the collapse-off figure (gate <= 1.25x). This fetches
+        the whole pool in one connection, batched at 500 ids per IN (...) to
+        stay well under SQLite's host-parameter ceiling (999 on older builds).
+
+        Each returned dict is EXACTLY what get_chunk(doc_id) returns for that
+        id today -- same keys, same metadata decoding, same memory_tier
+        fallback -- plus "salience" (get_chunk_salience's value, 0.0 when
+        NULL/unscored) when with_salience is True. A doc_id with no row is
+        simply absent from the result, matching get_chunk's None contract.
+
+        Replicates both single-id methods' sqlite3.OperationalError fallback
+        for a pre-Phase-2 schema (memory_tier / salience columns not yet
+        ALTERed in) -- a read-only handle can see that schema in the window
+        between a wheel upgrade and the daemon's init() migration, and recall
+        must not crash: missing memory_tier reads as '', missing salience
+        reads as 0.0, for every id in that batch.
+        """
+        ids = list(dict.fromkeys(doc_ids))  # de-dup, preserve caller order
+        if not ids:
+            return {}
+        out: dict[str, dict] = {}
+        with self._connect() as db:
+            for batch in _chunked(ids, 500):
+                qs = ",".join("?" * len(batch))
+                try:
+                    rows = db.execute(
+                        "SELECT doc_id,text,metadata,memory_tier,content_hash "
+                        f"FROM chunks WHERE doc_id IN ({qs})",
+                        batch).fetchall()
+                    has_tier = True
+                except sqlite3.OperationalError:
+                    # Pre-Phase-2 schema: no memory_tier column yet.
+                    rows = db.execute(
+                        "SELECT doc_id,text,metadata,content_hash "
+                        f"FROM chunks WHERE doc_id IN ({qs})",
+                        batch).fetchall()
+                    has_tier = False
+                for r in rows:
+                    out[r["doc_id"]] = {
+                        "doc_id": r["doc_id"],
+                        "text": r["text"],
+                        "metadata": json.loads(r["metadata"]),
+                        "memory_tier": (r["memory_tier"] or "") if has_tier else "",
+                        "content_hash": r["content_hash"],
+                    }
+            if with_salience:
+                for batch in _chunked(ids, 500):
+                    qs = ",".join("?" * len(batch))
+                    try:
+                        srows = db.execute(
+                            "SELECT doc_id, salience FROM chunks "
+                            f"WHERE doc_id IN ({qs})", batch).fetchall()
+                    except sqlite3.OperationalError:
+                        # Pre-Phase-2 schema: no salience column yet.
+                        continue
+                    for r in srows:
+                        if r["doc_id"] in out:
+                            out[r["doc_id"]]["salience"] = float(r["salience"] or 0.0)
+                for c in out.values():
+                    c.setdefault("salience", 0.0)
+        return out
+
     # Bi-temporal back-pointers: which row superseded this one. Both columns
     # declare REFERENCES ... ON DELETE SET NULL, so the FK keeps them honest
     # going forward -- but that only reaches an EXISTING store through a

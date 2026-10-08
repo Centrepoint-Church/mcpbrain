@@ -405,9 +405,17 @@ def hybrid_search(store, embedder, query: str, limit: int = 10, *,
     use_three_axis = (recency_weight > 0.0 or importance_weight > 0.0
                       or decay_weight > 0.0)
 
+    # Batched: one connection for the whole candidate pool instead of two
+    # get_chunk/get_chunk_salience calls (two connection opens) PER candidate.
+    # collapse_documents's limit*6 pool made this the dominant latency cost
+    # (6.6k -> 18.2k connection opens over 50 queries; see store.get_chunks).
+    # Skip the call entirely when there's nothing to fetch (no-op either way,
+    # but spares a minimal fake Store in tests from implementing get_chunks).
+    chunks = store.get_chunks(ordered, with_salience=use_three_axis) if ordered else {}
+
     candidates = []
     for d in ordered:
-        c = store.get_chunk(d)
+        c = chunks.get(d)
         if not c:
             continue
         meta = c.get("metadata") or {}
@@ -422,8 +430,11 @@ def hybrid_search(store, embedder, query: str, limit: int = 10, *,
             continue
         rrf_score = (fused[d] / top) if top > 0 else 0.0
         c["score"] = rrf_score
-        # Attach salience so _three_axis_boost can read it without a second DB call.
-        c["salience"] = store.get_chunk_salience(d) if use_three_axis else 0.0
+        # get_chunks only attaches salience when with_salience=True; keep the
+        # same "0.0 when not three-axis" contract get_chunk_salience's
+        # conditional call used to produce.
+        if not use_three_axis:
+            c["salience"] = 0.0
         candidates.append(c)
 
     if use_three_axis and candidates:
