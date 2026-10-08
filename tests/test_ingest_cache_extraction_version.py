@@ -49,7 +49,8 @@ def test_pdf_artifact_round_trips_under_the_suffixed_fingerprint(tmp_path):
     A.import_cached_chunk(
         doc_id, "some pdf text", "ch0",
         {"source_type": "gdrive", "file_id": "F1", "chunk_index": 0,
-         "drive_id": "D1", "mime_type": "application/pdf"},
+         "drive_id": "D1", "mime_type": "application/pdf",
+         "extraction_version": extraction_version("application/pdf")},
         [0.1, 0.2, 0.3, 0.4])
 
     assert ingest_cache.publish_file(A, fs, "D1", "F1", "vh1", PIN) is True
@@ -89,7 +90,7 @@ def _b64(vec):
 
 
 def _write_raw_artifact(fs, file_id, content_hash, *, chunker, mime_type="", dim=4,
-                        embed_model="bge-small", published_at="2026-07-03"):
+                        embed_model="bge-small", published_at="2026-07-03", extra=None):
     """Write a CacheArtifact straight to fleet storage, bypassing publish_file,
     to simulate an artifact a PEER install left behind under a specific
     (possibly stale/pre-change) fingerprint — exactly what bootstrap_drive and
@@ -97,6 +98,7 @@ def _write_raw_artifact(fs, file_id, content_hash, *, chunker, mime_type="", dim
     meta = {"source_type": "gdrive", "file_id": file_id, "chunk_index": 0}
     if mime_type:
         meta["mime_type"] = mime_type
+    meta.update(extra or {})
     chunks = (CacheChunk(idx=0, text="pdf text", embedding_b64=_b64([0.1, 0.2, 0.3, 0.4]),
                         metadata=meta),)
     art = CacheArtifact(file_id=file_id, content_hash=content_hash,
@@ -119,7 +121,8 @@ def test_bootstrap_drive_imports_a_suffixed_pdf_artifact(tmp_path):
     A.import_cached_chunk(
         "gdrive-F1-0", "pdf text", "ch0",
         {"source_type": "gdrive", "file_id": "F1", "chunk_index": 0,
-         "drive_id": "D1", "mime_type": "application/pdf"},
+         "drive_id": "D1", "mime_type": "application/pdf",
+         "extraction_version": extraction_version("application/pdf")},
         [0.1, 0.2, 0.3, 0.4])
     assert ingest_cache.publish_file(A, fs, "D1", "F1", "vh1", PIN) is True
 
@@ -160,7 +163,8 @@ def test_gc_superseded_collects_a_stale_pdf_version(tmp_path):
     A1.import_cached_chunk(
         "gdrive-F1-0", "v1 text", "ch0",
         {"source_type": "gdrive", "file_id": "F1", "chunk_index": 0,
-         "drive_id": "D1", "mime_type": "application/pdf"},
+         "drive_id": "D1", "mime_type": "application/pdf",
+         "extraction_version": extraction_version("application/pdf")},
         [0.1, 0.2, 0.3, 0.4])
     assert ingest_cache.publish_file(A1, fs, "D1", "F1", "vh1", PIN, skip_gc=True) is True
 
@@ -168,7 +172,8 @@ def test_gc_superseded_collects_a_stale_pdf_version(tmp_path):
     A2.import_cached_chunk(
         "gdrive-F1-0", "v2 text", "ch0b",
         {"source_type": "gdrive", "file_id": "F1", "chunk_index": 0,
-         "drive_id": "D1", "mime_type": "application/pdf"},
+         "drive_id": "D1", "mime_type": "application/pdf",
+         "extraction_version": extraction_version("application/pdf")},
         [0.5, 0.6, 0.7, 0.8])
     assert ingest_cache.publish_file(A2, fs, "D1", "F1", "vh2", PIN, skip_gc=True) is True
 
@@ -189,7 +194,8 @@ def test_gc_superseded_batch_collects_a_stale_pdf_version(tmp_path):
     A1.import_cached_chunk(
         "gdrive-F1-0", "v1 text", "ch0",
         {"source_type": "gdrive", "file_id": "F1", "chunk_index": 0,
-         "drive_id": "D1", "mime_type": "application/pdf"},
+         "drive_id": "D1", "mime_type": "application/pdf",
+         "extraction_version": extraction_version("application/pdf")},
         [0.1, 0.2, 0.3, 0.4])
     assert ingest_cache.publish_file(A1, fs, "D1", "F1", "vh1", PIN, skip_gc=True) is True
 
@@ -197,7 +203,8 @@ def test_gc_superseded_batch_collects_a_stale_pdf_version(tmp_path):
     A2.import_cached_chunk(
         "gdrive-F1-0", "v2 text", "ch0b",
         {"source_type": "gdrive", "file_id": "F1", "chunk_index": 0,
-         "drive_id": "D1", "mime_type": "application/pdf"},
+         "drive_id": "D1", "mime_type": "application/pdf",
+         "extraction_version": extraction_version("application/pdf")},
         [0.5, 0.6, 0.7, 0.8])
     assert ingest_cache.publish_file(A2, fs, "D1", "F1", "vh2", PIN, skip_gc=True) is True
 

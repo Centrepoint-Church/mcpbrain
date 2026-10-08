@@ -6,6 +6,7 @@ from mcpbrain.org_contracts import DRIVE_ID_META_KEY
 from mcpbrain import ingest_cache
 from mcpbrain.org_contracts import FleetPin
 from mcpbrain.store import Store
+from mcpbrain.sync.blocks import extraction_version
 from mcpbrain.sync.drive import discover_shared_drive, handle_shared_drive_item
 from tests.helpers.org_fleet import LocalDirFleetStorage
 from tests.test_drive_sync import FakeDriveService, _gdoc_change
@@ -99,11 +100,14 @@ def test_handle_shared_drive_item_cache_hit_skips_extraction(tmp_path):
     # pre-publish an artifact for FID's current version so try_import hits
     src = _store(tmp_path, "src.sqlite3")
     # mime_type: a Google Doc's artifact carries the block-extractor
-    # fingerprint (+x1), which publish_file derives from the chunk's mime and
-    # try_import requires since the drive path passes mime= (2026-09-24).
+    # fingerprint (+x<N>), which publish_file derives from the chunk's mime and
+    # try_import requires since the drive path passes mime= (2026-09-24); the
+    # chunk must carry the current extraction_version stamp to publish there.
+    gdoc = "application/vnd.google-apps.document"
     src.import_cached_chunk("gdrive-FID-0", "cached body", "c0",
                             {"source_type": "gdrive", "file_id": "FID", "chunk_index": 0,
-                             "mime_type": "application/vnd.google-apps.document"}, [0.5]*4)
+                             "mime_type": gdoc,
+                             "extraction_version": extraction_version(gdoc)}, [0.5]*4)
     fm = _gdoc_change("FID")["file"]
     ch = _file_content_hash(fm)
     ingest_cache.publish_file(src, fs, "D1", "FID", ch, PIN)

@@ -136,6 +136,31 @@ def _carries_split_stamp(chunk_metas) -> bool:
         return False
 
 
+def _carries_extraction_stamp(chunk_metas, mime: str) -> bool:
+    """Every chunk carries extraction_version >= this install's
+    blocks.extraction_version(mime), i.e. it really is the current block
+    extractor's output (normalise_drive / the reflow handler stamp it on every
+    chunk). The +x<N> twin of _carries_split_stamp: without it, chunks written
+    by an older extractor (a pending publish recorded before an
+    EXTRACTION_VERSIONS bump) would be laundered into the new +x<N>
+    fingerprint, and a peer would import them as current.
+
+    True trivially for a MIME with no EXTRACTION_VERSIONS entry (nothing to
+    prove). Malformed metadata (non-dict, a non-numeric extraction_version) is
+    simply not stamped: False, never an exception, so one bad artifact cannot
+    abort a bootstrap."""
+    from mcpbrain.sync.blocks import extraction_version
+    want = extraction_version(mime)
+    if not want:
+        return True
+    try:
+        metas = list(chunk_metas)
+        return bool(metas) and all(
+            int((m or {}).get("extraction_version") or 0) >= want for m in metas)
+    except (TypeError, ValueError, AttributeError):
+        return False
+
+
 def _pf8(pin, mime: str = "") -> str:
     return pipeline_fingerprint(
         pin.embed_model, pin.dim, effective_chunker_version(pin, mime))[:8]
@@ -150,8 +175,8 @@ def _current_pipeline_fingerprints(pin) -> set[str]:
     """Every pf8 this install currently reads as 'not stale': the base
     (unsuffixed) fingerprint plus every block-extracted MIME's
     +x<N>-suffixed one (sync.blocks.EXTRACTION_VERSIONS). Several MIMEs can
-    share one pf8 when their extraction_version numbers collide (they all do
-    today, at 1) — a set is enough here since GC/bootstrap only need to know
+    share one pf8 when their extraction_version numbers collide (as every
+    block MIME's does whenever they are bumped together) — a set is enough here since GC/bootstrap only need to know
     whether a listed artifact's fingerprint is CURRENT at all, not which MIME
     produced it (see _artifact_mime for that).
 
@@ -421,6 +446,12 @@ def _import_artifact(store, drive_id: str, art: CacheArtifact, pin,
         log.info("ingest_cache: %s artifact lacks the split_version stamp "
                  "(fallback to local)", art.file_id)
         return False
+    if not _carries_extraction_stamp((cc.metadata for cc in art.chunks), mime):
+        # Older-extractor chunks under the +x<N> fingerprint: the same
+        # mislabelling the +s guard above refuses. A miss -> local extraction.
+        log.info("ingest_cache: %s artifact lacks the extraction_version stamp "
+                 "(fallback to local)", art.file_id)
+        return False
     try:
         # Guard enrich field access; if malformed (e.g. string instead of dict),
         # fall back rather than raise.
@@ -673,6 +704,11 @@ def publish_file(store, fleet_storage, drive_id, file_id, content_hash, pin,
         # Chunks written by pre-SPLIT_VERSION code (e.g. a pending publish
         # recorded before the upgrade): publish them under the base pipeline
         # they actually belong to, never under the +s fingerprint.
+        mime = ""
+    elif not _carries_extraction_stamp((c.metadata for c in chunks), mime):
+        # The +x<N> twin: chunks from an older block extractor (stamped below
+        # this install's extraction_version, or not at all) belong to the
+        # base pipeline, never to the current +x<N> fingerprint.
         mime = ""
     publish(store, fleet_storage, drive_id, file_id, content_hash, chunks, pin,
             enrich=enrich, published_by=published_by,

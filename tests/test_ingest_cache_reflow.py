@@ -41,9 +41,10 @@ def _store(tmp_path, name):
 
 
 def _local(tmp_path, texts=("alpha beta gamma", "delta epsilon"), modified=M,
-           unenriched=(), name="A.sqlite3", fid="F"):
+           unenriched=(), name="A.sqlite3", fid="F", stamped=False):
     """Install A: file F already held locally, enriched (except the indexes in
-    `unenriched`), relation on chunk 1."""
+    `unenriched`), relation on chunk 1. `stamped` marks the chunks as the
+    current extractor's output (needed to publish under +x<N>)."""
     a = _store(tmp_path, name)
     for i, t in enumerate(texts):
         enr = i not in unenriched
@@ -51,7 +52,8 @@ def _local(tmp_path, texts=("alpha beta gamma", "delta epsilon"), modified=M,
             f"gdrive-{fid}-{i}", t, f"h{i}",
             {"source_type": "gdrive", "file_id": fid, "chunk_index": i,
              "chunk_total": len(texts), "drive_id": "D1", "mime_type": PDF,
-             "modified": modified},
+             "modified": modified,
+             **({"extraction_version": extraction_version(PDF)} if stamped else {})},
             V, enriched=enr, enriched_version=ENRICH_LOGIC_VERSION if enr else 0)
     with a._connect(write=True) as db:
         db.execute("INSERT INTO entities(id, name, type) VALUES('e1','Dana Okafor','person')")
@@ -341,7 +343,7 @@ def _payload_publisher(tmp_path, enriched_rows):
         p.import_cached_chunk(
             f"gdrive-F-{i}", t, f"n{i}",
             {"source_type": "gdrive", "file_id": "F", "chunk_index": i, "chunk_total": 2,
-             "drive_id": "D1", "mime_type": PDF, "modified": M, "extraction_version": 1},
+             "drive_id": "D1", "mime_type": PDF, "modified": M, "extraction_version": extraction_version(PDF)},
             V, enriched=i in enriched_rows,
             enriched_version=ENRICH_LOGIC_VERSION if i in enriched_rows else 0)
     p.set_enrich_payload("F", json.dumps({"thread_id": "gdrive-F", "summary": "old"}),
@@ -430,7 +432,7 @@ def _reflowed_publisher(tmp_path, home):
     new = [Chunk(f"gdrive-F-{i}", t, f"n{i}",
                  {"source_type": "gdrive", "file_id": "F", "chunk_index": i,
                   "chunk_total": 2, "drive_id": "D1", "mime_type": PDF,
-                  "modified": M, "extraction_version": 1}, [t])
+                  "modified": M, "extraction_version": extraction_version(PDF)}, [t])
            for i, t in enumerate(texts)]
     p.apply_reflow("F", "drive", reflow.plan(p.owner_chunks(["gdrive-F-"]), new), [V, V])
     assert [c[2] for c in _chunks(p)] == [1, 0]
@@ -453,7 +455,7 @@ def test_partial_reenrichment_payload_is_not_published_after_a_reflow(tmp_path, 
 
 def test_whole_file_drain_payload_is_published(tmp_path, _home):
     fs = LocalDirFleetStorage(tmp_path / "fleet")
-    p = _local(tmp_path, name="PW.sqlite3", unenriched=(0, 1))
+    p = _local(tmp_path, name="PW.sqlite3", unenriched=(0, 1), stamped=True)
     _drain_unit(p, _home, "F", ["gdrive-F-0", "gdrive-F-1"], "the whole file")
     assert ingest_cache.publish_file(p, fs, "D1", "F", "vh2", PIN) is True
     assert _artifact_enrich(fs)["extraction"]["summary"] == "the whole file"
@@ -469,7 +471,7 @@ def test_fully_carried_reflow_keeps_a_whole_file_payload(tmp_path):
     new = [Chunk("gdrive-F-0", "alpha beta gamma\ndelta epsilon", "n0",
                  {"source_type": "gdrive", "file_id": "F", "chunk_index": 0,
                   "chunk_total": 1, "drive_id": "D1", "mime_type": PDF,
-                  "modified": M, "extraction_version": 1},
+                  "modified": M, "extraction_version": extraction_version(PDF)},
                  ["alpha beta gamma\ndelta epsilon"])]
     p.apply_reflow("F", "drive", reflow.plan(p.owner_chunks(["gdrive-F-"]), new), [V])
     assert ingest_cache.publish_file(p, fs, "D1", "F", "vh2", PIN) is True

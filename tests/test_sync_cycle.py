@@ -12,6 +12,7 @@ from mcpbrain.embed import get_embedder
 from mcpbrain.retrieval import hybrid_search
 from mcpbrain.store import Store
 from mcpbrain.sync import run_sync_cycle
+from mcpbrain.sync.blocks import extraction_version
 
 
 # ---------------------------------------------------------------------------
@@ -558,9 +559,12 @@ def test_run_sync_cycle_reports_cache_hit_miss_counts(tmp_path, monkeypatch):
     src = Store(tmp_path / "src.sqlite3", dim=4); src.init()
     src.import_cached_chunk("gdrive-FID1-0", "cached body", "c0",
                             {"source_type": "gdrive", "file_id": "FID1", "chunk_index": 0,
-                             # Google Doc artifacts carry the +x1 extraction
-                             # fingerprint since 2026-09-24 (derived from mime).
-                             "mime_type": "application/vnd.google-apps.document"},
+                             # Google Doc artifacts carry the +x<N> extraction
+                             # fingerprint since 2026-09-24 (derived from mime),
+                             # and publish there only with the current stamp.
+                             "mime_type": "application/vnd.google-apps.document",
+                             "extraction_version": extraction_version(
+                                 "application/vnd.google-apps.document")},
                             [0.5] * 4)
     fm1 = _gdoc_change("FID1")["file"]
     ch1 = _file_content_hash(fm1)
