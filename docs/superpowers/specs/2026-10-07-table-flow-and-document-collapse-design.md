@@ -141,9 +141,13 @@ files are tenant data: they live only in `mcpbrain-tenant/eval/` and the gitigno
    integrity ok.
 4. **Release gates** as the runbook: full suite under the fleet's resolved
    versions, ruff, tenant check, wheel contents.
-5. **Binding gold at backlog 0:** recall@10 ≥ 0.850 and MRR ≥ 0.546 on the main
-   set, AND no regression on the ops set versus the same-day pre-drain baseline;
-   re-measured on the grown set once it is reviewed.
+5. **Binding gold at backlog 0** (bar changed by the owner, 2026-10-08): on the
+   main set, recall@10 ≥ 0.850 AND MRR no worse than the pre-drain snapshot
+   measured the same day on the same harness (0.548 on 2026-10-06) by more than one
+   rank step; AND no regression on the ops set versus that same-day baseline;
+   re-measured on the grown set once it is reviewed. The fixed 0.546 floor was
+   retired: n=20 puts one rank step at 0.01-0.05, so a fixed floor 0.003 from the
+   measured result would pass or fail on noise.
 6. **Latency:** `brain_search` p95 on the live store within +25% of today
    (collapse fetches a 6× pool).
 
