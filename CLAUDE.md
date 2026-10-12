@@ -334,7 +334,51 @@ say "call brain_owner_context". **28 tools** after release (was 27).
   `sse-starlette` resolves 3.5.0 for the fleet vs 3.4.4 in the lock — only mcp's
   SSE transport uses it (mcpbrain serves stdio), and the live stdio call above ran
   on 3.5.0. **The Windows HARDWARE QA GATE remains OPEN.**
-- **Current state (2026-10-08): the four version files (+ `uv.lock`) are at
+- **Current state (2026-10-12): the four version files (+ `uv.lock`) are at
+  `0.7.141`, RELEASED** — source `7c0dc234`, gh-pages `acebf6d5`, plugin `9a4db87`;
+  index serves only `mcpbrain-0.7.141-py3-none-any.whl`, `install.ps1` 200; fleet
+  resolves mcp 2.3.0 / fastembed 0.9.0 / google-auth 2.61.0 / pymupdf 1.28.2 /
+  httplib2 0.32.0 and the full suite passed under exactly that set (**4575 passed**).
+  Installed from the index (bootout → reinstall → clear `__pycache__` → bootstrap):
+  `/api/status` 0.7.141, doctor 0 need action.
+  **LIVE INCIDENT this fixes (2026-10-09 → 10-12): a transient network failure at
+  daemon start disabled Gmail/Drive/Calendar sync, backups AND (via the backup gate)
+  the reflow for the WHOLE process — three days, one log line each, while doctor said
+  "Google Verified".** The trigger was the attended reflow drain's restart on an iPhone
+  hotspot (flaky DNS; Errno 49 during the drain). `ensure_services`,
+  `_backup_from_config` and the org-config merge treated ANY error as "no
+  credentials". Now: classified via `reflow_handler._is_transient` (EADDRNOTAVAIL
+  added); transient → `_GoogleBackoff` retry 60 s doubling to 900 s (backup/org land
+  at the next loop iteration), visible as `google_unavailable` in `/api/status` +
+  a doctor ⚠️; permanent (no token / invalid_grant / no scope) behaves exactly as
+  before. **Review found that retrying created a worse hole — four fix rounds, each
+  re-reviewed:** a login-time boot without network on an EMPTY store (reinstall
+  recovery) skipped the restore, then sync refilled the store and backup rotated out
+  every good snapshot. Final design, **"hold, don't overwrite"**: a transiently skipped
+  restore writes `restore_pending.json`; while set, sync, content passes, baseline
+  bootstrap (doctor's `_repair_baseline` included) and backups do NOT run and
+  store-writing routed tools are refused (409) — the store stays empty; the loop
+  probes Drive and, when reachable, restarts (watchdog budget) into the ordinary
+  empty-store restore. **No path ever overwrites a store that has content.** EVERY
+  restore (start-up, wizard `/api/backup/auto`, CLI) now goes through
+  `backup.swap_in_store`: decrypt to a staging file, then inside a gate (control API
+  503 + `Store.restoring_gate`) `wal_checkpoint(TRUNCATE)` must report busy==0, then
+  `os.replace` — the old `shutil.copy2` over a live file was the 2026-09-10 corruption
+  class (reproduced in review). **`mcpbrain restore` (CLI) now REFUSES while the
+  daemon runs** (raw TCP probe of `control_port`; `--force` does not bypass): a
+  daemon connection writing across the swap silently rolled the restored DB back
+  (reproduced). Stop it with `launchctl bootout`, restore, then `bootstrap`.
+  `prune_snapshots` skips the prune when the newest snapshot is < 50% of an older one
+  (`prune_held` in status/doctor). **Also learned:** a big Drive clean-up arrives as
+  tens of thousands of `remove` events (39k distinct here, ~1% touching stored files);
+  at the default `sync_work_limit` 50 they starve the reflow rows behind them. The
+  local config was raised to 1000 to drain them (backup `config.json.bak-worklimit-*`;
+  revert after). **Open:** the 0.7.140 reflow backlog (5,239 queued) resumes behind
+  those removes; binding gold check at backlog 0 still to run; the three-axis-vs-
+  relevance gold test passed this time (it failed on 0.7.140's run — live-data drift).
+  **The Windows HARDWARE QA GATE remains OPEN** (the CLI restore refusal message is
+  macOS-only).
+- **Earlier (2026-10-08): the four version files (+ `uv.lock`) are at
   `0.7.140`, RELEASED** — source `0edca490`, gh-pages `6181bfac`, plugin `34c291c`;
   index serves only `mcpbrain-0.7.140-py3-none-any.whl`, `install.ps1` 200. Fleet
   resolves mcp/mcp-types 2.3.0, **fastembed 0.9.0** (drifted from 0.8.1 — embeddings
