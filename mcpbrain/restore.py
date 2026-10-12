@@ -2,9 +2,58 @@
 from __future__ import annotations
 
 import os
+import socket
 import sys
 import tempfile
 from pathlib import Path
+
+# The daemon-running probe's connect timeout. Loopback answers or refuses
+# at once; this only bounds a pathological local stack.
+_DAEMON_PROBE_TIMEOUT_S = 0.5
+
+
+class DaemonRunningError(RuntimeError):
+    """A separate-process restore was refused because the daemon is up."""
+
+
+def daemon_running(home: str) -> bool:
+    """True when something accepts a TCP connection on 127.0.0.1:<control_port>.
+
+    A raw connect, NOT ControlClient.status(): that maps 401/503 (a daemon that
+    is up but gated, or a token mismatch) to DaemonUnavailable, which would
+    read a live daemon as stopped. A missing or garbage control_port file
+    means not running."""
+    try:
+        port = int((Path(home) / "control_port").read_text().strip())
+    except (OSError, ValueError):
+        return False
+    if not 0 < port < 65536:
+        return False
+    try:
+        with socket.create_connection(("127.0.0.1", port), timeout=_DAEMON_PROBE_TIMEOUT_S):
+            return True
+    except OSError:
+        return False
+
+
+def refuse_if_daemon_running(home: str) -> None:
+    """Raise DaemonRunningError when the daemon is up.
+
+    A restore from a SEPARATE process cannot be made safe against a live
+    daemon: any daemon connection opened before the busy-checked checkpoint
+    that writes after os.replace appends frames to the -wal/-shm the old and
+    new files share by name, and when it closes the restored store is
+    silently rolled back. The daemon's own restores (start-up, the wizard's
+    /api/backup/auto) pass `swap` and run behind its restoring gate instead.
+    --force does not bypass this: it answers a different question
+    (overwriting a non-empty store)."""
+    if daemon_running(home):
+        raise DaemonRunningError(
+            "the mcpbrain daemon is running, and restoring under it can silently "
+            "lose the restore. Stop it first with "
+            "`launchctl bootout gui/$(id -u)/com.mcpbrain` (not `launchctl stop`: "
+            "KeepAlive relaunches it), run the restore, then start it again with "
+            "`launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/com.mcpbrain.plist`.")
 
 
 def _restore_via_stage(tmp_path: Path, p: Path, key: bytes, home: str, swap) -> None:
@@ -12,8 +61,11 @@ def _restore_via_stage(tmp_path: Path, p: Path, key: bytes, home: str, swap) -> 
     (records repo + config.json go straight to their destinations), then hand
     the staging file to `swap` -- never write over the live store in place.
     `swap(stage)` defaults to backup.swap_in_store(stage, p): a busy-checked WAL
-    checkpoint, then an atomic os.replace. The daemon passes one that also
-    raises its restoring gate."""
+    checkpoint, then an atomic os.replace. That default is only safe with the
+    daemon STOPPED (run_restore/run_restore_auto refuse otherwise): a busy == 0
+    checkpoint cannot stop a daemon connection opened earlier from writing
+    after the replace. The daemon passes one that also raises its restoring
+    gate."""
     from mcpbrain import backup as _backup, config as _cfg
     fd, stage = tempfile.mkstemp(dir=str(p.parent), prefix=".restore-", suffix=".stage")
     os.close(fd)
@@ -46,8 +98,15 @@ def run_restore(home: str, *, key: bytes | None = None, force: bool = False,
     Raises ValueError if backup is not configured.
     Raises RuntimeError if the store already exists and force=False.
     Returns the path of the restored store as a string.
+
+    With `swap` None (the `mcpbrain restore` CLI, a separate process) this is
+    NOT safe while the daemon runs, so it raises DaemonRunningError before
+    anything is written -- force or not.
     """
     from mcpbrain import backup as _backup, auth as _auth, config as _cfg
+
+    if swap is None:
+        refuse_if_daemon_running(home)
 
     cfg = _cfg.read_config(home)
     backup_cfg = cfg.get("backup") or {}
@@ -253,8 +312,16 @@ def run_restore_auto(home: str, *, force: bool = False, drive_service=None,
     needs no key and no folder IDs (org defaults) — it finds the user's key +
     snapshot in the escrow folder and restores the full bundle (store + records
     + config). Raises RuntimeError when nothing is restorable.
+
+    With `swap` None (the `mcpbrain restore --auto` CLI, a separate process)
+    this is NOT safe while the daemon runs, so it raises DaemonRunningError
+    before anything is written -- force or not. The daemon's own caller
+    (/api/backup/auto) passes its gated `swap`.
     """
     from mcpbrain import auth as _auth, backup as _backup, config as _cfg
+
+    if swap is None:
+        refuse_if_daemon_running(home)
 
     if drive_service is None:
         creds = _auth.load_credentials()
@@ -317,7 +384,9 @@ def run_restore_main(argv=None) -> None:
             info = detect_restorable(home, drive_service)
             if info["available"]:
                 print(f"Restorable backup found for {info['user_email']} "
-                      f"(snapshot {info['snapshot_id']}). Run: mcpbrain restore --auto")
+                      f"(snapshot {info['snapshot_id']}). Stop the daemon first "
+                      f"(launchctl bootout gui/$(id -u)/com.mcpbrain), then run: "
+                      f"mcpbrain restore --auto")
             else:
                 print("No restorable backup found for this account.")
             sys.exit(0)

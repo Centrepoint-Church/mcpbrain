@@ -5165,9 +5165,33 @@ def _restore_on_first_run_classified(store, home, *, gate=None):
     return ("restored", None)
 
 
+def _is_transient_probe_error(exc) -> bool:
+    """The restore probe's classifier: _is_transient_google_error, plus ANY
+    HTTP 5xx from Drive (anywhere in the cause chain). A probe that reads a
+    one-off Drive 500 as permanent would lift the hold and let sync write
+    into the empty store over the backup. Reflow keeps its own stricter rule
+    (a file that always 500s must end); this widening is the probe's only."""
+    if _is_transient_google_error(exc):
+        return True
+    from mcpbrain.sync.reflow_handler import _http_status
+    seen: set[int] = set()
+    todo = [exc]
+    while todo and len(seen) < 8:
+        e = todo.pop(0)
+        if e is None or id(e) in seen:
+            continue
+        seen.add(id(e))
+        status = _http_status(e)
+        if isinstance(status, int) and 500 <= status <= 599:
+            return True
+        todo.extend([e.__cause__, e.__context__])
+    return False
+
+
 def _probe_snapshot(home):
     """Does Drive hold a snapshot for this user? ("snapshot" | "no_snapshot" |
-    "unconfigured" | "transient" | "error", exc). Read-only; never raises."""
+    "unconfigured" | "transient" | "error", exc). Read-only; never raises.
+    Any Drive 5xx counts as transient here (_is_transient_probe_error)."""
     build = _backup_from_config(home)
     bc, _interval = build
     if bc is None:
@@ -5177,7 +5201,7 @@ def _probe_snapshot(home):
         file_id = backup.find_latest_snapshot(bc.drive_service, bc.shared_drive_id,
                                               bc.user_id)
     except Exception as exc:  # noqa: BLE001 — a probe must never raise into the loop
-        if _is_transient_google_error(exc):
+        if _is_transient_probe_error(exc):
             return ("transient", exc)
         log.warning("restore pending: snapshot lookup failed permanently: %s", exc)
         return ("error", exc)

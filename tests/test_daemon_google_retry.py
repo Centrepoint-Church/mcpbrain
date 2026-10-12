@@ -1021,3 +1021,33 @@ def test_wizard_restore_is_busy_checked_and_never_in_place(home, monkeypatch):
     assert d._store.chunk_count() == 3
     assert _integrity(d._store.path) == "ok"
     assert not list(home.glob(".restore-*"))
+
+
+def _http_error(status):
+    import httplib2
+    from googleapiclient.errors import HttpError
+    return HttpError(httplib2.Response({"status": status}), b"server error")
+
+
+def test_probe_treats_a_drive_500_as_transient_and_keeps_the_hold(home, monkeypatch):
+    clock = Clock()
+    d, rec = _held_daemon(home, monkeypatch, clock,
+                          find_errors=[_transient(), _http_error(500)])
+    clock.t += 60
+    d._retry_google_builds()
+    assert d._restore_pending is True                       # NOT lifted by a 500
+    assert dmod._read_restore_pending(str(home)) is not None
+    assert d.status().get("restore_error") is None
+    assert rec["restored"] == []
+
+
+def test_probe_5xx_widening_does_not_touch_reflow_classifier():
+    from mcpbrain.sync.reflow_handler import _is_transient
+    assert _is_transient(_http_error(500)) is False         # reflow: a plain 500 stays permanent
+    assert dmod._is_transient_probe_error(_http_error(500)) is True
+    assert dmod._is_transient_probe_error(_http_error(599)) is True
+    assert dmod._is_transient_probe_error(_http_error(404)) is False
+    assert dmod._is_transient_probe_error(PermissionError("forbidden")) is False
+    wrapped = RuntimeError("lookup failed")
+    wrapped.__cause__ = _http_error(500)
+    assert dmod._is_transient_probe_error(wrapped) is True

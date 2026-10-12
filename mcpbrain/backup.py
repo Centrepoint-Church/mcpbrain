@@ -1250,10 +1250,17 @@ def swap_in_store(stage, dest, *, gate=None) -> None:
     """Replace the live store `dest` with the restored `stage` file -- the ONE
     way any restore touches a live store (daemon start-up, the wizard's
     /api/backup/auto, `mcpbrain restore`). Inside `gate` (the daemon's
-    restoring gate; a no-op for a separate process), checkpoint the live WAL
-    with busy == 0 required (RestoreBusyError otherwise, which callers treat as
-    transient), then os.replace -- atomic, same filesystem. An empty stage (an
-    artifact that carried no store) is refused and the live store left alone."""
+    restoring gate), checkpoint the live WAL with busy == 0 required
+    (RestoreBusyError otherwise, which callers treat as transient), then
+    os.replace -- atomic, same filesystem. An empty stage (an artifact that
+    carried no store) is refused and the live store left alone.
+
+    Without a gate (a separate process: the CLI) this is only safe with the
+    daemon STOPPED. busy == 0 proves no reader holds a snapshot at checkpoint
+    time, not that no daemon connection is open: one opened earlier that writes
+    after the replace appends to the -wal/-shm both files share by name, and
+    when it closes the restored store is silently rolled back. restore.py
+    refuses the CLI path while the daemon answers on its control port."""
     from contextlib import nullcontext
     stage, dest = Path(stage), Path(dest)
     if not stage.exists() or stage.stat().st_size == 0:

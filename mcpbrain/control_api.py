@@ -608,7 +608,9 @@ class ControlServer:
                 # connected): if a backup exists for this account AND the local store
                 # is empty, restore the whole brain; otherwise just ensure encrypted
                 # backup is on. We never clobber a populated local brain — a returning
-                # user who really wants to overwrite uses `mcpbrain restore --force`.
+                # user who really wants to overwrite STOPS the daemon (launchctl
+                # bootout; `mcpbrain restore` refuses while it runs, --force or not)
+                # and then runs `mcpbrain restore --force`.
                 try:
                     from mcpbrain import (restore as _restore, backup_setup,
                                           auth as _auth, config as _config)
