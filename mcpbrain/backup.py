@@ -1029,6 +1029,12 @@ def find_latest_snapshot(service, shared_drive_id: str, user_id: str) -> str | N
     return files[0]["id"]
 
 
+# A newest snapshot under this fraction of the largest one it would keep is
+# suspicious (e.g. a store refilled from scratch after a skipped restore), so the
+# prune holds off: deleting the older, larger snapshots is the irreversible step.
+PRUNE_MIN_NEWEST_RATIO = 0.5
+
+
 def prune_snapshots(service, shared_drive_id: str, user_id: str, *, keep: int) -> int:
     """Delete all but the newest `keep` snapshots in <shared_drive>/<user_id>/.
 
@@ -1062,12 +1068,18 @@ def prune_snapshots(service, shared_drive_id: str, user_id: str, *, keep: int) -
         service.files()
         .list(q=f"'{folder_id}' in parents and trashed = false", corpora="drive",
               driveId=shared_drive_id, includeItemsFromAllDrives=True,
-              supportsAllDrives=True, fields="files(id, name, createdTime, modifiedTime)")
+              supportsAllDrives=True,
+              fields="files(id, name, createdTime, modifiedTime, size)")
         .execute(num_retries=_NUM_RETRIES)
         .get("files", [])
     )
     files.sort(key=lambda f: (f.get("createdTime", ""), f.get("modifiedTime", "")),
                reverse=True)
+    if len(files) > keep and _newest_suspiciously_small(files):
+        log.warning("prune_snapshots: newest snapshot %s is under %d%% of the largest "
+                    "older one; not pruning, so the older snapshots stay restorable",
+                    files[0].get("name"), int(PRUNE_MIN_NEWEST_RATIO * 100))
+        return 0
 
     deleted = 0
     for f in files[keep:]:
@@ -1085,6 +1097,21 @@ def prune_snapshots(service, shared_drive_id: str, user_id: str, *, keep: int) -
         log.info("prune_snapshots: deleted %d old snapshot(s), kept newest %d",
                  deleted, keep)
     return deleted
+
+
+def _newest_suspiciously_small(files) -> bool:
+    """True when files[0] (newest) is under PRUNE_MIN_NEWEST_RATIO of the
+    largest older snapshot. Missing/unparseable sizes never trigger it."""
+    def _size(f):
+        try:
+            return int(f.get("size"))
+        except (TypeError, ValueError):
+            return None
+    newest = _size(files[0])
+    older = [n for n in (_size(f) for f in files[1:]) if n]
+    if not newest or not older:
+        return False
+    return newest < PRUNE_MIN_NEWEST_RATIO * max(older)
 
 
 def _default_downloader(fh, request):

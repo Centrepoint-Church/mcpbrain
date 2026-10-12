@@ -400,6 +400,10 @@ def run_doctor(home, *, conns=None, repairs=None, reprobe=None, platform=None,
         gu_line = google_unavailable_line(daemon_status)
         if gu_line:
             lines.append(gu_line)
+        rp_line = restore_pending_line(daemon_status)
+        if rp_line:
+            lines.append(rp_line)
+            need_action += 1
 
     lines.append(arch_line())
     lines.append(tenant_line())
@@ -600,6 +604,24 @@ def google_unavailable_line(daemon_status: dict | None) -> str | None:
     if gu.get("last_error"):
         line += f"; last error: {gu['last_error']}"
     return line
+
+
+def restore_pending_line(daemon_status: dict | None) -> str | None:
+    """⚠️ (and an action item) while a restore-on-first-run is pending.
+
+    Set when Google was unreachable as a daemon started on an empty store with
+    backup configured. Backups are paused meanwhile, because a near-empty
+    snapshot followed by the retention prune would rotate out the good ones.
+    It clears itself once Google is reachable; if it persists, restarting
+    the daemon while online restores the snapshot.
+    """
+    rp = (daemon_status or {}).get("restore_pending")
+    if not rp:
+        return None
+    since = rp.get("since") or "start-up"
+    return (f"⚠️  {'Restore':<16} pending since {since} — the backup snapshot was not "
+            f"restored (Google unreachable at start-up); backups are paused to protect "
+            f"it. It retries on its own; if this persists, restart the daemon while online")
 
 
 def tenant_line() -> str:

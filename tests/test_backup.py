@@ -1927,6 +1927,25 @@ def test_prune_keep_zero_is_noop():
     assert svc._files.deleted == []
 
 
+def test_prune_holds_off_when_newest_is_drastically_smaller():
+    """A near-empty newest snapshot (a store refilled from scratch) must not
+    rotate out the larger, good ones."""
+    from mcpbrain.backup import prune_snapshots
+    files = [{**_snap(i, i), "size": "4000000000"} for i in range(1, 5)]
+    files.append({**_snap(5, 5), "size": "1000000"})
+    svc = FakeService(FakeFilesPrune(files))
+    assert prune_snapshots(svc, "drive-X", "sam", keep=3) == 0
+    assert svc._files.deleted == []
+
+
+def test_prune_still_runs_for_a_moderate_shrink():
+    from mcpbrain.backup import prune_snapshots
+    files = [{**_snap(i, i), "size": "4000000000"} for i in range(1, 5)]
+    files.append({**_snap(5, 5), "size": "2300000000"})   # a VACUUM-sized shrink
+    svc = FakeService(FakeFilesPrune(files))
+    assert prune_snapshots(svc, "drive-X", "sam", keep=3) == 2
+
+
 def test_upload_snapshot_folder_lookup_and_create_pass_num_retries(tmp_path):
     from mcpbrain.backup import upload_snapshot, _NUM_RETRIES, _MEDIA_NUM_RETRIES
 

@@ -324,3 +324,246 @@ def test_doctor_line_appears_while_google_unavailable():
     assert "retrying (5 attempts)" in line
     assert doctor.google_unavailable_line({"google_unavailable": None}) is None
     assert doctor.google_unavailable_line(None) is None
+
+
+# -- restore-on-first-run vs a transient outage (C1) --------------------------
+
+class FakeBC:
+    def __init__(self, drive):
+        self.drive_service, self.shared_drive_id, self.user_id = drive, "SD", "u1"
+        self.key, self.out_path, self.retain = b"k", None, 7
+
+
+class AdvancingStop:
+    """_stop stand-in whose wait() advances the injected clock instead of sleeping."""
+
+    def __init__(self, clock):
+        self.clock, self.waits, self._set = clock, [], False
+
+    def is_set(self):
+        return self._set
+
+    def set(self):
+        self._set = True
+
+    def wait(self, s):
+        self.waits.append(s)
+        self.clock.t += s
+        return self._set
+
+
+def _restore_rig(home, monkeypatch, *, snapshot="SNAP1", find_errors=(), build_errors=()):
+    """Backup config + Drive stand-ins. Returns a dict of call records."""
+    _configure_backup(home)
+    rec = {"restored": [], "uploaded": [], "pruned": []}
+    build = FlakyBuild(*build_errors, result={"drive_service": "DRIVE"})
+    monkeypatch.setattr(auth, "build_google_services", build)
+    rec["build"] = build
+    errs = list(find_errors)
+
+    def find(svc, sd, uid):
+        if errs:
+            raise errs.pop(0)
+        return snapshot
+    monkeypatch.setattr(dmod.backup, "find_latest_snapshot", find)
+    monkeypatch.setattr(dmod.backup, "download_and_restore",
+                        lambda bc, store, fid: rec["restored"].append(fid))
+    monkeypatch.setattr(dmod, "_mac_user_is_active", lambda: True)
+    monkeypatch.setattr(dmod, "make_encrypted_snapshot", lambda *a, **k: home / "snap.enc")
+    monkeypatch.setattr(dmod, "upload_snapshot",
+                        lambda svc, path, sd, uid: rec["uploaded"].append(path) or "F")
+    monkeypatch.setattr("mcpbrain.backup.prune_snapshots",
+                        lambda *a, **k: rec["pruned"].append(1))
+    return rec
+
+
+def test_transient_restore_skip_blocks_backup_after_services_recover(home, monkeypatch):
+    clock = Clock()
+    rec = _restore_rig(home, monkeypatch, build_errors=[_transient()])
+    d = _daemon(home, clock)
+    d._restore_wait_s = 0            # give up the start-up wait at once
+
+    d._startup_restore()
+    assert rec["restored"] == []
+    assert d._restore_pending is True
+    assert dmod._read_restore_pending(str(home)) is not None
+    assert d.status()["restore_pending"] is not None
+
+    # Google comes back: services and the backup config recover ...
+    clock.t += 60
+    assert d.ensure_services() != {}
+    d._backup_backoff.failed(_transient())
+    clock.t += 60
+    monkeypatch.setattr(d, "_restart_process", lambda *a: None)   # not under test here
+    d._retry_google_builds()
+    assert d._backup is not None
+    # ... but nothing is uploaded or pruned while the restore is pending.
+    assert d.maybe_backup() == {"backed_up": False, "skipped": "restore_pending"}
+    assert rec["uploaded"] == [] and rec["pruned"] == []
+
+
+def test_restore_pending_marker_survives_restart_and_forces_the_restore(home, monkeypatch):
+    clock = Clock()
+    rec = _restore_rig(home, monkeypatch)
+    dmod._write_restore_pending(str(home), "earlier outage")
+    d = _daemon(home, clock)
+    # The store was refilled by re-sync since; the marker forces the restore anyway.
+    monkeypatch.setattr(d._store, "chunk_count", lambda: 500)
+    d._startup_restore()
+    assert rec["restored"] == ["SNAP1"]
+    assert d._restore_pending is False
+    assert dmod._read_restore_pending(str(home)) is None
+
+
+def test_startup_waits_out_a_short_outage_before_any_writer(home, monkeypatch):
+    clock = Clock()
+    rec = _restore_rig(home, monkeypatch, find_errors=[_transient(), _transient()])
+    d = _daemon(home, clock)
+    d._stop = AdvancingStop(clock)
+    d._startup_restore()
+    assert d._stop.waits == [60.0, 120.0]
+    assert rec["restored"] == ["SNAP1"]
+    assert d._restore_pending is False
+    assert dmod._read_restore_pending(str(home)) is None
+
+
+def test_startup_wait_is_capped_at_30_minutes(home, monkeypatch):
+    clock = Clock()
+    _restore_rig(home, monkeypatch, find_errors=[_transient()] * 50)
+    d = _daemon(home, clock)
+    d._stop = AdvancingStop(clock)
+    d._startup_restore()
+    assert sum(d._stop.waits) <= dmod.RESTORE_STARTUP_WAIT_S
+    assert d._restore_pending is True
+
+
+def test_definitive_no_snapshot_clears_the_pending_restore(home, monkeypatch):
+    clock = Clock()
+    _restore_rig(home, monkeypatch, snapshot=None, find_errors=[_transient()])
+    d = _daemon(home, clock)
+    d._restore_wait_s = 0
+    d._startup_restore()
+    assert d._restore_pending is True
+    clock.t += 60
+    d._retry_google_builds()
+    assert d._restore_pending is False
+    assert dmod._read_restore_pending(str(home)) is None
+    assert d.status()["restore_pending"] is None
+
+
+def test_reachable_snapshot_in_loop_restarts_to_restore(home, monkeypatch):
+    clock = Clock()
+    rec = _restore_rig(home, monkeypatch, find_errors=[_transient()])
+    d = _daemon(home, clock)
+    d._restore_wait_s = 0
+    d._startup_restore()
+    restarts = []
+    monkeypatch.setattr(d, "_restart_process", lambda *a: restarts.append(1))
+    monkeypatch.setattr(d, "_watchdog_may_exit", lambda: True)
+    clock.t += 30
+    d._retry_google_builds()                 # not due yet
+    assert restarts == []
+    clock.t += 30
+    d._retry_google_builds()
+    assert restarts == [1]
+    assert rec["restored"] == []             # never in place, under live writers
+    assert dmod._read_restore_pending(str(home)) is not None   # cleared by the restore
+
+
+def test_doctor_counts_restore_pending_as_an_action():
+    from mcpbrain import doctor
+    from tests.test_doctor import _conns, _ok_repairs
+    code, msg = doctor.run_doctor(
+        "/tmp/home", model_present=lambda h: True, conns=_conns(),
+        repairs=_ok_repairs(),
+        daemon_status={"watchdog_exits": 0, "watchdog_limit_reached": False,
+                       "restore_pending": {"since": "2026-10-09T08:00:00Z"}})
+    assert "⚠️  Restore" in msg and "backups are paused" in msg
+    assert code == 1
+
+
+# -- M1: a concurrent apply_config wins --------------------------------------
+
+def test_retry_rechecks_under_build_lock(home, monkeypatch):
+    clock = Clock()
+    build = FlakyBuild(result={"drive_service": object()})
+    monkeypatch.setattr(auth, "build_google_services", build)
+    _configure_backup(home)
+    d = _daemon(home, clock)
+    d._backup_backoff.failed(_transient())
+    clock.t += 60
+    bo = d._backup_backoff
+    real_acquire = bo.build_lock.acquire
+
+    class Lock:
+        def acquire(self, blocking=True):
+            ok = real_acquire(blocking)
+            bo.clear()                     # apply_config succeeded meanwhile
+            return ok
+
+        def release(self):
+            bo.build_lock_real.release()
+    bo.build_lock_real = bo.build_lock
+    bo.build_lock = Lock()
+    d._retry_backup_build()
+    assert build.calls == 0
+
+
+# -- M5: wiring ----------------------------------------------------------------
+
+def test_main_seeds_the_backoffs_from_transient_startup_failures(home, monkeypatch):
+    import mcpbrain.embed as embed_module
+    import mcpbrain.store as store_module
+
+    class FakeStore:
+        def __init__(self, *a, **k):
+            pass
+
+        def init(self):
+            pass
+
+    monkeypatch.setattr(embed_module, "get_embedder", lambda kind=None: FakeEmbedder())
+    monkeypatch.setattr(store_module, "Store", FakeStore)
+    org_exc, bk_exc = _transient(), _transient()
+    monkeypatch.setattr(dmod, "_maybe_merge_org_config", lambda home: org_exc)
+    monkeypatch.setattr(dmod, "_backup_from_config",
+                        lambda home: dmod._BackupBuild(transient=bk_exc))
+    seen = {}
+
+    def fake_run_one(self):
+        seen["d"] = self
+        return {}
+    monkeypatch.setattr(Daemon, "run_one", fake_run_one)
+    monkeypatch.setattr(Daemon, "ensure_services", lambda self: {})
+    dmod.main(["--once"])
+    d = seen["d"]
+    assert d._org_config_backoff.pending and d._org_config_backoff.attempts == 1
+    assert d._backup_backoff.pending and d._backup_backoff.attempts == 1
+    assert d._backup is None
+
+
+def test_run_loop_iteration_calls_retry_google_builds(monkeypatch):
+    import threading
+    dm = Daemon.__new__(Daemon)
+    dm._lock = threading.Lock()
+    dm._stop = threading.Event()
+    dm._pause = threading.Event()
+    dm._wake = threading.Event()
+    dm._bulk_lock = threading.Lock()
+    dm._progress = {}
+    dm._progress_lock = threading.Lock()
+    dm._clock = lambda: 0.0
+    dm._interval_s = 0.01
+    dm._pending_update = False
+    dm._maintenance_thread = None
+    dm._maintenance_interval_s = 3600.0
+    order = []
+    monkeypatch.setattr(dm, "_start_maintenance_thread", lambda: None)
+    monkeypatch.setattr(dm, "_startup_restore", lambda: None)
+    monkeypatch.setattr(dm, "run_one", lambda: dm._stop.set() or {})
+    monkeypatch.setattr(dm, "ensure_services", lambda: {})
+    monkeypatch.setattr(dm, "_retry_google_builds", lambda: order.append("retry"))
+    monkeypatch.setattr(dm, "_backup_under_bulk_lock", lambda: order.append("backup"))
+    monkeypatch.setattr(dmod, "write_daemon_heartbeat", lambda home: None)
+    dm.run()
+    assert order == ["retry", "backup"]

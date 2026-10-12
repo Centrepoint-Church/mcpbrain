@@ -226,9 +226,25 @@ EMBED_MAX_ITEMS = 2000
 # "Google Verified". A restart fixed everything. A transient failure now retries
 # on this backoff (60 s, doubling, capped at 15 min) instead; a PERMANENT one
 # (no token, revoked grant, missing scope, a programming error) still resolves
-# once, exactly as before.
+# once, exactly as before. The backoff sets the EARLIEST retry time: services
+# are re-tried by whichever cycle or maintenance pass next asks for them, but the
+# backup / org-config / pending-restore retries are checked once per run-loop
+# iteration, so they land at the first iteration after it (~interval_s, 300 s
+# by default).
 GOOGLE_RETRY_FIRST_S = 60.0
 GOOGLE_RETRY_MAX_S = 900.0
+
+# Restore-on-first-run vs a transient outage. The reinstall-recovery case (an
+# empty store with backup configured) is exactly when a login agent can start
+# before Wi-Fi. If the restore is skipped and the daemon carries on, sync refills
+# the empty store and the next backup uploads a near-empty snapshot; pruning to
+# `retain` then rotates out every good snapshot, and once chunk_count() > 0 the
+# restore never runs again. So: run() retries the restore BEFORE any writer
+# starts, for up to RESTORE_STARTUP_WAIT_S; past that, RESTORE_PENDING_MARKER
+# (persisted, so it survives a restart) blocks every backup upload/prune until
+# the snapshot is restored or Google definitively says there is none.
+RESTORE_STARTUP_WAIT_S = 1800.0
+RESTORE_PENDING_MARKER = "restore_pending.json"
 
 
 def _is_transient_google_error(exc) -> bool:
@@ -1065,6 +1081,11 @@ class Daemon:
         self._services_backoff = _GoogleBackoff("sync services", clock, wall_clock)
         self._backup_backoff = _GoogleBackoff("backup", clock, wall_clock)
         self._org_config_backoff = _GoogleBackoff("org-config merge", clock, wall_clock)
+        self._restore_backoff = _GoogleBackoff("restore", clock, wall_clock)
+        # Set by run()'s _startup_restore from RESTORE_PENDING_MARKER; while
+        # True, maybe_backup never uploads or prunes.
+        self._restore_pending = False
+        self._restore_wait_s = RESTORE_STARTUP_WAIT_S
         # Seed the cadence clock from the PERSISTED attempt stamp so a restart
         # is not mistaken for a first run. Without this, _last_backup started
         # None on every boot and maybe_backup treated that as "due now": on
@@ -1461,7 +1482,8 @@ class Daemon:
             self._google_backoff(a, w).snapshot() for a, w in (
                 ("_services_backoff", "sync services"),
                 ("_backup_backoff", "backup"),
-                ("_org_config_backoff", "org-config merge"))) if s]
+                ("_org_config_backoff", "org-config merge"),
+                ("_restore_backoff", "restore"))) if s]
         if not snaps:
             return None
         latest = max(snaps, key=lambda s: s["last_at"])
@@ -1492,6 +1514,10 @@ class Daemon:
         if not bo.pending or not bo.due() or not bo.build_lock.acquire(blocking=False):
             return
         try:
+            # Re-check under build_lock: a concurrent apply_config may have
+            # rebuilt (and cleared the backoff) while we waited for it.
+            if not (bo.pending and bo.due()):
+                return
             res = _backup_from_config(str(app_dir()))
             transient = getattr(res, "transient", None)
             if transient is not None:
@@ -1518,6 +1544,8 @@ class Daemon:
         if not bo.pending or not bo.due() or not bo.build_lock.acquire(blocking=False):
             return
         try:
+            if not (bo.pending and bo.due()):
+                return
             home = str(app_dir())
             status, exc = _merge_org_config_classified(home)
             if status == "transient":
@@ -1533,11 +1561,100 @@ class Daemon:
         finally:
             bo.build_lock.release()
 
+    # -- restore-on-first-run vs a transient outage ------------------------
+
+    def _startup_restore(self) -> None:
+        """Restore-on-first-run, retried through a transient outage BEFORE any
+        writer starts (see RESTORE_STARTUP_WAIT_S). Runs on the loop thread at
+        the top of run(); honours _stop.
+
+        A persisted RESTORE_PENDING_MARKER from an earlier run means this
+        store was empty when that run started and has only been refilled by
+        re-sync since: restoring over it is what should have happened then,
+        so the restore is forced past the non-empty check. That is also how
+        the in-loop retry completes a restore (_retry_pending_restore restarts
+        the process rather than replace a store other threads are writing)."""
+        home = str(config.app_dir())
+        bo = self._google_backoff("_restore_backoff", "restore")
+        pending = _read_restore_pending(home) is not None
+        self._restore_pending = pending
+        wait_s = getattr(self, "_restore_wait_s", RESTORE_STARTUP_WAIT_S)
+        deadline = self._clock() + wait_s
+        while True:
+            status, exc = _restore_on_first_run_classified(
+                self._store, home, force=pending)
+            if status == "transient":
+                if not pending:
+                    _write_restore_pending(home, str(exc))
+                    pending = self._restore_pending = True
+                bo.failed(exc)
+                wait = max(0.0, bo.retry_at - self._clock())
+                if self._stop.is_set() or self._clock() + wait > deadline:
+                    log.warning("restore-on-first-run still pending after the start-up "
+                                "wait; backups are paused until it is restored")
+                    return
+                if self._stop.wait(wait):
+                    return
+                continue
+            if status in ("restored", "no_snapshot"):
+                if pending:
+                    _clear_restore_pending(home)
+                self._restore_pending = False
+                bo.succeeded()
+            else:   # not_empty (nothing to do) / unconfigured (cannot tell)
+                bo.clear()
+            return
+
+    def _retry_pending_restore(self) -> None:
+        """While a restore is pending and its backoff is due: ask Drive whether
+        a snapshot exists. None is the definitive answer that clears the
+        marker. One that exists cannot be restored in place -- the cycle and
+        maintenance threads hold the store -- so the process restarts and
+        _startup_restore restores it before any writer starts (bounded by the
+        watchdog's restart budget; past it the daemon stays up, pending and
+        visible in /api/status and doctor)."""
+        if not getattr(self, "_restore_pending", False):
+            return
+        bo = self._google_backoff("_restore_backoff", "restore")
+        if not bo.pending or not bo.due() or not bo.build_lock.acquire(blocking=False):
+            return
+        try:
+            if not (bo.pending and bo.due()) or self._stop.is_set():
+                return
+            home = str(app_dir())
+            status, exc = _probe_snapshot(home)
+            if status == "transient":
+                bo.failed(exc)
+                return
+            if status == "no_snapshot":
+                _clear_restore_pending(home)
+                self._restore_pending = False
+                bo.succeeded()
+                return
+            if status == "unconfigured":
+                bo.clear()   # cannot tell; stays pending, retried at next start
+                return
+            # A snapshot exists and Google is reachable again.
+            if not self._watchdog_may_exit():
+                log.error("restore pending and a snapshot is reachable, but the restart "
+                          "budget is spent; backups stay paused -- restart the daemon")
+                bo.clear()
+                return
+            log.warning("restore pending and a snapshot is reachable: restarting so it "
+                        "is restored before anything else writes")
+            bo.succeeded()
+            self._restart_process()
+        finally:
+            bo.build_lock.release()
+
     def _retry_google_builds(self) -> None:
         """Called once per loop iteration on the cycle thread: retry whichever
-        startup Google builds failed transiently. Never raises into the loop.
-        (Services retry themselves inside ensure_services.)"""
-        for retry in (self._retry_backup_build, self._retry_org_config_merge):
+        startup Google builds failed transiently, plus a pending restore. Never
+        raises into the loop. (Services retry themselves inside ensure_services.)
+        Each retry fires on the first iteration after its backoff time, so the
+        effective spacing is max(backoff, interval_s)."""
+        for retry in (self._retry_backup_build, self._retry_org_config_merge,
+                      self._retry_pending_restore):
             try:
                 retry()
             except Exception as exc:  # noqa: BLE001 — a retry must not break the loop
@@ -1750,6 +1867,8 @@ class Daemon:
             # retry -- so a multi-day "token fine, network was not" outage is
             # visible here and in doctor, not only in the log.
             "google_unavailable": self._google_unavailable_status(),
+            # Non-null while a restore-on-first-run is pending (backups paused).
+            "restore_pending": _read_restore_pending(str(app_dir())),
         }
 
     def config_profile(self) -> dict:
@@ -2620,6 +2739,13 @@ class Daemon:
 
         if backup is None:
             return None
+
+        # A restore that a transient outage skipped is still pending: uploading
+        # now would put a near-empty snapshot at the head of the history and the
+        # prune would rotate the good ones out. Never upload or prune until the
+        # restore has run (see RESTORE_STARTUP_WAIT_S).
+        if getattr(self, "_restore_pending", False):
+            return {"backed_up": False, "skipped": "restore_pending"}
 
         if self._last_backup is not None:
             elapsed = self._clock() - self._last_backup
@@ -4424,6 +4550,15 @@ class Daemon:
             # recovered from. win_supervised() checks what was actually
             # installed (the waiting, exit-code-propagating shim).
             supervised = win_supervised(str(app_dir()))
+        self._restart_process(supervised)
+
+    def _restart_process(self, supervised: bool | None = None) -> None:
+        """Exit so the supervisor restarts us (or, unsupervised on Windows,
+        spawn a successor first), counted against the watchdog's restart
+        budget. Shared by the stall watchdog and the pending-restore retry."""
+        if supervised is None:
+            supervised = (win_supervised(str(app_dir()))
+                          if sys.platform == "win32" else True)
         self._record_watchdog_exit()
         if supervised:
             self._exit_for_restart()
@@ -4584,8 +4719,11 @@ class Daemon:
             # re-embeds when the backend genuinely changed. The chunk_count()==0
             # guard inside maybe_restore still works: it runs here on the empty
             # store, before migrate.
+            #
+            # A transient outage is retried here, before any writer starts --
+            # see _startup_restore and RESTORE_STARTUP_WAIT_S.
             try:
-                maybe_restore_on_first_run(self._store, str(config.app_dir()))
+                self._startup_restore()
             except Exception as exc:  # noqa: BLE001 — restore must not crash startup
                 log.warning("restore-on-first-run failed; continuing empty: %s",
                             exc, exc_info=True)
@@ -4670,6 +4808,12 @@ class Daemon:
                     else:
                         log.error("cycle failed; retrying next interval: %s",
                                   exc, exc_info=True)
+                # Retry any Google build (backup config, org-config merge, a
+                # pending restore) that failed transiently and is due -- off
+                # _bulk_lock, since it is network I/O. Never raises. Checked
+                # once per iteration, so these retries land at the first
+                # iteration after their retry time (~interval_s), not at it.
+                self._retry_google_builds()
                 # Backup self-gates on configured + due; harmless when paused
                 # (a snapshot of current state). Runs in this loop thread, so it
                 # shares the single-writer lock the daemon already holds.
@@ -4689,10 +4833,6 @@ class Daemon:
                 # this plan, only its acquire is, so it can legitimately hold
                 # _bulk_lock past one tick -- an unbounded `with` here would
                 # park this cycle thread for that pass's whole duration.
-                # Retry any startup Google build (backup config, org-config
-                # merge) that failed transiently and is due -- off _bulk_lock,
-                # since it is network I/O. Never raises.
-                self._retry_google_builds()
                 self._backup_under_bulk_lock()
                 # Maintenance-thread liveness (Task 3): the watchdog itself
                 # lives inside _maintenance_loop (see _start_maintenance_thread),
@@ -4860,25 +5000,120 @@ def maybe_restore_on_first_run(store, home) -> bool:
     No-op unless: the store is empty (chunk_count() == 0), a backup is fully
     configured, and Drive has at least one snapshot. The subsequent normal
     daemon cycle performs the delta sync. Returns True if a restore ran.
+    The daemon itself uses _restore_on_first_run_classified, which also
+    reports a transient skip.
+    """
+    status, _exc = _restore_on_first_run_classified(store, home)
+    return status == "restored"
+
+
+def _restore_on_first_run_classified(store, home, *, force: bool = False):
+    """restore-on-first-run, classified. Returns (status, exc):
+      ("not_empty", None)    store has chunks and force is False -- nothing to do
+      ("unconfigured", None) backup not configured / credentials permanently bad
+      ("transient", exc)     Google unreachable: building creds, listing or downloading
+      ("no_snapshot", None)  Drive definitively holds no snapshot
+      ("restored", None)
+    A non-transient failure of the listing or download is raised, as before.
+    force=True restores over a non-empty store (RESTORE_PENDING_MARKER case);
+    the WAL is checkpointed first so no frame of the replaced store can be
+    replayed onto the restored file.
 
     References backup functions via the module attribute (backup.find_latest_snapshot,
     backup.download_and_restore) so they remain patchable in tests.
     """
-    if store.chunk_count() != 0:
-        return False
+    if not force and store.chunk_count() != 0:
+        return ("not_empty", None)
     build = _backup_from_config(home)
     bc, _interval = build
     if bc is None:
-        if getattr(build, "transient", None) is not None:
-            log.warning("restore-on-first-run skipped: Google unreachable (transient): %s",
-                        build.transient)
-        return False
-    file_id = backup.find_latest_snapshot(bc.drive_service, bc.shared_drive_id, bc.user_id)
-    if not file_id:
-        return False
-    backup.download_and_restore(bc, store, file_id)
+        transient = getattr(build, "transient", None)
+        if transient is not None:
+            log.warning("restore-on-first-run: Google unreachable (transient): %s", transient)
+            return ("transient", transient)
+        return ("unconfigured", None)
+    try:
+        file_id = backup.find_latest_snapshot(bc.drive_service, bc.shared_drive_id,
+                                              bc.user_id)
+        if not file_id:
+            return ("no_snapshot", None)
+        if force:
+            _checkpoint_wal(store.path)
+        backup.download_and_restore(bc, store, file_id)
+    except Exception as exc:  # noqa: BLE001 — classified, then re-raised
+        if _is_transient_google_error(exc):
+            log.warning("restore-on-first-run: Google unreachable (transient): %s", exc)
+            return ("transient", exc)
+        raise
     log.info("restored store from latest snapshot %s", file_id)
-    return True
+    return ("restored", None)
+
+
+def _probe_snapshot(home):
+    """Does Drive hold a snapshot for this user? ("snapshot" | "no_snapshot" |
+    "unconfigured" | "transient", exc). Read-only; never raises."""
+    build = _backup_from_config(home)
+    bc, _interval = build
+    if bc is None:
+        transient = getattr(build, "transient", None)
+        return ("transient", transient) if transient is not None else ("unconfigured", None)
+    try:
+        file_id = backup.find_latest_snapshot(bc.drive_service, bc.shared_drive_id,
+                                              bc.user_id)
+    except Exception as exc:  # noqa: BLE001 — a probe must never raise into the loop
+        if _is_transient_google_error(exc):
+            return ("transient", exc)
+        log.warning("restore pending: snapshot lookup failed: %s", exc)
+        return ("unconfigured", None)
+    return ("snapshot", None) if file_id else ("no_snapshot", None)
+
+
+def _checkpoint_wal(path) -> None:
+    """Fold the WAL into the main file and truncate it. Best-effort."""
+    import sqlite3
+    try:
+        con = sqlite3.connect(str(path))
+        try:
+            con.execute("PRAGMA wal_checkpoint(TRUNCATE)")
+        finally:
+            con.close()
+    except sqlite3.Error as exc:
+        log.warning("restore: WAL checkpoint before overwrite failed: %s", exc)
+
+
+def _restore_pending_path(home) -> Path:
+    return Path(home) / RESTORE_PENDING_MARKER
+
+
+def _read_restore_pending(home) -> dict | None:
+    """The persisted restore-pending marker, or None. Never raises."""
+    try:
+        data = json.loads(_restore_pending_path(home).read_text())
+    except FileNotFoundError:
+        return None
+    except (OSError, ValueError):
+        return {"since": None, "reason": "unreadable marker"}
+    return data if isinstance(data, dict) else {"since": None, "reason": ""}
+
+
+def _write_restore_pending(home, reason: str) -> None:
+    from datetime import datetime, timezone
+    try:
+        _restore_pending_path(home).write_text(json.dumps({
+            "since": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
+            "reason": reason[:200]}))
+    except OSError as exc:
+        log.warning("could not persist the restore-pending marker: %s", exc)
+
+
+def _clear_restore_pending(home) -> None:
+    try:
+        _restore_pending_path(home).unlink()
+        log.info("restore-pending cleared")
+    except FileNotFoundError:
+        pass
+    except OSError as exc:
+        log.warning("could not clear the restore-pending marker: %s", exc)
 
 
 class _BackupBuild(tuple):

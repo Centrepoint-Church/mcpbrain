@@ -91,8 +91,8 @@ def test_run_restores_before_migrate(monkeypatch, tmp_path):
     monkeypatch.setattr(dmod, "config",
                         type("C", (), {"app_dir": staticmethod(lambda: tmp_path)}))
     monkeypatch.setattr(
-        dmod, "maybe_restore_on_first_run",
-        lambda store, home: order.append("restore"),
+        dmod, "_restore_on_first_run_classified",
+        lambda store, home, force=False: order.append("restore") or ("not_empty", None),
     )
     monkeypatch.setattr(
         Daemon, "migrate_embed_backend",
