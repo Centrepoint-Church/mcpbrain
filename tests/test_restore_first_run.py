@@ -92,7 +92,7 @@ def test_run_restores_before_migrate(monkeypatch, tmp_path):
                         type("C", (), {"app_dir": staticmethod(lambda: tmp_path)}))
     monkeypatch.setattr(
         dmod, "_restore_on_first_run_classified",
-        lambda store, home, force=False: order.append("restore") or ("not_empty", None),
+        lambda store, home, **kw: order.append("restore") or ("not_empty", None),
     )
     monkeypatch.setattr(
         Daemon, "migrate_embed_backend",
@@ -115,6 +115,11 @@ def test_run_restores_before_migrate(monkeypatch, tmp_path):
 
 
 def test_download_and_restore_composes_primitives(monkeypatch, tmp_path):
+    """Download to a temp .enc, decrypt into a STAGING file (store untouched),
+    then -- inside the store's restoring gate, after a busy-checked WAL
+    checkpoint -- replace the live store with the staging file."""
+    from pathlib import Path
+
     bc = FakeBC()
     bc.out_path = tmp_path / "snapshot.enc"
     store = Store(str(tmp_path / "live.sqlite3"), dim=384)
@@ -126,14 +131,20 @@ def test_download_and_restore_composes_primitives(monkeypatch, tmp_path):
 
     def fake_restore(encrypted_path, dest_store_path, key):
         calls["restore"] = (encrypted_path, dest_store_path, key)
+        Path(dest_store_path).write_bytes(b"restored-store")
         return dest_store_path
 
+    gates = []
+    real_gate = store.restoring_gate
+
+    def gate():
+        gates.append(1)
+        return real_gate()
+    monkeypatch.setattr(store, "restoring_gate", gate)
     monkeypatch.setattr(bmod, "download_snapshot", fake_download)
     monkeypatch.setattr(bmod, "restore", fake_restore)
 
     result = bmod.download_and_restore(bc, store, "file-123")
-
-    from pathlib import Path
 
     store_parent = Path(store.path).parent
     download_service, download_file_id, download_dest = calls["download"]
@@ -147,15 +158,16 @@ def test_download_and_restore_composes_primitives(monkeypatch, tmp_path):
     assert download_dest.suffix == ".enc"
     assert download_dest.name.startswith(".restore-")
 
-    # restore decrypts FROM that same temp file INTO the live store.
+    # restore decrypts FROM that temp file into a staging file, not the store.
     restore_src, restore_dest, restore_key = calls["restore"]
     assert Path(restore_src) == download_dest
-    assert restore_dest == store.path
+    assert Path(restore_dest) != Path(store.path)
+    assert Path(restore_dest).parent == store_parent
     assert restore_key == bc.key
 
-    assert result == store.path
+    # The staging file was swapped in, under the gate.
+    assert gates == [1]
+    assert result == Path(store.path)
+    assert Path(store.path).read_bytes() == b"restored-store"
+    assert not list(store_parent.glob(".restore-*"))
 
-    # Temp file is cleaned up (the mocked download never created it, so the
-    # finally unlink hits OSError and is swallowed — either way nothing remains).
-    leftovers = list(store_parent.glob(".restore-*.enc"))
-    assert leftovers == []

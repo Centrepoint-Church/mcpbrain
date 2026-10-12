@@ -326,13 +326,7 @@ def test_doctor_line_appears_while_google_unavailable():
     assert doctor.google_unavailable_line(None) is None
 
 
-# -- restore-on-first-run vs a transient outage (C1) --------------------------
-
-class FakeBC:
-    def __init__(self, drive):
-        self.drive_service, self.shared_drive_id, self.user_id = drive, "SD", "u1"
-        self.key, self.out_path, self.retain = b"k", None, 7
-
+# -- restore-on-first-run vs a transient outage: HOLD, never overwrite ---------
 
 class AdvancingStop:
     """_stop stand-in whose wait() advances the injected clock instead of sleeping."""
@@ -352,10 +346,11 @@ class AdvancingStop:
         return self._set
 
 
-def _restore_rig(home, monkeypatch, *, snapshot="SNAP1", find_errors=(), build_errors=()):
+def _restore_rig(home, monkeypatch, *, snapshot="SNAP1", find_errors=(), build_errors=(),
+                 restore_error=None):
     """Backup config + Drive stand-ins. Returns a dict of call records."""
     _configure_backup(home)
-    rec = {"restored": [], "uploaded": [], "pruned": []}
+    rec = {"restored": [], "uploaded": [], "pruned": [], "gates": []}
     build = FlakyBuild(*build_errors, result={"drive_service": "DRIVE"})
     monkeypatch.setattr(auth, "build_google_services", build)
     rec["build"] = build
@@ -365,9 +360,14 @@ def _restore_rig(home, monkeypatch, *, snapshot="SNAP1", find_errors=(), build_e
         if errs:
             raise errs.pop(0)
         return snapshot
+
+    def restore(bc, store, fid, **kw):
+        rec["gates"].append(kw.get("gate"))
+        if restore_error is not None:
+            raise restore_error
+        rec["restored"].append(fid)
     monkeypatch.setattr(dmod.backup, "find_latest_snapshot", find)
-    monkeypatch.setattr(dmod.backup, "download_and_restore",
-                        lambda bc, store, fid: rec["restored"].append(fid))
+    monkeypatch.setattr(dmod.backup, "download_and_restore", restore)
     monkeypatch.setattr(dmod, "_mac_user_is_active", lambda: True)
     monkeypatch.setattr(dmod, "make_encrypted_snapshot", lambda *a, **k: home / "snap.enc")
     monkeypatch.setattr(dmod, "upload_snapshot",
@@ -377,42 +377,98 @@ def _restore_rig(home, monkeypatch, *, snapshot="SNAP1", find_errors=(), build_e
     return rec
 
 
-def test_transient_restore_skip_blocks_backup_after_services_recover(home, monkeypatch):
-    clock = Clock()
-    rec = _restore_rig(home, monkeypatch, build_errors=[_transient()])
+def _held_daemon(home, monkeypatch, clock, **rig):
+    """A daemon that started on an empty store during an outage and gave up
+    the start-up wait at once: the restore hold is on."""
+    rec = _restore_rig(home, monkeypatch, **rig)
     d = _daemon(home, clock)
-    d._restore_wait_s = 0            # give up the start-up wait at once
-
+    d._restore_wait_s = 0
     d._startup_restore()
-    assert rec["restored"] == []
     assert d._restore_pending is True
+    return d, rec
+
+
+def test_hold_blocks_sync_passes_and_backup(home, monkeypatch):
+    clock = Clock()
+    d, rec = _held_daemon(home, monkeypatch, clock, build_errors=[_transient()])
+    assert rec["restored"] == []
     assert dmod._read_restore_pending(str(home)) is not None
-    assert d.status()["restore_pending"] is not None
 
     # Google comes back: services and the backup config recover ...
     clock.t += 60
     assert d.ensure_services() != {}
     d._backup_backoff.failed(_transient())
     clock.t += 60
-    monkeypatch.setattr(d, "_restart_process", lambda *a: None)   # not under test here
-    d._retry_google_builds()
+    d._retry_backup_build()
     assert d._backup is not None
-    # ... but nothing is uploaded or pruned while the restore is pending.
+    # ... but no sync cycle runs ...
+    cycles = []
+    monkeypatch.setattr(dmod, "run_cycle", lambda *a, **k: cycles.append(1) or {})
+    assert d.run_one() is None
+    assert cycles == []
+    # ... no content-writing maintenance pass runs (a hold-safe one does) ...
+    ran = []
+    monkeypatch.setattr(d, "_run_feedback_aggregate", lambda: ran.append("feedback"))
+    monkeypatch.setattr(d, "_run_auto_update", lambda: ran.append("auto_update"))
+    d._run_periodic_passes()
+    assert "auto_update" in ran and "feedback" not in ran
+    # ... and nothing is uploaded or pruned.
     assert d.maybe_backup() == {"backed_up": False, "skipped": "restore_pending"}
     assert rec["uploaded"] == [] and rec["pruned"] == []
+    assert d._store.chunk_count() == 0
+    st = d.status()["restore_pending"]
+    assert st["since"] and st["restart_budget_spent"] is False
 
 
-def test_restore_pending_marker_survives_restart_and_forces_the_restore(home, monkeypatch):
+def test_reachable_snapshot_restarts_into_the_empty_store_restore(home, monkeypatch):
     clock = Clock()
+    d, rec = _held_daemon(home, monkeypatch, clock, find_errors=[_transient()])
+    restarts = []
+    monkeypatch.setattr(d, "_restart_process", lambda *a: restarts.append(1))
+    monkeypatch.setattr(d, "_watchdog_may_exit", lambda: True)
+    clock.t += 30
+    d._retry_google_builds()                 # not due yet
+    assert restarts == []
+    clock.t += 30
+    d._retry_google_builds()
+    assert restarts == [1]
+    assert rec["restored"] == []             # never in place, under live writers
+
+    # The "restarted" process: the store stayed empty, so the ordinary
+    # empty-store restore runs, through the restoring gate, and clears the hold.
+    d2 = _daemon(home, Clock())
+    d2._startup_restore()
+    assert rec["restored"] == ["SNAP1"]
+    assert rec["gates"][-1] is not None
+    assert d2._restore_pending is False
+    assert dmod._read_restore_pending(str(home)) is None
+
+
+def test_marker_with_content_in_the_store_is_never_overwritten(home, monkeypatch):
     rec = _restore_rig(home, monkeypatch)
     dmod._write_restore_pending(str(home), "earlier outage")
-    d = _daemon(home, clock)
-    # The store was refilled by re-sync since; the marker forces the restore anyway.
-    monkeypatch.setattr(d._store, "chunk_count", lambda: 500)
+    d = _daemon(home, Clock())
+    d._store.upsert_chunk(doc_id="d", text="x", content_hash="h", metadata={})
     d._startup_restore()
-    assert rec["restored"] == ["SNAP1"]
-    assert d._restore_pending is False
-    assert dmod._read_restore_pending(str(home)) is None
+    assert rec["restored"] == []
+    assert d._store.chunk_count() == 1
+
+
+def test_budget_spent_stays_held_and_doctor_says_so(home, monkeypatch):
+    clock = Clock()
+    d, rec = _held_daemon(home, monkeypatch, clock, find_errors=[_transient()])
+    restarts = []
+    monkeypatch.setattr(d, "_restart_process", lambda *a: restarts.append(1))
+    monkeypatch.setattr(d, "_watchdog_may_exit", lambda: False)
+    clock.t += 60
+    d._retry_google_builds()
+    assert restarts == [] and d._restore_pending is True
+    st = d.status()
+    assert st["restore_pending"]["restart_budget_spent"] is True
+    from mcpbrain import doctor
+    line = doctor.restore_pending_line(st)
+    assert "mcpbrain is holding sync so your backup is not overwritten" in line
+    assert "restart the daemon while online" in line
 
 
 def test_startup_waits_out_a_short_outage_before_any_writer(home, monkeypatch):
@@ -437,13 +493,10 @@ def test_startup_wait_is_capped_at_30_minutes(home, monkeypatch):
     assert d._restore_pending is True
 
 
-def test_definitive_no_snapshot_clears_the_pending_restore(home, monkeypatch):
+def test_definitive_no_snapshot_lifts_the_hold(home, monkeypatch):
     clock = Clock()
-    _restore_rig(home, monkeypatch, snapshot=None, find_errors=[_transient()])
-    d = _daemon(home, clock)
-    d._restore_wait_s = 0
-    d._startup_restore()
-    assert d._restore_pending is True
+    d, _rec = _held_daemon(home, monkeypatch, clock, snapshot=None,
+                           find_errors=[_transient()])
     clock.t += 60
     d._retry_google_builds()
     assert d._restore_pending is False
@@ -451,23 +504,51 @@ def test_definitive_no_snapshot_clears_the_pending_restore(home, monkeypatch):
     assert d.status()["restore_pending"] is None
 
 
-def test_reachable_snapshot_in_loop_restarts_to_restore(home, monkeypatch):
+def test_non_transient_restore_failure_does_not_hold(home, monkeypatch):
+    rec = _restore_rig(home, monkeypatch, restore_error=ValueError("bad key"))
+    d = _daemon(home, Clock())
+    with pytest.raises(ValueError):
+        d._startup_restore()
+    assert d._restore_pending is False
+    assert dmod._read_restore_pending(str(home)) is None
+    st = d.status()
+    assert st["restore_error"] == "bad key"
+    from mcpbrain import doctor
+    assert doctor.restore_error_line(st).startswith("❌")
+    assert rec["restored"] == []
+
+
+def test_n3_marker_unlink_failure_keeps_the_hold_and_retries(home, monkeypatch):
     clock = Clock()
-    rec = _restore_rig(home, monkeypatch, find_errors=[_transient()])
-    d = _daemon(home, clock)
-    d._restore_wait_s = 0
+    d, _rec = _held_daemon(home, monkeypatch, clock, snapshot=None,
+                           find_errors=[_transient()])
+    real_clear = dmod._clear_restore_pending
+    results = [False]
+    monkeypatch.setattr(dmod, "_clear_restore_pending",
+                        lambda home: results.pop(0) if results else real_clear(home))
+    clock.t += 60
+    d._retry_google_builds()                 # no snapshot, but the unlink fails
+    assert d._restore_pending is True
+    d._retry_google_builds()                 # next tick retries the unlink
+    assert d._restore_pending is False
+    assert dmod._read_restore_pending(str(home)) is None
+
+
+def test_n3_marker_write_failure_holds_in_memory(home, monkeypatch):
+    monkeypatch.setattr(dmod, "_write_restore_pending", lambda home, reason: False)
+    d, _rec = _held_daemon(home, monkeypatch, Clock(), find_errors=[_transient()])
+    assert dmod._read_restore_pending(str(home)) is None
+    assert d._restore_pending is True
+    d._backup, d._backup_interval_s = object(), 3600.0
+    assert d.maybe_backup() == {"backed_up": False, "skipped": "restore_pending"}
+
+
+def test_n4_marker_with_backup_unconfigured_is_cleared(home, monkeypatch):
+    dmod._write_restore_pending(str(home), "earlier outage")
+    d = _daemon(home, Clock())                # no backup block in config.json
     d._startup_restore()
-    restarts = []
-    monkeypatch.setattr(d, "_restart_process", lambda *a: restarts.append(1))
-    monkeypatch.setattr(d, "_watchdog_may_exit", lambda: True)
-    clock.t += 30
-    d._retry_google_builds()                 # not due yet
-    assert restarts == []
-    clock.t += 30
-    d._retry_google_builds()
-    assert restarts == [1]
-    assert rec["restored"] == []             # never in place, under live writers
-    assert dmod._read_restore_pending(str(home)) is not None   # cleared by the restore
+    assert d._restore_pending is False
+    assert dmod._read_restore_pending(str(home)) is None
 
 
 def test_doctor_counts_restore_pending_as_an_action():
@@ -478,8 +559,129 @@ def test_doctor_counts_restore_pending_as_an_action():
         repairs=_ok_repairs(),
         daemon_status={"watchdog_exits": 0, "watchdog_limit_reached": False,
                        "restore_pending": {"since": "2026-10-09T08:00:00Z"}})
-    assert "⚠️  Restore" in msg and "backups are paused" in msg
+    assert "⚠️  Restore" in msg and "holding sync" in msg
     assert code == 1
+
+
+def test_prune_held_is_surfaced_in_status(home, monkeypatch):
+    _configure_backup(home)
+    monkeypatch.setattr(auth, "build_google_services",
+                        FlakyBuild(result={"drive_service": object()}))
+    monkeypatch.setattr(dmod, "_mac_user_is_active", lambda: True)
+    monkeypatch.setattr(dmod, "make_encrypted_snapshot", lambda *a, **k: home / "s.enc")
+    monkeypatch.setattr(dmod, "upload_snapshot", lambda *a: "F")
+
+    def prune(*a, held=None, **k):
+        held.update(newest_bytes=10, largest_kept_bytes=1000)
+        return 0
+    monkeypatch.setattr("mcpbrain.backup.prune_snapshots", prune)
+    d = _daemon(home, Clock())
+    d.apply_config({})
+    assert d.maybe_backup()["backed_up"] is True
+    assert d.status()["prune_held"] == {"newest_bytes": 10, "largest_kept_bytes": 1000}
+
+
+# -- the restoring gate + the busy-checked swap (real sqlite) -----------------
+
+def test_store_gate_refuses_connections_while_restoring(tmp_path):
+    from mcpbrain.store import StoreRestoringError
+    s = Store(tmp_path / "b.sqlite3", dim=4)
+    s.init()
+    with s.restoring_gate():
+        with pytest.raises(StoreRestoringError):
+            s.chunk_count()
+    assert s.chunk_count() == 0
+
+
+def test_control_api_answers_503_while_restoring(tmp_path):
+    import json
+    import urllib.error
+    import urllib.request
+    from mcpbrain.control_api import ControlServer
+
+    class D:
+        restoring = True
+
+        def is_restoring(self):
+            return self.restoring
+
+        def status(self):
+            return {"ok": True}
+    d = D()
+    srv = ControlServer(d, home=str(tmp_path))
+    srv.start()
+    try:
+        req = urllib.request.Request(f"http://127.0.0.1:{srv.port}/api/status")
+        req.add_header("Authorization", f"Bearer {srv.token}")
+        with pytest.raises(urllib.error.HTTPError) as e:
+            urllib.request.urlopen(req)
+        assert e.value.code == 503
+        d.restoring = False
+        assert json.loads(urllib.request.urlopen(req).read()) == {"ok": True}
+    finally:
+        srv.stop()
+
+
+def test_swap_refused_while_a_reader_holds_the_store_and_nothing_corrupts(tmp_path,
+                                                                          monkeypatch):
+    import shutil
+    import sqlite3
+
+    from mcpbrain import backup as bmod
+
+    live = Store(tmp_path / "live.sqlite3", dim=4)
+    live.init()
+    # A reader in "another process" (its own connection), kept open so the WAL
+    # survives, then holding a read transaction while more frames are written.
+    reader = sqlite3.connect(str(live.path))
+    live.upsert_chunk(doc_id="a", text="one", content_hash="h1", metadata={})
+    reader.execute("BEGIN")
+    reader.execute("SELECT COUNT(*) FROM chunks").fetchone()
+    live.upsert_chunk(doc_id="b", text="two", content_hash="h2", metadata={})
+
+    snap = Store(tmp_path / "snap.sqlite3", dim=4)
+    snap.init()
+    for i in range(3):
+        snap.upsert_chunk(doc_id=f"s{i}", text="snap", content_hash=f"s{i}", metadata={})
+    sqlite3.connect(str(snap.path)).execute("PRAGMA wal_checkpoint(TRUNCATE)").close()
+
+    monkeypatch.setattr(bmod, "download_snapshot", lambda svc, fid, dest: dest)
+    monkeypatch.setattr(bmod, "restore",
+                        lambda enc, stage, key: shutil.copyfile(snap.path, stage))
+
+    class BC:
+        drive_service, key = "DRIVE", b"k"
+
+    with pytest.raises(bmod.RestoreBusyError):
+        bmod.download_and_restore(BC(), live, "F")
+    reader.rollback()
+    reader.close()
+
+    def integrity(path):
+        con = sqlite3.connect(str(path))
+        try:
+            return con.execute("PRAGMA integrity_check").fetchone()[0]
+        finally:
+            con.close()
+    assert integrity(live.path) == "ok"
+    assert live.chunk_count() == 2            # untouched by the refused swap
+    assert not list(tmp_path.glob(".restore-*"))
+
+    # With the reader gone the same swap goes through cleanly.
+    bmod.download_and_restore(BC(), live, "F")
+    assert integrity(live.path) == "ok"
+    assert live.chunk_count() == 3
+    con = sqlite3.connect(str(live.path))
+    try:
+        ids = {r[0] for r in con.execute("SELECT doc_id FROM chunks")}
+    finally:
+        con.close()
+    assert ids == {"s0", "s1", "s2"}
+
+
+def test_busy_swap_is_classified_transient():
+    from mcpbrain import backup as bmod
+    assert dmod._is_transient_google_error(bmod.RestoreBusyError("busy"))
 
 
 # -- M1: a concurrent apply_config wins --------------------------------------

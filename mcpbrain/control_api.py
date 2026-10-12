@@ -83,6 +83,15 @@ class ControlServer:
                     self.close_connection = True
                     self.send_response(403); self.end_headers(); return False
                 return True
+            def _restoring(self):
+                # A restored snapshot is being swapped in (Daemon._restore_gate):
+                # answer every authenticated route 503 for that brief window
+                # rather than touch a store mid-replace.
+                probe = getattr(server.daemon, "is_restoring", None)
+                if callable(probe) and probe() is True:
+                    h_json(self, 503, {"error": "restoring"})
+                    return True
+                return False
             def do_GET(self):
                 # Served before the auth gate on purpose: a browser with no token yet
                 # must load the wizard page, which then injects the token into the HTML.
@@ -101,6 +110,7 @@ class ControlServer:
                     m = re.match(r"^/vendor/([A-Za-z0-9._-]+\.js)$", self.path)
                     return server._serve_vendor(self, m.group(1) if m else "")
                 if not self._auth_ok(): return
+                if self._restoring(): return
                 if self.path == "/api/status": return h_json(self, 200, server.daemon.status())
                 if self.path == "/api/model/status":
                     return h_json(self, 200, server.daemon.model_status())
@@ -276,9 +286,11 @@ class ControlServer:
                 self.send_response(404); self.end_headers()
             def do_POST(self):
                 if not self._auth_ok(): return
+                if self._restoring(): return
                 return server._handle_post(self)                        # Task 2.2
             def do_DELETE(self):
                 if not self._auth_ok(): return
+                if self._restoring(): return
                 m = re.match(r"^/api/graph/entity/([^/?]+)$", self.path.split("?")[0])
                 if m:
                     if server.store is None: return h_json(self, 503, {"error": "dashboard not available"})

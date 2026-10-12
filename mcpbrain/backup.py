@@ -1035,7 +1035,8 @@ def find_latest_snapshot(service, shared_drive_id: str, user_id: str) -> str | N
 PRUNE_MIN_NEWEST_RATIO = 0.5
 
 
-def prune_snapshots(service, shared_drive_id: str, user_id: str, *, keep: int) -> int:
+def prune_snapshots(service, shared_drive_id: str, user_id: str, *, keep: int,
+                    held: dict | None = None) -> int:
     """Delete all but the newest `keep` snapshots in <shared_drive>/<user_id>/.
 
     Bounds the daily full-snapshot uploads so they don't grow without limit
@@ -1075,10 +1076,13 @@ def prune_snapshots(service, shared_drive_id: str, user_id: str, *, keep: int) -
     )
     files.sort(key=lambda f: (f.get("createdTime", ""), f.get("modifiedTime", "")),
                reverse=True)
-    if len(files) > keep and _newest_suspiciously_small(files):
+    small = _newest_suspiciously_small(files) if len(files) > keep else None
+    if small:
         log.warning("prune_snapshots: newest snapshot %s is under %d%% of the largest "
                     "older one; not pruning, so the older snapshots stay restorable",
                     files[0].get("name"), int(PRUNE_MIN_NEWEST_RATIO * 100))
+        if held is not None:
+            held.update(small)
         return 0
 
     deleted = 0
@@ -1099,9 +1103,10 @@ def prune_snapshots(service, shared_drive_id: str, user_id: str, *, keep: int) -
     return deleted
 
 
-def _newest_suspiciously_small(files) -> bool:
-    """True when files[0] (newest) is under PRUNE_MIN_NEWEST_RATIO of the
-    largest older snapshot. Missing/unparseable sizes never trigger it."""
+def _newest_suspiciously_small(files) -> dict | None:
+    """{newest_bytes, largest_kept_bytes} when files[0] (newest) is under
+    PRUNE_MIN_NEWEST_RATIO of the largest older snapshot, else None.
+    Missing/unparseable sizes never trigger it."""
     def _size(f):
         try:
             return int(f.get("size"))
@@ -1110,8 +1115,10 @@ def _newest_suspiciously_small(files) -> bool:
     newest = _size(files[0])
     older = [n for n in (_size(f) for f in files[1:]) if n]
     if not newest or not older:
-        return False
-    return newest < PRUNE_MIN_NEWEST_RATIO * max(older)
+        return None
+    if newest < PRUNE_MIN_NEWEST_RATIO * max(older):
+        return {"newest_bytes": newest, "largest_kept_bytes": max(older)}
+    return None
 
 
 def _default_downloader(fh, request):
@@ -1214,34 +1221,77 @@ def download_snapshot(service, file_id: str, dest_path, *, downloader_factory=No
     return dest_path
 
 
-def download_and_restore(bc, store, file_id) -> Path:
+class RestoreBusyError(TimeoutError):
+    """The live store could not be checkpointed cleanly (another connection
+    holds a read transaction), so swapping a restored snapshot in would risk a
+    reader replaying stale WAL frames onto it. Refused; a TimeoutError so the
+    daemon's classifier treats it as transient and retries."""
+
+
+def _checkpoint_for_swap(path) -> None:
+    """PRAGMA wal_checkpoint(TRUNCATE) on the live store; require busy == 0
+    and every WAL frame checkpointed, else raise RestoreBusyError."""
+    path = Path(path)
+    if not path.exists():
+        return
+    con = sqlite3.connect(str(path), timeout=2.0)
+    try:
+        busy, log_frames, done = con.execute("PRAGMA wal_checkpoint(TRUNCATE)").fetchone()
+    except sqlite3.Error as exc:
+        raise RestoreBusyError(f"checkpoint failed: {exc}") from exc
+    finally:
+        con.close()
+    if busy != 0 or log_frames != done:
+        raise RestoreBusyError(
+            f"store busy (busy={busy}, log={log_frames}, checkpointed={done})")
+
+
+def download_and_restore(bc, store, file_id, *, gate=None) -> Path:
     """Download an encrypted snapshot from Drive and restore it as the live store.
 
-    Composes download_snapshot (Drive -> a dedicated temp file) and restore
-    (decrypt -> store.path). Used by the daemon's restore-on-first-run path.
-    Returns the restored store Path. A wrong key or tampered artifact raises
-    cryptography.fernet.InvalidToken from restore before the store is replaced.
+    Three steps, only the last one gated:
+      1. download_snapshot (Drive -> a dedicated temp .enc file);
+      2. restore() decrypts it into a STAGING file beside the store -- the slow
+         part, done while the live store is untouched;
+      3. inside `gate` (the daemon's restoring gate: control API 503s, every
+         Store connection refused; defaults to store.restoring_gate), the live
+         store's WAL is checkpointed with busy == 0 REQUIRED
+         (RestoreBusyError otherwise -- a reader in another process holds it),
+         then the staging file is os.replace()d over the store.
+    A wrong key or tampered artifact raises cryptography.fernet.InvalidToken in
+    step 2, before the store is touched. Returns the restored store Path.
 
     The download lands in a dedicated temp file under the store's parent dir
-    (same filesystem as the decrypt target), NOT bc.out_path. bc.out_path is the
-    stable path maybe_backup writes its periodic upload artifact to; downloading
-    there would clobber it and a mid-download failure would leave a corrupt file
-    at the backup-upload path. The temp file is always removed in a finally.
+    (same filesystem as the store, so the final replace is atomic), NOT
+    bc.out_path: that is the stable path maybe_backup writes its periodic
+    upload artifact to. Both temp files are always removed in a finally.
     """
+    from contextlib import nullcontext
     dest = Path(store.path)
-    fd, tmp = tempfile.mkstemp(dir=str(dest.parent), prefix=".restore-", suffix=".enc")
-    # mkstemp already creates 0600 on most platforms; set it explicitly to stay
-    # consistent with the rest of the codebase, which always sets 0600
-    # deliberately on private artifacts.
-    if hasattr(os, "fchmod"):  # POSIX-only; mkstemp is already owner-only on Windows
-        os.fchmod(fd, 0o600)
-    os.close(fd)
-    tmp = Path(tmp)
+    temps = []
+    for suffix in (".enc", ".stage"):
+        fd, tmp = tempfile.mkstemp(dir=str(dest.parent), prefix=".restore-", suffix=suffix)
+        # mkstemp already creates 0600 on most platforms; set it explicitly to
+        # stay consistent with the rest of the codebase.
+        if hasattr(os, "fchmod"):  # POSIX-only; mkstemp is already owner-only on Windows
+            os.fchmod(fd, 0o600)
+        os.close(fd)
+        temps.append(Path(tmp))
+    enc, stage = temps
+    if gate is None:
+        gate = getattr(store, "restoring_gate", None) or nullcontext
     try:
-        download_snapshot(bc.drive_service, file_id, tmp)
-        return restore(tmp, dest, bc.key)
+        download_snapshot(bc.drive_service, file_id, enc)
+        restore(enc, stage, bc.key)
+        if stage.stat().st_size == 0:
+            raise ValueError("snapshot carried no store; live store left untouched")
+        with gate():
+            _checkpoint_for_swap(dest)
+            os.replace(stage, dest)
+        return dest
     finally:
-        try:
-            tmp.unlink()
-        except OSError:
-            pass
+        for t in temps:
+            try:
+                t.unlink()
+            except OSError:
+                pass

@@ -400,10 +400,12 @@ def run_doctor(home, *, conns=None, repairs=None, reprobe=None, platform=None,
         gu_line = google_unavailable_line(daemon_status)
         if gu_line:
             lines.append(gu_line)
-        rp_line = restore_pending_line(daemon_status)
-        if rp_line:
-            lines.append(rp_line)
-            need_action += 1
+        for fn, actionable in ((restore_pending_line, True), (restore_error_line, True),
+                               (prune_held_line, False)):
+            extra = fn(daemon_status)
+            if extra:
+                lines.append(extra)
+                need_action += int(actionable)
 
     lines.append(arch_line())
     lines.append(tenant_line())
@@ -607,21 +609,41 @@ def google_unavailable_line(daemon_status: dict | None) -> str | None:
 
 
 def restore_pending_line(daemon_status: dict | None) -> str | None:
-    """⚠️ (and an action item) while a restore-on-first-run is pending.
+    """⚠️ (and an action item) while the daemon holds sync for a pending restore.
 
-    Set when Google was unreachable as a daemon started on an empty store with
-    backup configured. Backups are paused meanwhile, because a near-empty
-    snapshot followed by the retention prune would rotate out the good ones.
-    It clears itself once Google is reachable; if it persists, restarting
-    the daemon while online restores the snapshot.
+    Set when Google was unreachable as the daemon started on an empty store
+    with backup configured. Sync and backups are held so the store stays empty
+    and the snapshot is never overwritten; the daemon retries on its own.
     """
     rp = (daemon_status or {}).get("restore_pending")
     if not rp:
         return None
     since = rp.get("since") or "start-up"
-    return (f"⚠️  {'Restore':<16} pending since {since} — the backup snapshot was not "
-            f"restored (Google unreachable at start-up); backups are paused to protect "
-            f"it. It retries on its own; if this persists, restart the daemon while online")
+    line = (f"⚠️  {'Restore':<16} restore pending since {since}: mcpbrain is holding sync "
+            f"so your backup is not overwritten — restart the daemon while online")
+    if rp.get("restart_budget_spent"):
+        line += " (automatic restarts used up)"
+    return line
+
+
+def restore_error_line(daemon_status: dict | None) -> str | None:
+    """❌ after a NON-transient restore-on-first-run failure (wrong key,
+    corrupt snapshot): the daemon carried on without the snapshot."""
+    err = (daemon_status or {}).get("restore_error")
+    if not err:
+        return None
+    return (f"❌ {'Restore':<16} restore-on-first-run failed: {err} — the store was not "
+            f"restored; run 'mcpbrain restore --check'")
+
+
+def prune_held_line(daemon_status: dict | None) -> str | None:
+    """⚠️ while the snapshot prune holds off (newest drastically smaller)."""
+    ph = (daemon_status or {}).get("prune_held")
+    if not ph:
+        return None
+    return (f"⚠️  {'Backup':<16} old snapshots kept: the newest is "
+            f"{ph.get('newest_bytes', 0):,} bytes vs {ph.get('largest_kept_bytes', 0):,} "
+            f"— pruning paused so a good snapshot stays restorable")
 
 
 def tenant_line() -> str:

@@ -2,6 +2,7 @@ import hashlib
 import json
 import re
 import sqlite3
+import threading
 from contextlib import closing, contextmanager
 from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
@@ -751,6 +752,12 @@ def _owner_suffix_ok(prefix: str, rest: str) -> bool:
     return True
 
 
+class StoreRestoringError(TimeoutError):
+    """The store is being swapped for a restored snapshot: every connection is
+    refused for that (brief) window. A TimeoutError so callers that classify
+    failures treat it as transient."""
+
+
 class Store:
     # Phase C: bump when the FTS contextual-text format changes so
     # reindex_fts_batch() knows which embedded chunks are stale.
@@ -776,6 +783,11 @@ class Store:
         self.path = Path(path)
         self.dim = dim
         self.read_only = read_only  # the daemon is the sole writer, full stop.
+        # Restore gate (restoring_gate): while set, _connect refuses; the gate
+        # waits for in-flight connections to close before the swap.
+        self._gate_cv = threading.Condition()
+        self._gate_closed = False
+        self._gate_active = 0
         # The MCP server still CONSTRUCTS a writable handle, but as of Phase 4
         # (tool_exec_in_daemon, default ON) nothing calls it: draft_save /
         # meeting_pack_upsert / finding_resolve route to the daemon, and
@@ -783,10 +795,65 @@ class Store:
         # reached only on the local kill-switch path (flag off), so in the shipped
         # configuration no second writable connection exists to serialise against.
 
+    def _gate(self) -> threading.Condition:
+        cv = getattr(self, "_gate_cv", None)
+        if cv is None:      # an instance that bypassed __init__
+            cv = self._gate_cv = threading.Condition()
+            self._gate_closed, self._gate_active = False, 0
+        return cv
+
+    @contextmanager
+    def restoring_gate(self, timeout_s: float = 30.0):
+        """Refuse new connections and wait (up to timeout_s) for in-flight
+        ones in THIS process to close, for the duration of a restored-snapshot
+        swap. Raises StoreRestoringError (and reopens) if they do not drain.
+        Other processes are covered by the caller's checkpoint busy check."""
+        import time as _time
+        cv = self._gate()
+        with cv:
+            self._gate_closed = True
+            deadline = _time.monotonic() + timeout_s
+            while self._gate_active:
+                left = deadline - _time.monotonic()
+                if left <= 0:
+                    self._gate_closed = False
+                    cv.notify_all()
+                    raise StoreRestoringError(
+                        f"{self._gate_active} store connection(s) still open")
+                cv.wait(left)
+        try:
+            yield
+        finally:
+            with cv:
+                self._gate_closed = False
+                cv.notify_all()
+
     @contextmanager
     def _connect(self, *, write: bool = False, retries: int = _BEGIN_RETRIES,
                 busy_timeout_ms: int = DEFAULT_BUSY_TIMEOUT_MS,
                 bulk: bool = False):
+        """_connect_unguarded behind the restore gate: refused (with
+        StoreRestoringError) while a restored snapshot is being swapped in,
+        and counted so the gate can wait for in-flight connections."""
+        cv = self._gate()
+        with cv:
+            if self._gate_closed:
+                raise StoreRestoringError("store is being restored")
+            self._gate_active += 1
+        try:
+            with self._connect_unguarded(write=write, retries=retries,
+                                         busy_timeout_ms=busy_timeout_ms,
+                                         bulk=bulk) as db:
+                yield db
+        finally:
+            with cv:
+                self._gate_active -= 1
+                cv.notify_all()
+
+    @contextmanager
+    def _connect_unguarded(self, *, write: bool = False, retries: int = _BEGIN_RETRIES,
+                           busy_timeout_ms: int = DEFAULT_BUSY_TIMEOUT_MS,
+                           bulk: bool = False):
         """Open a connection, commit-or-rollback on exit, and ALWAYS close it.
 
         sqlite3.Connection is its own context manager but only commits/rollbacks
