@@ -7,7 +7,39 @@ import tempfile
 from pathlib import Path
 
 
-def run_restore(home: str, *, key: bytes | None = None, force: bool = False) -> str:
+def _restore_via_stage(tmp_path: Path, p: Path, key: bytes, home: str, swap) -> None:
+    """Decrypt the downloaded artifact into a STAGING file beside the store
+    (records repo + config.json go straight to their destinations), then hand
+    the staging file to `swap` -- never write over the live store in place.
+    `swap(stage)` defaults to backup.swap_in_store(stage, p): a busy-checked WAL
+    checkpoint, then an atomic os.replace. The daemon passes one that also
+    raises its restoring gate."""
+    from mcpbrain import backup as _backup, config as _cfg
+    fd, stage = tempfile.mkstemp(dir=str(p.parent), prefix=".restore-", suffix=".stage")
+    os.close(fd)
+    stage = Path(stage)
+    try:
+        # Restore the full bundle: store + the local records repo + config.json
+        # (a bare-store legacy artifact restores the store only -- restore()
+        # detects the shape). records_dir/config_path are ignored when the
+        # artifact doesn't carry them.
+        _backup.restore(
+            tmp_path, stage, key,
+            records_dir=_cfg.records_dir(home),
+            config_path=str(Path(home) / "config.json"))
+        if swap is None:
+            _backup.swap_in_store(stage, p)
+        else:
+            swap(stage)
+    finally:
+        try:
+            stage.unlink()
+        except OSError:
+            pass
+
+
+def run_restore(home: str, *, key: bytes | None = None, force: bool = False,
+                swap=None) -> str:
     """Find the latest snapshot on Drive and restore it to the store path.
 
     Resolves the escrow key from config (backup.escrow_key) unless key is given.
@@ -52,14 +84,7 @@ def run_restore(home: str, *, key: bytes | None = None, force: bool = False) -> 
     tmp_path = Path(tmp)
     try:
         _backup.download_snapshot(drive_service, file_id, tmp_path)
-        # Restore the full bundle: store + the local records repo + config.json
-        # (a bare-store legacy artifact restores the store only — restore()
-        # detects the shape). records_dir/config_path are ignored when the
-        # artifact doesn't carry them.
-        _backup.restore(
-            tmp_path, p, key,
-            records_dir=_cfg.records_dir(home),
-            config_path=str(Path(home) / "config.json"))
+        _restore_via_stage(tmp_path, p, key, home, swap)
     finally:
         try:
             tmp_path.unlink()
@@ -220,7 +245,8 @@ def detect_restorable(home: str, drive_service) -> dict:
     }
 
 
-def run_restore_auto(home: str, *, force: bool = False, drive_service=None) -> str:
+def run_restore_auto(home: str, *, force: bool = False, drive_service=None,
+                     swap=None) -> str:
     """Detect and restore the latest backup, fetching the escrow key from Drive.
 
     The turnkey recovery path for a fresh machine: after Google sign-in, this
@@ -257,10 +283,7 @@ def run_restore_auto(home: str, *, force: bool = False, drive_service=None) -> s
     tmp_path = Path(tmp)
     try:
         _backup.download_snapshot(drive_service, info["snapshot_id"], tmp_path)
-        _backup.restore(
-            tmp_path, p, key,
-            records_dir=_cfg.records_dir(home),
-            config_path=str(Path(home) / "config.json"))
+        _restore_via_stage(tmp_path, p, key, home, swap)
     finally:
         try:
             tmp_path.unlink()

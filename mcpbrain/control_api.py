@@ -52,6 +52,10 @@ def h_json(h, code, obj):
     h.send_response(code); h.send_header("Content-Type","application/json")
     h.send_header("Content-Length", str(len(b))); h.end_headers(); h.wfile.write(b)
 
+
+class RestoreHoldRefused(RuntimeError):
+    """Daemon.call_tool refused a store-writing tool during the restore hold."""
+
 class ControlServer:
     def __init__(self, daemon, home, store=None):
         self.daemon = daemon; self.home = Path(home)
@@ -439,6 +443,10 @@ class ControlServer:
                 kwargs = {"confirmation": confirmation} if confirmation is not None else {}
                 try:
                     return h_json(h, 200, {"result": d.call_tool(name, arguments, **kwargs)})
+                except RestoreHoldRefused as exc:
+                    # A store-writing tool during the restore hold: a clean,
+                    # readable refusal (ToolExecutionError on the MCP side).
+                    return h_json(h, 409, {"error": str(exc)})
                 except ValueError as exc:
                     log.error("control API /api/tool refused %r: %s", name, exc)
                     return h_json(h, 400, {"error": str(exc)})
@@ -622,7 +630,13 @@ class ControlServer:
                     # force=True because the file already exists (run_restore_auto's
                     # own size guard would otherwise block restoring over it).
                     if info.get("available") and not _restore.store_has_content(_config.store_path()):
-                        _restore.run_restore_auto(str(self.home), drive_service=svc, force=True)
+                        # Never in place: decrypt to a staging file, then swap it
+                        # in behind the daemon's restoring gate after a busy-checked
+                        # checkpoint (Daemon.swap_restored_store). A busy store is
+                        # transient -- the wizard is told to retry.
+                        _restore.run_restore_auto(
+                            str(self.home), drive_service=svc, force=True,
+                            swap=getattr(d, "swap_restored_store", None))
                         # The restored bundle carries the escrow key + backup config,
                         # so backup is already on after a restore.
                         return h_json(h, 200, {"action": "restored",
@@ -633,6 +647,11 @@ class ControlServer:
                     return h_json(h, 200, {"action": "backup_enabled",
                                            "restorable": bool(info.get("available"))})
                 except Exception as exc:
+                    from mcpbrain.backup import RestoreBusyError
+                    from mcpbrain.store import StoreRestoringError
+                    if isinstance(exc, (RestoreBusyError, StoreRestoringError)):
+                        log.warning("backup/auto: store busy, restore refused: %s", exc)
+                        return h_json(h, 503, {"error": str(exc), "retry": True})
                     log.exception("backup/auto failed")
                     return h_json(h, 500, {"error": str(exc)})
 

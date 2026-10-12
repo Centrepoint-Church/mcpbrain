@@ -1246,6 +1246,24 @@ def _checkpoint_for_swap(path) -> None:
             f"store busy (busy={busy}, log={log_frames}, checkpointed={done})")
 
 
+def swap_in_store(stage, dest, *, gate=None) -> None:
+    """Replace the live store `dest` with the restored `stage` file -- the ONE
+    way any restore touches a live store (daemon start-up, the wizard's
+    /api/backup/auto, `mcpbrain restore`). Inside `gate` (the daemon's
+    restoring gate; a no-op for a separate process), checkpoint the live WAL
+    with busy == 0 required (RestoreBusyError otherwise, which callers treat as
+    transient), then os.replace -- atomic, same filesystem. An empty stage (an
+    artifact that carried no store) is refused and the live store left alone."""
+    from contextlib import nullcontext
+    stage, dest = Path(stage), Path(dest)
+    if not stage.exists() or stage.stat().st_size == 0:
+        raise ValueError("snapshot carried no store; live store left untouched")
+    os.chmod(stage, 0o600)
+    with (gate or nullcontext)():
+        _checkpoint_for_swap(dest)
+        os.replace(stage, dest)
+
+
 def download_and_restore(bc, store, file_id, *, gate=None) -> Path:
     """Download an encrypted snapshot from Drive and restore it as the live store.
 
@@ -1283,11 +1301,7 @@ def download_and_restore(bc, store, file_id, *, gate=None) -> Path:
     try:
         download_snapshot(bc.drive_service, file_id, enc)
         restore(enc, stage, bc.key)
-        if stage.stat().st_size == 0:
-            raise ValueError("snapshot carried no store; live store left untouched")
-        with gate():
-            _checkpoint_for_swap(dest)
-            os.replace(stage, dest)
+        swap_in_store(stage, dest, gate=gate)
         return dest
     finally:
         for t in temps:

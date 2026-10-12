@@ -112,7 +112,8 @@ def test_run_restore_auto_fetches_key_and_restores_bundle(tmp_path, monkeypatch)
                         lambda svc, fid, dest: Path(dest).write_bytes(b"enc") or Path(dest))
     captured = {}
     monkeypatch.setattr("mcpbrain.backup.restore",
-                        lambda enc, dest, key, **kw: captured.update(key=key, dest=str(dest), **kw) or Path(dest))
+                        lambda enc, dest, key, **kw: captured.update(key=key, dest=str(dest), **kw)
+                        or Path(dest).write_bytes(b"store") or Path(dest))
 
     restored = restore.run_restore_auto(str(tmp_path), drive_service=object())
 

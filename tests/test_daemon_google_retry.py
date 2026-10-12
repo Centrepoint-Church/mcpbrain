@@ -769,3 +769,255 @@ def test_run_loop_iteration_calls_retry_google_builds(monkeypatch):
     monkeypatch.setattr(dmod, "write_daemon_heartbeat", lambda home: None)
     dm.run()
     assert order == ["retry", "backup"]
+
+
+# -- fix round 3 ----------------------------------------------------------------
+
+def _snapshot_artifact(tmp_path, n=3):
+    """A real, encrypted bare-store snapshot holding `n` chunks, plus its key."""
+    import sqlite3
+
+    from mcpbrain import backup as bmod
+    src = Store(tmp_path / "snapsrc.sqlite3", dim=4)
+    src.init()
+    for i in range(n):
+        src.upsert_chunk(doc_id=f"s{i}", text="snap", content_hash=f"s{i}", metadata={})
+    sqlite3.connect(str(src.path)).execute("PRAGMA wal_checkpoint(TRUNCATE)").close()
+    key = bmod.generate_escrow_key()
+    art = tmp_path / "artifact.enc"
+    bmod.encrypt_file(src.path, art, key)
+    return art, key
+
+
+def _integrity(path):
+    import sqlite3
+    con = sqlite3.connect(str(path))
+    try:
+        return con.execute("PRAGMA integrity_check").fetchone()[0]
+    finally:
+        con.close()
+
+
+def test_held_daemon_bootstrap_baseline_is_skipped_api_and_doctor(home, monkeypatch):
+    import json
+    import urllib.request
+
+    from mcpbrain import doctor, onboarding
+    from mcpbrain.control_api import ControlServer
+    d, _rec = _held_daemon(home, monkeypatch, Clock(), find_errors=[_transient()])
+
+    def must_not_import(home_, store, **kw):
+        store.upsert_chunk(doc_id="cached", text="x", content_hash="c", metadata={})
+        return {"status": "done"}
+    monkeypatch.setattr(onboarding, "run_bootstrap", must_not_import)
+    monkeypatch.setattr(onboarding, "should_bootstrap", lambda home_: True)
+
+    srv = ControlServer(d, home=str(home), store=d._store)
+    srv.start()
+    try:
+        req = urllib.request.Request(f"http://127.0.0.1:{srv.port}/api/bootstrap-baseline",
+                                     data=b"{}", method="POST")
+        req.add_header("Authorization", f"Bearer {srv.token}")
+        req.add_header("Content-Type", "application/json")
+        body = json.loads(urllib.request.urlopen(req).read())
+    finally:
+        srv.stop()
+    assert body == {"status": "skipped", "reason": "restore pending"}
+    assert d._store.chunk_count() == 0
+
+    # The doctor repair path reports it as held, not as a failure.
+    from tests.test_doctor import _conns, _ok_repairs
+    repairs = {**_ok_repairs(), "baseline": lambda: d.bootstrap_baseline_once(force=True)}
+    _code, msg = doctor.run_doctor("/tmp/home", model_present=lambda h: True,
+                                   conns=_conns(), repairs=repairs, daemon_status={})
+    assert "➖ Baseline" in msg and "restore pending" in msg
+    assert d._store.chunk_count() == 0
+
+
+def test_held_daemon_refuses_store_writing_tools_but_answers_read_only(home, monkeypatch):
+    from mcpbrain.control_api import RestoreHoldRefused
+    d, _rec = _held_daemon(home, monkeypatch, Clock(), find_errors=[_transient()])
+    with pytest.raises(RestoreHoldRefused, match="restore"):
+        d.call_tool("brain_draft_save", {"thread_id": "t", "body": "b"})
+    with pytest.raises(RestoreHoldRefused):
+        d.call_tool("brain_finding_resolve", {"finding_id": 1, "outcome": "fixed"})
+    # A read-only tool still answers.
+    d.call_tool("brain_actions", {"owner": "Sam", "status": "open"})
+    assert d._store.chunk_count() == 0
+
+
+def test_tool_refusal_is_a_409_error_over_the_control_api(home, monkeypatch):
+    import json
+    import urllib.error
+    import urllib.request
+
+    from mcpbrain.control_api import ControlServer
+    d, _rec = _held_daemon(home, monkeypatch, Clock(), find_errors=[_transient()])
+    srv = ControlServer(d, home=str(home), store=d._store)
+    srv.start()
+    try:
+        req = urllib.request.Request(
+            f"http://127.0.0.1:{srv.port}/api/tool", method="POST",
+            data=json.dumps({"name": "brain_draft_save",
+                             "arguments": {"thread_id": "t", "body": "b"}}).encode())
+        req.add_header("Authorization", f"Bearer {srv.token}")
+        req.add_header("Content-Type", "application/json")
+        with pytest.raises(urllib.error.HTTPError) as e:
+            urllib.request.urlopen(req)
+        assert e.value.code == 409
+        assert "waiting to restore your backup" in json.loads(e.value.read())["error"]
+    finally:
+        srv.stop()
+
+
+def test_permanent_probe_error_lifts_the_hold_and_reports(home, monkeypatch):
+    clock = Clock()
+    d, _rec = _held_daemon(home, monkeypatch, clock,
+                           find_errors=[_transient(), PermissionError("forbidden")])
+    clock.t += 60
+    d._retry_google_builds()
+    assert d._restore_pending is False
+    assert dmod._read_restore_pending(str(home)) is None
+    assert d.status()["restore_error"] == "forbidden"
+
+
+def test_store_gate_waits_for_an_in_flight_connection(tmp_path):
+    import threading
+
+    s = Store(tmp_path / "b.sqlite3", dim=4)
+    s.init()
+    inside, release, order = threading.Event(), threading.Event(), []
+
+    def hold():
+        with s._connect() as db:
+            db.execute("SELECT 1").fetchone()
+            inside.set()
+            release.wait(5)
+        order.append("closed")
+    t = threading.Thread(target=hold)
+    t.start()
+    inside.wait(5)
+    threading.Timer(0.1, release.set).start()
+    with s.restoring_gate(timeout_s=5):
+        order.append("gated")
+    t.join(5)
+    assert order == ["closed", "gated"]
+
+
+def test_store_gate_times_out_and_reopens(tmp_path):
+    import threading
+
+    from mcpbrain.store import StoreRestoringError
+    s = Store(tmp_path / "b.sqlite3", dim=4)
+    s.init()
+    inside, release = threading.Event(), threading.Event()
+
+    def hold():
+        with s._connect():
+            inside.set()
+            release.wait(5)
+    t = threading.Thread(target=hold)
+    t.start()
+    inside.wait(5)
+    try:
+        with pytest.raises(StoreRestoringError):
+            with s.restoring_gate(timeout_s=0.05):
+                pass
+        assert s.chunk_count() == 0          # the gate reopened after timing out
+    finally:
+        release.set()
+        t.join(5)
+
+
+def test_startup_restore_end_to_end_through_the_restoring_gate(home, monkeypatch):
+    """The real download_and_restore through Daemon._restore_gate: a local fake
+    Drive (download_snapshot copies a real encrypted snapshot), a real store."""
+    import shutil
+
+    from mcpbrain import backup as bmod
+    art, key = _snapshot_artifact(home)
+    from mcpbrain import config
+    config.write_config(str(home), {"backup": {
+        "escrow_key": key.decode(), "shared_drive_id": "SD", "user_id": "u1"}})
+    monkeypatch.setattr(auth, "build_google_services",
+                        FlakyBuild(result={"drive_service": "DRIVE"}))
+    monkeypatch.setattr(bmod, "find_latest_snapshot", lambda svc, sd, uid: "SNAP1")
+    monkeypatch.setattr(bmod, "download_snapshot",
+                        lambda svc, fid, dest, **kw: shutil.copyfile(art, dest))
+    d = _daemon(home, Clock())
+    seen = []
+    real_ckpt = bmod._checkpoint_for_swap
+
+    def spy(path):
+        seen.append((d.is_restoring(), d._store._gate_closed))
+        return real_ckpt(path)
+    monkeypatch.setattr(bmod, "_checkpoint_for_swap", spy)
+
+    d._startup_restore()
+    assert seen == [(True, True)]             # swapped only behind both gates
+    assert not d.is_restoring()
+    assert d._store.chunk_count() == 3
+    assert _integrity(d._store.path) == "ok"
+    assert not list(home.glob(".restore-*"))
+
+
+def test_wizard_restore_is_busy_checked_and_never_in_place(home, monkeypatch):
+    """/api/backup/auto -> run_restore_auto -> Daemon.swap_restored_store:
+    refused (503, retry) while a reader holds the store, intact afterwards,
+    then swapped in cleanly."""
+    import json
+    import shutil
+    import sqlite3
+    import urllib.error
+    import urllib.request
+
+    from mcpbrain import backup as bmod
+    from mcpbrain import restore as rmod
+    from mcpbrain.control_api import ControlServer
+    art, key = _snapshot_artifact(home)
+    monkeypatch.setattr(dmod.config, "store_path", lambda: home / "b.sqlite3")
+    monkeypatch.setattr("mcpbrain.config.store_path", lambda: home / "b.sqlite3")
+    monkeypatch.setattr(rmod, "account_email", lambda h: "sam@example.org")
+    monkeypatch.setattr(rmod, "detect_restorable", lambda h, svc: {
+        "available": True, "snapshot_id": "SNAP1", "user_email": "sam@example.org",
+        "escrow_folder_id": "ESC", "has_key": True})
+    monkeypatch.setattr(rmod, "_download_escrow_key", lambda svc, folder, email: key)
+    monkeypatch.setattr(auth, "load_credentials", lambda *a, **k: object())
+    monkeypatch.setattr(auth, "build_service", lambda *a, **k: object())
+    monkeypatch.setattr(bmod, "download_snapshot",
+                        lambda svc, fid, dest, **kw: shutil.copyfile(art, dest))
+
+    d = _daemon(home, Clock())               # empty store at home/b.sqlite3
+    # A reader in another connection holding a read transaction over live frames.
+    reader = sqlite3.connect(str(d._store.path))
+    reader.execute("CREATE TABLE IF NOT EXISTS t(x)")
+    reader.commit()
+    d._store.set_meta("k", "1")
+    reader.execute("BEGIN")
+    reader.execute("SELECT COUNT(*) FROM chunks").fetchone()
+    d._store.set_meta("k", "2")
+
+    srv = ControlServer(d, home=str(home), store=d._store)
+    srv.start()
+
+    def post():
+        req = urllib.request.Request(f"http://127.0.0.1:{srv.port}/api/backup/auto",
+                                     data=b"{}", method="POST")
+        req.add_header("Authorization", f"Bearer {srv.token}")
+        req.add_header("Content-Type", "application/json")
+        return urllib.request.urlopen(req)
+    try:
+        with pytest.raises(urllib.error.HTTPError) as e:
+            post()
+        assert e.value.code == 503
+        assert json.loads(e.value.read())["retry"] is True
+        reader.rollback()
+        reader.close()
+        assert _integrity(d._store.path) == "ok"
+        assert d._store.chunk_count() == 0
+        assert json.loads(post().read())["action"] == "restored"
+    finally:
+        srv.stop()
+    assert d._store.chunk_count() == 3
+    assert _integrity(d._store.path) == "ok"
+    assert not list(home.glob(".restore-*"))

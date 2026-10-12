@@ -376,6 +376,10 @@ def run_doctor(home, *, conns=None, repairs=None, reprobe=None, platform=None,
             glyph = ("✅" if st in ("done", "skipped")
                      else "❌" if st == "error"
                      else "➖")
+            if res.get("reason") == "restore pending":
+                # Held on purpose (see the Restore line), not a failure: an
+                # import would fill the empty store the pending restore needs.
+                glyph = "➖"
             lines.append(f"{glyph} {'Baseline':<16} bootstrap {st}"
                          + (f" ({res['reason']})" if res.get("reason") else ""))
         except Exception as exc:  # noqa: BLE001 — never fatal

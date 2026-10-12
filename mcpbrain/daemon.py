@@ -1653,6 +1653,11 @@ class Daemon:
         finally:
             self._restoring = False
 
+    def swap_restored_store(self, stage) -> None:
+        """Swap a restored staging file in as the live store, behind this
+        daemon's restoring gate (the wizard's /api/backup/auto path)."""
+        backup.swap_in_store(stage, self._store.path, gate=self._restore_gate)
+
     def is_restoring(self) -> bool:
         return bool(getattr(self, "_restoring", False))
 
@@ -1681,6 +1686,13 @@ class Daemon:
             status, exc = _probe_snapshot(home)
             if status == "transient":
                 bo.failed(exc)
+                return
+            if status == "error":
+                # Permanent, as at start-up: do not hold forever -- lift the
+                # hold and surface the error (status/doctor).
+                self._restore_error = str(exc)[:200]
+                self._release_restore_hold(home)
+                bo.clear()
                 return
             if status in ("no_snapshot", "unconfigured"):
                 if status == "unconfigured":
@@ -2120,6 +2132,18 @@ class Daemon:
         handlers = self._routed_tool_handlers()
         if name not in handlers:
             raise ValueError(f"tool not routed to the daemon: {name}")
+        if getattr(self, "_restore_pending", False):
+            # Restore hold: the store must stay empty so the pending restore can
+            # still run -- and anything written now would be lost when it does.
+            # Read-only tools (readOnlyHint) still answer.
+            ann = spec(name).annotations
+            if not (ann is not None and ann.read_only_hint is True):
+                from mcpbrain.control_api import RestoreHoldRefused
+                raise RestoreHoldRefused(
+                    f"{name} is unavailable: mcpbrain is waiting to restore your backup "
+                    "(Google was unreachable at start-up) and is holding all writes so "
+                    "nothing is lost. Read-only tools still work; this clears once the "
+                    "restore runs.")
         try:
             jsonschema.validate(arguments, spec(name).input_schema)
         except jsonschema.ValidationError as exc:
@@ -2444,6 +2468,11 @@ class Daemon:
         marker); re-runnable with force=True (doctor / `mcpbrain bootstrap`).
         Degrades cleanly (no fleet folder / snapshot / pin) and never raises into
         the sync cycle."""
+        if getattr(self, "_restore_pending", False):
+            # Restore hold: importing shared-drive caches would make the empty
+            # store non-empty, the next start would then skip the restore, and
+            # backups would resume over the good snapshot (the incident chain).
+            return {"status": "skipped", "reason": "restore pending"}
         home = str(app_dir())
         if not force and self._baseline_bootstrap_done:
             return None
@@ -5138,7 +5167,7 @@ def _restore_on_first_run_classified(store, home, *, gate=None):
 
 def _probe_snapshot(home):
     """Does Drive hold a snapshot for this user? ("snapshot" | "no_snapshot" |
-    "unconfigured" | "transient", exc). Read-only; never raises."""
+    "unconfigured" | "transient" | "error", exc). Read-only; never raises."""
     build = _backup_from_config(home)
     bc, _interval = build
     if bc is None:
@@ -5150,8 +5179,8 @@ def _probe_snapshot(home):
     except Exception as exc:  # noqa: BLE001 — a probe must never raise into the loop
         if _is_transient_google_error(exc):
             return ("transient", exc)
-        log.warning("restore pending: snapshot lookup failed: %s", exc)
-        return ("transient", exc)   # cannot tell; keep holding, retry on the backoff
+        log.warning("restore pending: snapshot lookup failed permanently: %s", exc)
+        return ("error", exc)
     return ("snapshot", None) if file_id else ("no_snapshot", None)
 
 
