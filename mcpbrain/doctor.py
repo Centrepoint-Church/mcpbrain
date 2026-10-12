@@ -397,6 +397,9 @@ def run_doctor(home, *, conns=None, repairs=None, reprobe=None, platform=None,
                          f"(recovered)")
         else:
             lines.append(f"✅ {'Watchdog':<16} no stall restarts")
+        gu_line = google_unavailable_line(daemon_status)
+        if gu_line:
+            lines.append(gu_line)
 
     lines.append(arch_line())
     lines.append(tenant_line())
@@ -574,6 +577,29 @@ def _is_rosetta_translated() -> bool:
 
 
 _ARCH_NORM = {"arm64": "ARM64", "aarch64": "ARM64", "amd64": "X64", "x64": "X64", "x86_64": "X64"}
+
+
+def google_unavailable_line(daemon_status: dict | None) -> str | None:
+    """⚠️ while the running daemon is retrying a Google build that failed
+    transiently, else None.
+
+    The Google probe checks the TOKEN, which can be perfectly fine while the
+    daemon itself could not reach Google at start-up: live 2026-10-09 that
+    left sync and backup off for three days under a green "Google Verified".
+    The daemon retries on its own, so this is a warning, not an action item.
+    """
+    gu = (daemon_status or {}).get("google_unavailable")
+    if not gu:
+        return None
+    attempts = int(gu.get("attempts") or 0)
+    affects = ", ".join(gu.get("affects") or [])
+    line = (f"⚠️  {'Google':<16} unreachable since {gu.get('since') or 'start-up'}, "
+            f"retrying ({attempts} attempt{'s' if attempts != 1 else ''})")
+    if affects:
+        line += f" — {affects} waiting"
+    if gu.get("last_error"):
+        line += f"; last error: {gu['last_error']}"
+    return line
 
 
 def tenant_line() -> str:

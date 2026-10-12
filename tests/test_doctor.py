@@ -456,3 +456,28 @@ def test_doctor_reports_sync_backlog_and_failures(tmp_path, monkeypatch):
                                   conns=_conns(), repairs={})
     assert "Sync queue" in msg and "1 pending" in msg, msg
     assert "Sync failures" in msg and "export timeout" in msg, msg
+
+
+def test_google_unavailable_is_warned_while_the_daemon_retries():
+    """The Google probe checks the token; the daemon can still be cut off from
+    Google (live 2026-10-09: three days with no sync or backup under a green
+    "Google Verified"). Warned, not counted as an action: the daemon retries."""
+    code, msg = doctor.run_doctor(
+        "/tmp/home", model_present=lambda h: True, conns=_conns(),
+        repairs=_ok_repairs(),
+        daemon_status={"watchdog_exits": 0, "watchdog_limit_reached": False,
+                       "google_unavailable": {"since": "2026-10-09T08:00:00Z",
+                                              "attempts": 3, "last_error": "x",
+                                              "affects": ["sync services"]}})
+    assert "⚠️  Google" in msg
+    assert "unreachable since 2026-10-09T08:00:00Z, retrying (3 attempts)" in msg
+    assert code == 0
+
+
+def test_no_google_unavailable_line_when_null():
+    code, msg = doctor.run_doctor(
+        "/tmp/home", model_present=lambda h: True, conns=_conns(),
+        repairs=_ok_repairs(),
+        daemon_status={"watchdog_exits": 0, "watchdog_limit_reached": False,
+                       "google_unavailable": None})
+    assert "unreachable since" not in msg

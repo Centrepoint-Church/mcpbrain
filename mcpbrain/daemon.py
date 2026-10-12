@@ -215,6 +215,101 @@ SNAPSHOT_ORPHAN_MAX_AGE_S = 3600.0
 # same default value is needed, so those spots can't drift from each other.
 EMBED_MAX_ITEMS = 2000
 
+# Retry schedule for a Google build (sync services, the backup config, the
+# org-config merge) that failed TRANSIENTLY -- the network's fault, not the
+# token's. Live 2026-10-09: the daemon was bootstrapped while
+# oauth2.googleapis.com was briefly unreachable (a just-finished drain had
+# exhausted local ephemeral ports, Errno 49). All three builds resolved
+# "permanently" to nothing on that one failure, so the daemon ran for three days
+# with no Gmail/Drive/Calendar sync, no backup, and the reflow (gated on a
+# backup < 24 h old) frozen -- while doctor, which checks the token itself, said
+# "Google Verified". A restart fixed everything. A transient failure now retries
+# on this backoff (60 s, doubling, capped at 15 min) instead; a PERMANENT one
+# (no token, revoked grant, missing scope, a programming error) still resolves
+# once, exactly as before.
+GOOGLE_RETRY_FIRST_S = 60.0
+GOOGLE_RETRY_MAX_S = 900.0
+
+
+def _is_transient_google_error(exc) -> bool:
+    """The reflow handler's network/rate-limit classifier, reused rather than
+    duplicated: one definition of "the network's fault, not the token's".
+    Imported lazily -- reflow_handler pulls in the sync stack."""
+    from mcpbrain.sync.reflow_handler import _is_transient
+    return _is_transient(exc)
+
+
+class _GoogleBackoff:
+    """Retry state for ONE Google-dependent build that failed transiently.
+
+    `pending` while a retry is scheduled; `due()` once its retry time has
+    passed (always True when nothing is pending). `failed(exc)` schedules the
+    next retry, `succeeded()` clears it and logs the recovery once, `clear()`
+    clears it silently (the build failed PERMANENTLY, which is reported by the
+    build itself). `build_lock` single-flights the build across the cycle,
+    maintenance and control-API threads: a caller that finds it held does not
+    wait for someone else's network round-trip.
+    """
+
+    def __init__(self, what: str, clock=time.monotonic, wall_clock=time.time):
+        self._what = what
+        self._clock = clock
+        self._wall_clock = wall_clock
+        self._lock = threading.Lock()
+        self.build_lock = threading.Lock()
+        self._reset()
+
+    def _reset(self) -> None:
+        self.attempts = 0
+        self.retry_at: float | None = None
+        self.since: str | None = None
+        self.last_error = ""
+        self.last_at = 0.0
+
+    @property
+    def pending(self) -> bool:
+        return self.retry_at is not None
+
+    def due(self) -> bool:
+        with self._lock:
+            return self.retry_at is None or self._clock() >= self.retry_at
+
+    def failed(self, exc) -> None:
+        from datetime import datetime, timezone
+        with self._lock:
+            self.attempts += 1
+            delay = min(GOOGLE_RETRY_FIRST_S * (2 ** min(self.attempts - 1, 16)),
+                        GOOGLE_RETRY_MAX_S)
+            self.retry_at = self._clock() + delay
+            now = self._wall_clock()
+            if self.since is None:
+                self.since = datetime.fromtimestamp(now, timezone.utc).strftime(
+                    "%Y-%m-%dT%H:%M:%SZ")
+            self.last_error = str(exc)[:200]
+            self.last_at = now
+            attempts = self.attempts
+        log.warning("%s: Google unreachable (transient, attempt %d): %s -- will retry "
+                    "in %.0fs", self._what, attempts, exc, delay)
+
+    def succeeded(self) -> None:
+        with self._lock:
+            failures = self.attempts
+            self._reset()
+        if failures:
+            log.info("Google services restored after %d attempt(s) (%s)",
+                     failures + 1, self._what)
+
+    def clear(self) -> None:
+        with self._lock:
+            self._reset()
+
+    def snapshot(self) -> dict | None:
+        with self._lock:
+            if self.retry_at is None:
+                return None
+            return {"what": self._what, "since": self.since, "attempts": self.attempts,
+                    "last_error": self.last_error, "last_at": self.last_at}
+
 
 def _graph_apply():
     """Resolve Phase 1's graph_write.apply through an indirection seam.
@@ -964,6 +1059,12 @@ class Daemon:
         if self._backup is not None and self._backup_interval_s is None:
             raise ValueError("backup_interval_s is required when backup is configured")
         self._clock = clock
+        # Transient-failure retry state for the three Google-dependent builds
+        # (see GOOGLE_RETRY_FIRST_S). Read through _google_backoff() so an
+        # instance built without __init__ still works.
+        self._services_backoff = _GoogleBackoff("sync services", clock, wall_clock)
+        self._backup_backoff = _GoogleBackoff("backup", clock, wall_clock)
+        self._org_config_backoff = _GoogleBackoff("org-config merge", clock, wall_clock)
         # Seed the cadence clock from the PERSISTED attempt stamp so a restart
         # is not mistaken for a first run. Without this, _last_backup started
         # None on every boot and maybe_backup treated that as "due now": on
@@ -1299,23 +1400,148 @@ class Daemon:
         was not None — even an empty dict), they are used as-is and auth is
         never called. Otherwise the services are built once from the user's
         token via auth.build_google_services(); a missing/invalid token is
-        logged and degrades to empty services (no sync, no crash).
+        logged and degrades to empty services (no sync, no crash) for the rest
+        of the run.
+
+        A TRANSIENT failure (network, token-endpoint outage -- see
+        _is_transient_google_error) does NOT resolve: it returns {} for now and
+        schedules a retry on the _GoogleBackoff schedule. Calls before the
+        retry time, or while another thread is mid-build, return {} without
+        touching auth. Every consumer calls this per cycle/pass rather than
+        caching the result, so the first successful retry reaches all of them.
         """
         if self._services_resolved:
             return self._services
-
-        from mcpbrain import auth
+        bo = self._google_backoff("_services_backoff", "sync services")
+        if not bo.due() or not bo.build_lock.acquire(blocking=False):
+            return self._services
         try:
-            built = auth.build_google_services()
-        except Exception as exc:  # noqa: BLE001 — no/invalid token, etc.
-            log.warning(
-                "no Google credentials — running without sync "
-                "(authorise: python -m mcpbrain.auth): %s", exc
-            )
-            built = {}
-        self._services = self._filter_services(built)
-        self._services_resolved = True
-        return self._services
+            if self._services_resolved or not bo.due():
+                return self._services
+            from mcpbrain import auth
+            try:
+                built = auth.build_google_services()
+            except Exception as exc:  # noqa: BLE001 — no/invalid token, network, etc.
+                if _is_transient_google_error(exc):
+                    bo.failed(exc)
+                    return self._services
+                log.warning(
+                    "no Google credentials — running without sync "
+                    "(authorise: python -m mcpbrain.auth): %s", exc
+                )
+                bo.clear()
+                built = {}
+                restored = False
+            else:
+                restored = True
+            self._services = self._filter_services(built)
+            self._services_resolved = True
+            if restored:
+                bo.succeeded()
+            return self._services
+        finally:
+            bo.build_lock.release()
+
+    def _google_backoff(self, attr: str, what: str) -> _GoogleBackoff:
+        """The named _GoogleBackoff, created on first use for an instance that
+        bypassed __init__ (several tests build Daemon via __new__)."""
+        bo = getattr(self, attr, None)
+        if bo is None:
+            bo = _GoogleBackoff(what, getattr(self, "_clock", time.monotonic),
+                                getattr(self, "_wall_clock", time.time))
+            setattr(self, attr, bo)
+        return bo
+
+    def google_unavailable(self) -> dict | None:
+        """{since, attempts, last_error, affects} while any Google build is
+        waiting on a transient-failure retry, else None. `since` is the
+        earliest outage start, `attempts` the most failed attempts of any one
+        build, `last_error` the most recent failure."""
+        snaps = [s for s in (
+            self._google_backoff(a, w).snapshot() for a, w in (
+                ("_services_backoff", "sync services"),
+                ("_backup_backoff", "backup"),
+                ("_org_config_backoff", "org-config merge"))) if s]
+        if not snaps:
+            return None
+        latest = max(snaps, key=lambda s: s["last_at"])
+        return {"since": min(s["since"] for s in snaps if s["since"]),
+                "attempts": max(s["attempts"] for s in snaps),
+                "last_error": latest["last_error"],
+                "affects": [s["what"] for s in snaps]}
+
+    def _google_services_pending(self) -> bool:
+        """True while auto-built services are waiting on a transient-failure
+        retry (so an empty services dict means "not yet", not "never")."""
+        return (not getattr(self, "_services_resolved", True)
+                and self._google_backoff("_services_backoff", "sync services").pending)
+
+    def _google_unavailable_status(self) -> dict | None:
+        try:
+            return self.google_unavailable()
+        except Exception as exc:  # noqa: BLE001 — status must never raise
+            log.debug("status: google_unavailable degraded: %s", exc)
+            return None
+
+    def _retry_backup_build(self) -> None:
+        """Rebuild the backup config when the last build failed TRANSIENTLY and
+        its retry is due. Builds off-lock (network), then assigns the
+        (_backup, _backup_interval_s) pair under _config_lock -- only if no
+        backup is configured by then, so a concurrent apply_config wins."""
+        bo = self._google_backoff("_backup_backoff", "backup")
+        if not bo.pending or not bo.due() or not bo.build_lock.acquire(blocking=False):
+            return
+        try:
+            res = _backup_from_config(str(app_dir()))
+            transient = getattr(res, "transient", None)
+            if transient is not None:
+                bo.failed(transient)
+                return
+            backup_cfg, backup_interval = res
+            with self._config_lock:
+                if self._backup is None:
+                    self._backup = backup_cfg
+                    self._backup_interval_s = backup_interval
+            if backup_cfg is not None:
+                bo.succeeded()
+            else:
+                bo.clear()   # now failing permanently; the build logged why
+        finally:
+            bo.build_lock.release()
+
+    def _retry_org_config_merge(self) -> None:
+        """Re-run the org-config merge when the startup merge failed
+        TRANSIENTLY and its retry is due. A merge stages org cadences into
+        config.json, so a successful retry re-wires the cadence intervals the
+        same way apply_config does."""
+        bo = self._google_backoff("_org_config_backoff", "org-config merge")
+        if not bo.pending or not bo.due() or not bo.build_lock.acquire(blocking=False):
+            return
+        try:
+            home = str(app_dir())
+            status, exc = _merge_org_config_classified(home)
+            if status == "transient":
+                bo.failed(exc)
+                return
+            if status != "merged":
+                bo.clear()   # now failing permanently (or no token); logged
+                return
+            cadences = _cadences_from_config(home)
+            with self._config_lock:
+                self._assign_cadences(cadences)
+            bo.succeeded()
+        finally:
+            bo.build_lock.release()
+
+    def _retry_google_builds(self) -> None:
+        """Called once per loop iteration on the cycle thread: retry whichever
+        startup Google builds failed transiently. Never raises into the loop.
+        (Services retry themselves inside ensure_services.)"""
+        for retry in (self._retry_backup_build, self._retry_org_config_merge):
+            try:
+                retry()
+            except Exception as exc:  # noqa: BLE001 — a retry must not break the loop
+                log.warning("Google build retry failed: %s", exc, exc_info=True)
 
     # -- pause / resume -----------------------------------------------------
 
@@ -1520,6 +1746,10 @@ class Daemon:
                 watchdog_exits >= getattr(self, "_watchdog_max_exits", WATCHDOG_MAX_EXITS),
             "version": __import__("mcpbrain", fromlist=["__version__"]).__version__,
             "reflow": reflow,
+            # Non-null while any Google build is waiting on a transient-failure
+            # retry -- so a multi-day "token fine, network was not" outage is
+            # visible here and in doctor, not only in the log.
+            "google_unavailable": self._google_unavailable_status(),
         }
 
     def config_profile(self) -> dict:
@@ -1832,8 +2062,12 @@ class Daemon:
             self._cache_google_account(sidecar, from_token)
             return from_token
         # Last resort: Gmail getProfile, but only if we already have a service.
+        # Read what is resolved rather than calling ensure_services(): this is
+        # the status-poll path, and while a transient-failure retry is pending
+        # a poll must not be the thing that blocks on the token endpoint.
         try:
-            gmail = self.ensure_services().get("gmail_service")
+            gmail = (self._services.get("gmail_service")
+                     if getattr(self, "_services_resolved", False) else None)
         except Exception:  # noqa: BLE001
             gmail = None
         if gmail is None:
@@ -1875,6 +2109,38 @@ class Daemon:
         except OSError as exc:
             log.debug("status: failed to write google_account sidecar: %s", exc)
 
+    def _assign_cadences(self, cadences: dict) -> None:
+        """Re-wire every cadence interval from a _cadences_from_config result.
+        Caller holds _config_lock. Intervals only: the _last_* anchors persist
+        across a re-wire so a cadence change does not reset the clock."""
+        self._communities_interval_s = cadences["communities_interval_s"]
+        self._lint_interval_s = cadences["lint_interval_s"]
+        self._synthesise_interval_s = cadences["synthesise_interval_s"]
+        self._proactive_interval_s = cadences["proactive_interval_s"]
+        self._waiting_on_interval_s = cadences["waiting_on_interval_s"]
+        self._blocks_interval_s = cadences["blocks_interval_s"]
+        self._audit_interval_s = cadences["audit_interval_s"]
+        self._stale_reextract_interval_s = cadences["stale_reextract_interval_s"]
+        self._auto_update_interval_s = cadences["auto_update_interval_s"]
+        self._verify_interval_s = cadences["verify_interval_s"]
+        self._feedback_aggregate_interval_s = cadences["feedback_aggregate_interval_s"]
+        self._org_backfill_interval_s = cadences["org_backfill_interval_s"]
+        self._resolve_entities_interval_s = cadences["resolve_entities_interval_s"]
+        self._review_interval_s = cadences["review_interval_s"]
+        self._action_hygiene_interval_s = cadences["action_hygiene_interval_s"]
+        self._mcp_heartbeat_sweep_interval_s = cadences["mcp_heartbeat_sweep_interval_s"]
+        self._salience_score_interval_s = cadences["salience_score_interval_s"]
+        self._decay_pass_interval_s = cadences["decay_pass_interval_s"]
+        self._consolidation_interval_s = cadences["consolidation_interval_s"]
+        self._voice_analyse_interval_s = cadences["voice_analyse_interval_s"]
+        self._self_improve_interval_s = cadences["self_improve_interval_s"]
+        self._auto_enable_interval_s = cadences["auto_enable_interval_s"]
+        self._org_contrib_upload_interval_s = cadences["org_contrib_upload_interval_s"]
+        self._org_import_interval_s = cadences["org_import_interval_s"]
+        self._org_curate_interval_s = cadences["org_curate_interval_s"]
+        self._ocr_setup_interval_s = cadences["ocr_setup_interval_s"]
+        self._reflow_seed_interval_s = cadences["reflow_seed_interval_s"]
+
     def apply_config(self, body: dict) -> None:
         """Persist config updates, then re-wire enrich + backup from disk.
 
@@ -1898,41 +2164,29 @@ class Daemon:
         # _backup paired with a stale interval. Keep the lock hold time to
         # the assignments only.
         enrich_mode = config.enrich_mode(home)
-        backup_cfg, backup_interval = _backup_from_config(home)
-        cadences = _cadences_from_config(home)  # IO off-lock; assign under lock below
-        with self._config_lock:
-            self._enrich_mode = enrich_mode
-            self._backup = backup_cfg
-            self._backup_interval_s = backup_interval
-            # Cadence re-wire: intervals only; _last_* anchors persist across
-            # re-wire so a cadence change doesn't reset the clock.
-            self._communities_interval_s = cadences["communities_interval_s"]
-            self._lint_interval_s = cadences["lint_interval_s"]
-            self._synthesise_interval_s = cadences["synthesise_interval_s"]
-            self._proactive_interval_s = cadences["proactive_interval_s"]
-            self._waiting_on_interval_s = cadences["waiting_on_interval_s"]
-            self._blocks_interval_s = cadences["blocks_interval_s"]
-            self._audit_interval_s = cadences["audit_interval_s"]
-            self._stale_reextract_interval_s = cadences["stale_reextract_interval_s"]
-            self._auto_update_interval_s = cadences["auto_update_interval_s"]
-            self._verify_interval_s = cadences["verify_interval_s"]
-            self._feedback_aggregate_interval_s = cadences["feedback_aggregate_interval_s"]
-            self._org_backfill_interval_s = cadences["org_backfill_interval_s"]
-            self._resolve_entities_interval_s = cadences["resolve_entities_interval_s"]
-            self._review_interval_s = cadences["review_interval_s"]
-            self._action_hygiene_interval_s = cadences["action_hygiene_interval_s"]
-            self._mcp_heartbeat_sweep_interval_s = cadences["mcp_heartbeat_sweep_interval_s"]
-            self._salience_score_interval_s = cadences["salience_score_interval_s"]
-            self._decay_pass_interval_s = cadences["decay_pass_interval_s"]
-            self._consolidation_interval_s = cadences["consolidation_interval_s"]
-            self._voice_analyse_interval_s = cadences["voice_analyse_interval_s"]
-            self._self_improve_interval_s = cadences["self_improve_interval_s"]
-            self._auto_enable_interval_s = cadences["auto_enable_interval_s"]
-            self._org_contrib_upload_interval_s = cadences["org_contrib_upload_interval_s"]
-            self._org_import_interval_s = cadences["org_import_interval_s"]
-            self._org_curate_interval_s = cadences["org_curate_interval_s"]
-            self._ocr_setup_interval_s = cadences["ocr_setup_interval_s"]
-            self._reflow_seed_interval_s = cadences["reflow_seed_interval_s"]
+        # build_lock (not _config_lock) serialises this backup build with a
+        # concurrent _retry_backup_build, so an in-flight retry can never land
+        # a stale config over the one just saved. Lock order matches the retry:
+        # build_lock, then _config_lock.
+        bo = self._google_backoff("_backup_backoff", "backup")
+        with bo.build_lock:
+            backup_build = _backup_from_config(home)
+            backup_cfg, backup_interval = backup_build
+            cadences = _cadences_from_config(home)  # IO off-lock; assign under lock below
+            with self._config_lock:
+                self._enrich_mode = enrich_mode
+                self._backup = backup_cfg
+                self._backup_interval_s = backup_interval
+                self._assign_cadences(cadences)
+            # A transient build failure schedules a retry (_retry_backup_build)
+            # instead of leaving backup off for the rest of the run.
+            transient = getattr(backup_build, "transient", None)
+            if transient is not None:
+                bo.failed(transient)
+            elif backup_cfg is not None:
+                bo.succeeded()
+            else:
+                bo.clear()
         # Best-effort: keep the records-repo scaffold current whenever settings
         # are saved. Failures never fail the POST.
         try:
@@ -3497,7 +3751,10 @@ class Daemon:
             except ImportError:
                 fs = None
             if fs is None:
-                self._last_org_contrib_upload = now
+                # Services awaiting a transient-failure retry: stay due, so the
+                # pass runs on the tick after they recover, not a day later.
+                if not self._google_services_pending():
+                    self._last_org_contrib_upload = now
                 return {"skipped": "no_fleet_storage"}
             email = _config.owner_email(home)
             delta, wm = org_contrib._delta_since_watermark(self._store)
@@ -3531,7 +3788,10 @@ class Daemon:
             except ImportError:
                 fs = None
             if fs is None:
-                self._last_org_import = now
+                # Services awaiting a transient-failure retry: stay due, so the
+                # pass runs on the tick after they recover, not a day later.
+                if not self._google_services_pending():
+                    self._last_org_import = now
                 return {"skipped": "no_fleet_storage"}
             res = org_import.import_snapshot(self._store, fs)
             log.info("org_import: %s", res)
@@ -3560,7 +3820,10 @@ class Daemon:
             except ImportError:
                 fs = None
             if fs is None:
-                self._last_org_curate = now
+                # Services awaiting a transient-failure retry: stay due, so the
+                # pass runs on the tick after they recover, not a day later.
+                if not self._google_services_pending():
+                    self._last_org_curate = now
                 return {"skipped": "no_fleet_storage"}
             res = org_curate.run(self._store, fs, home)
             # Stash fuzzy-merge pairs as an enrich-spool block (mirrors _run_review):
@@ -4337,7 +4600,9 @@ class Daemon:
             self._migrate_embed_backend_safe()
             # Resolve services once at startup so they are available from the
             # first cycle, regardless of pause state. ensure_services() is
-            # idempotent: the subsequent call inside run_one() becomes a no-op.
+            # idempotent: the subsequent call inside run_one() becomes a no-op
+            # -- unless this one failed TRANSIENTLY, in which case those calls
+            # retry it on the _GoogleBackoff schedule.
             self.ensure_services()
             # Start the watchdog's clock for the cycle phase HERE, not at
             # construction: startup (restore, embed migration, service
@@ -4424,6 +4689,10 @@ class Daemon:
                 # this plan, only its acquire is, so it can legitimately hold
                 # _bulk_lock past one tick -- an unbounded `with` here would
                 # park this cycle thread for that pass's whole duration.
+                # Retry any startup Google build (backup config, org-config
+                # merge) that failed transiently and is due -- off _bulk_lock,
+                # since it is network I/O. Never raises.
+                self._retry_google_builds()
                 self._backup_under_bulk_lock()
                 # Maintenance-thread liveness (Task 3): the watchdog itself
                 # lives inside _maintenance_loop (see _start_maintenance_thread),
@@ -4597,8 +4866,12 @@ def maybe_restore_on_first_run(store, home) -> bool:
     """
     if store.chunk_count() != 0:
         return False
-    bc, _interval = _backup_from_config(home)
+    build = _backup_from_config(home)
+    bc, _interval = build
     if bc is None:
+        if getattr(build, "transient", None) is not None:
+            log.warning("restore-on-first-run skipped: Google unreachable (transient): %s",
+                        build.transient)
         return False
     file_id = backup.find_latest_snapshot(bc.drive_service, bc.shared_drive_id, bc.user_id)
     if not file_id:
@@ -4608,9 +4881,27 @@ def maybe_restore_on_first_run(store, home) -> bool:
     return True
 
 
+class _BackupBuild(tuple):
+    """`_backup_from_config`'s result: a plain (BackupConfig | None,
+    interval | None) 2-tuple to every caller that unpacks or compares it, plus
+    `.transient` -- the exception when the build failed TRANSIENTLY (network),
+    so the daemon schedules a retry instead of leaving backup off for the run.
+    A tuple subclass rather than a third element keeps the function's long-
+    standing (bc, interval) contract, including every test that stubs it."""
+
+    def __new__(cls, bc=None, interval=None, transient=None):
+        self = super().__new__(cls, (bc, interval))
+        self.transient = transient
+        return self
+
+
 def _backup_from_config(home):
     """Build a Drive-backed BackupConfig from config.json, or (None, None) if
     backup is not fully configured / credentials are unavailable.
+
+    Returns a _BackupBuild: when the credential build failed TRANSIENTLY
+    (_is_transient_google_error) it is (None, None) with `.transient` set, and
+    the CALLER owns reporting and retrying it (Daemon._backup_backoff).
 
     Backup stays OFF (returns (None, None)) when: there is no `backup` block, a
     required field (escrow_key/shared_drive_id/user_id) is missing, Google
@@ -4623,7 +4914,7 @@ def _backup_from_config(home):
     shared_drive_id = cfg.get("shared_drive_id")
     user_id = cfg.get("user_id")
     if not (escrow_key and shared_drive_id and user_id):
-        return (None, None)
+        return _BackupBuild()
     try:
         # Backup uploads are ~750MB and need the long timeout; routine reads use
         # DEFAULT_READ_TIMEOUT_S (60s). Pass the 600s timeout explicitly.
@@ -4632,12 +4923,14 @@ def _backup_from_config(home):
     except Exception as exc:  # noqa: BLE001 — backup must not crash startup
         # NOTE: this also catches programming errors (e.g. a bad call signature).
         # If auth.build_google_services' signature changes, re-verify this call.
+        if _is_transient_google_error(exc):
+            return _BackupBuild(transient=exc)
         log.warning("backup configured but Google credentials unavailable; backup disabled: %s", exc)
-        return (None, None)
+        return _BackupBuild()
     drive = services.get("drive_service")
     if not drive:
         log.warning("backup configured but the token lacks Drive scope; backup disabled")
-        return (None, None)
+        return _BackupBuild()
     key = escrow_key.encode() if isinstance(escrow_key, str) else escrow_key
     raw_interval = cfg.get("interval_s", DEFAULT_BACKUP_INTERVAL_S)
     try:
@@ -4659,7 +4952,7 @@ def _backup_from_config(home):
     bc = BackupConfig(key=key, drive_service=drive,
                       shared_drive_id=shared_drive_id, user_id=user_id,
                       retain=retain)
-    return (bc, interval_s)
+    return _BackupBuild(bc, interval_s)
 
 
 def _build_drive_service():
@@ -4669,8 +4962,11 @@ def _build_drive_service():
     return auth.build_service("drive", "v3", creds)
 
 
-def _maybe_merge_org_config(home) -> None:
+def _maybe_merge_org_config(home):
     """Merge org-config into local config. Best-effort.
+
+    Returns the exception when the merge failed TRANSIENTLY (the caller
+    schedules a retry -- Daemon._org_config_backoff), else None.
 
     Never raises: a Drive failure leaves local config intact. The daemon
     NEVER calls an LLM here — this is pure Drive I/O.
@@ -4684,14 +4980,26 @@ def _maybe_merge_org_config(home) -> None:
     already owns that fallback (0.7.90); re-deriving it here was a redundant
     duplicate of that logic.
     """
+    status, exc = _merge_org_config_classified(home)
+    return exc if status == "transient" else None
+
+
+def _merge_org_config_classified(home) -> tuple[str, BaseException | None]:
+    """The org-config merge, classified: ("merged", None), ("no_token", None),
+    ("permanent", exc) or ("transient", exc). Never raises. Only a permanent
+    failure is logged here; a transient one is reported by the retry backoff."""
     from mcpbrain import auth, fleet
     if not auth.token_path().exists():
-        return
+        return ("no_token", None)
     try:
         svc = _build_drive_service()
         fleet.merge_org_config(home, svc)
     except Exception as exc:  # noqa: BLE001 — org-config is best-effort
+        if _is_transient_google_error(exc):
+            return ("transient", exc)
         log.warning("org-config merge skipped: %s", exc)
+        return ("permanent", exc)
+    return ("merged", None)
 
 
 _CADENCE_DEFAULTS: dict[str, float] = {
@@ -4852,9 +5160,10 @@ def main(argv=None) -> None:
     dim = embedder_dim("bge-small")
     store = Store(config.store_path(), dim=dim)
     store.init()
-    _maybe_merge_org_config(str(config.app_dir()))
+    org_transient = _maybe_merge_org_config(str(config.app_dir()))
     enrich_mode = config.enrich_mode(str(config.app_dir()))
-    backup_cfg, backup_interval = _backup_from_config(str(config.app_dir()))
+    backup_build = _backup_from_config(str(config.app_dir()))
+    backup_cfg, backup_interval = backup_build
     cadences = _cadences_from_config(str(config.app_dir()))
     tuning = _tuning_from_config(str(config.app_dir()))
     daemon = Daemon(store, embedder=None, interval_s=args.interval,
@@ -4903,6 +5212,12 @@ def main(argv=None) -> None:
     daemon._watchdog_max_exits = tuning["watchdog_max_exits"]
     daemon._watchdog_window_s = tuning["watchdog_window_s"]
     daemon._embed_max_items = tuning["embed_max_items"]
+    # A startup Google build that failed TRANSIENTLY retries on a backoff from
+    # the run loop (_retry_google_builds) rather than staying off for the run.
+    if org_transient is not None:
+        daemon._org_config_backoff.failed(org_transient)
+    if getattr(backup_build, "transient", None) is not None:
+        daemon._backup_backoff.failed(backup_build.transient)
 
     if args.once:
         daemon.ensure_services()   # resolve services before the single cycle

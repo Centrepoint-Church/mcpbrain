@@ -47,7 +47,8 @@ def _wrapped(inner, outer_cls=RuntimeError, how="cause"):
     TimeoutError("timed out"),
     socket.timeout("timed out"),
     *[OSError(n, "net") for n in (errno.ENETUNREACH, errno.EHOSTUNREACH, errno.ECONNRESET,
-                                  errno.ECONNREFUSED, errno.ETIMEDOUT, errno.ENETDOWN)],
+                                  errno.ECONNREFUSED, errno.ETIMEDOUT, errno.ENETDOWN,
+                                  errno.EADDRNOTAVAIL)],
     _http(429), _http(503),
 ])
 def test_network_failures_are_transient(exc):
@@ -97,6 +98,7 @@ def test_the_cause_walk_is_bounded_and_survives_a_cycle():
     "The read operation timed out",
     "[Errno 51] Network is unreachable",
     "HTTPSConnectionPool(host='x', port=443): Read timed out. (read timeout=60)",
+    "[Errno 49] Can't assign requested address",
 ])
 def test_stored_network_messages_are_recognised(text):
     assert rh._is_transient_message(text)

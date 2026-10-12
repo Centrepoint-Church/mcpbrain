@@ -74,8 +74,12 @@ _TRANSIENT_HTTP = frozenset({429, 502, 503, 504})
 # (httplib2.ServerNotFoundError, via google-auth's TransportError) as
 # permanent and stamped 320 owners gave_up. Imports guarded: either library
 # may be absent in a stripped environment.
+# EADDRNOTAVAIL (Errno 49 on macOS, "Can't assign requested address"): the
+# local ephemeral ports are exhausted -- live 2026-10-09, after an attended
+# drain, at daemon start-up. Also shared by the daemon's start-up Google builds.
 _NETWORK_ERRNOS = frozenset({errno.ENETUNREACH, errno.EHOSTUNREACH, errno.ECONNRESET,
-                             errno.ECONNREFUSED, errno.ETIMEDOUT, errno.ENETDOWN})
+                             errno.ECONNREFUSED, errno.ETIMEDOUT, errno.ENETDOWN,
+                             errno.EADDRNOTAVAIL})
 _NETWORK_TYPES: tuple = (TimeoutError, ConnectionError, socket.gaierror, ssl.SSLError)
 # A certificate that fails verification is configuration, not the network:
 # permanent, even though it is an ssl.SSLError.
@@ -101,7 +105,7 @@ _CAUSE_DEPTH = 8
 _TRANSIENT_MESSAGES = (
     "unable to find the server", "name or service not known", "nodename nor servname",
     "temporary failure in name resolution", "connection reset", "timed out",
-    "network is unreachable",
+    "network is unreachable", "can't assign requested address",
 )
 
 
