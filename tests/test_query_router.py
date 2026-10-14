@@ -381,3 +381,42 @@ def test_route_crag_collapses_before_cutting_to_limit(tmp_path):
                            collapse_documents=True)
 
     assert [r["doc_id"] for r in result] == ["gdrive-F1-3", "gdrive-F2-0"]
+
+
+def _crag_route(tmp_path, primary, secondary, limit, **kw):
+    home = _make_home(tmp_path, retrieval_crag=True, crag_min_score=0.50)
+    call_count = [0]
+
+    def mock_hybrid(*a, **k):
+        call_count[0] += 1
+        return primary if call_count[0] == 1 else secondary
+
+    with patch("mcpbrain.query_router.hybrid_search", side_effect=mock_hybrid):
+        with patch("mcpbrain.query_router._crag_rewrite", return_value="better query"):
+            return route(_make_store(), MagicMock(), "vague query", limit,
+                         home=home, **kw)
+
+
+def test_route_crag_drops_a_gmail_digest_whose_raw_sibling_came_from_the_other_side(tmp_path):
+    """Each hybrid_search drops digests only within its own pool. A Gmail
+    digest keys as doc:<thread> and a raw message as its own root, so collapse
+    alone would keep both; the merged list must re-apply the digest rule."""
+    primary = [{"doc_id": "gmail-M1-body-0", "score": 0.3, "metadata": {"thread_id": "T"}},
+               {"doc_id": "gmail-M9-body-0", "score": 0.2, "metadata": {"thread_id": "U"}}]
+    secondary = [{"doc_id": "enriched-T", "score": 0.9, "metadata": {"thread_id": "T"}},
+                 {"doc_id": "gmail-M8-body-0", "score": 0.1, "metadata": {"thread_id": "V"}}]
+    for collapse in (True, False):
+        out = [r["doc_id"] for r in _crag_route(
+            tmp_path, [dict(h) for h in primary], [dict(h) for h in secondary], 3,
+            collapse_documents=collapse)]
+        assert out == ["gmail-M1-body-0", "gmail-M9-body-0", "gmail-M8-body-0"], collapse
+
+
+def test_route_crag_drops_a_drive_digest_that_collapse_would_keep(tmp_path):
+    """A Drive digest and its file are one document; ranked first after the
+    merge, collapse would keep the digest and absorb the real chunk."""
+    primary = [{"doc_id": "gdrive-F1-0", "score": 0.3, "metadata": {"file_id": "F1"}}]
+    secondary = [{"doc_id": "enriched-F1", "score": 0.9, "metadata": {"file_id": "F1"}},
+                 {"doc_id": "gdrive-F2-0", "score": 0.2, "metadata": {"file_id": "F2"}}]
+    out = _crag_route(tmp_path, primary, secondary, 5, collapse_documents=True)
+    assert [r["doc_id"] for r in out] == ["gdrive-F1-0", "gdrive-F2-0"]

@@ -1,7 +1,8 @@
 """Fixed-depth fusion (0.7.142): hybrid_search's ranking does not depend on
 the caller's `limit`, one-result-per-document is a pure post-filter over that
-ranking, and the digest-vs-raw rule depends on what is RETURNED, never on
-pool-depth arithmetic."""
+ranking, and the digest-vs-raw rule runs over the whole fixed pool (a digest
+is dropped when any raw sibling of its cluster was retrieved), so it cannot
+depend on `limit` either."""
 import hashlib
 
 from mcpbrain.retrieval import (FUSION_DEPTH, _collapse_documents,
@@ -207,3 +208,61 @@ def test_ranking_is_a_prefix_across_limits_with_digests(tmp_path):
                                   collapse_documents=collapse))
         assert "enriched-F69" not in full          # raw sibling in the pool
         assert "enriched-NORAW" in full            # nothing raw retrieved
+
+
+# -- a pool deep enough that the old limit-derived depth provably reorders ----
+
+class _FakeStore:
+    """120 chunks (2 per Drive file, 60 files) — far more than 6 * 5 — with
+    the two rankers in independent orders, so moderate-in-both hits deep in
+    one list overtake top-in-one hits only when that list is read deeply.
+    Under the 0.7.141 code (collapse-on depth limit*6 = 30 vs collapse-off at
+    limit 50 = depth 100) the top 5 documents differ; with FUSION_DEPTH they
+    cannot."""
+    N = 120
+
+    def __init__(self):
+        import random
+        ids = [f"gdrive-F{i // 2}-{i % 2}" for i in range(self.N)]
+        self._vec = list(ids)
+        self._fts = list(ids)
+        random.Random(7).shuffle(self._fts)
+
+    def vec_knn(self, qv, k):
+        return [(d, i / 100) for i, d in enumerate(self._vec[:k])]
+
+    def fts_search(self, q, k):
+        return [(d, -i) for i, d in enumerate(self._fts[:k])]
+
+    def get_chunks(self, ids, with_salience=False):
+        return {d: {"doc_id": d, "text": d, "content_hash": f"h-{d}",
+                    "metadata": {"file_id": d.rsplit("-", 1)[0][len("gdrive-"):]},
+                    "memory_tier": "", **({"salience": 0.0} if with_salience else {})}
+                for d in ids}
+
+    def doc_root_content_hashes(self, roots):
+        return {r: frozenset({f"h-{r}"}) for r in roots}
+
+
+def _fake_search(limit, collapse):
+    return hybrid_search(_FakeStore(), None, "q", limit=limit, query_vec=[0.0],
+                         collapse_documents=collapse)
+
+
+def test_collapse_on_equals_collapse_of_the_deep_collapse_off_ranking():
+    on = _fake_search(5, True)
+    off = _fake_search(50, False)
+    assert len(on) == 5
+    assert _ids(on) == _ids(_collapse_documents(off)[:5])
+
+
+def test_deep_pool_prefix_across_limits_collapse_on():
+    r5, r10, r20 = (_ids(_fake_search(n, True)) for n in (5, 10, 20))
+    assert r10[:5] == r5 and r20[:10] == r10
+
+
+def test_limit_below_one_is_treated_as_one():
+    for bad in (0, -3):
+        assert _ids(_fake_search(bad, False)) == _ids(_fake_search(1, False))
+        assert _ids(_fake_search(bad, True)) == _ids(_fake_search(1, True))
+        assert len(_fake_search(bad, True)) == 1

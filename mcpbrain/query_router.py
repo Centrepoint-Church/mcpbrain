@@ -29,7 +29,8 @@ import logging
 import re
 import subprocess
 
-from mcpbrain.retrieval import _collapse_documents, hybrid_search  # module-level so tests can patch it
+from mcpbrain.retrieval import (  # module-level so tests can patch it
+    _collapse_documents, _dedupe_by_cluster, hybrid_search)
 
 log = logging.getLogger("mcpbrain.query_router")
 
@@ -314,27 +315,28 @@ def route(store, embedder, query: str, limit: int, *,
                                               **search_kwargs)
                     for r in secondary:
                         r["provenance"] = "crag_rewrite"
-                    collapse = bool(search_kwargs.get("collapse_documents"))
-                    # Collapse BEFORE cutting to `limit` (merge uncut when
-                    # collapsing): cutting first and collapsing after would
-                    # return fewer than `limit` documents whenever both sides
-                    # contributed a chunk of the same one.
-                    results = _merge_crag(
-                        results, secondary,
-                        len(results) + len(secondary) if collapse else limit)
-                    # The primary and CRAG-rewrite searches each ran their own
-                    # hybrid_search call, so when collapse_documents is on each
-                    # side already collapsed to one hit per document on its own
-                    # pool — but the two sides can still disagree on WHICH chunk
-                    # of the same document is best (e.g. primary's best chunk for
-                    # file F1 is gdrive-F1-0, the rewrite's is gdrive-F1-3), and
-                    # _merge_crag dedupes by raw doc_id, not by document, so both
-                    # would survive the merge. Re-collapsing here restores the
-                    # one-result-per-document guarantee for the routed path too;
-                    # _collapse_documents sums each side's own `doc_hits` rather
-                    # than re-counting, so the total still reflects both pools.
-                    if collapse:
-                        results = _collapse_documents(results)[:limit]
+                    # Merge UNCUT, then dedupe, then cut to `limit`: cutting
+                    # first would return fewer than `limit` results whenever a
+                    # later step drops one.
+                    results = _merge_crag(results, secondary,
+                                          len(results) + len(secondary))
+                    # Each hybrid_search dropped redundant digests only within
+                    # its OWN pool, so a digest from one side can sit next to
+                    # a raw sibling of its cluster from the other. Re-apply
+                    # the digest rule over the merged list. (Gmail: a digest
+                    # keys as doc:<thread> and a raw message as its own root,
+                    # so collapse alone would keep both.)
+                    results = _dedupe_by_cluster(results)
+                    # The two sides can also disagree on WHICH chunk of the
+                    # same document is best (primary's best for file F1 is
+                    # gdrive-F1-0, the rewrite's gdrive-F1-3), and _merge_crag
+                    # dedupes by raw doc_id, not by document, so both would
+                    # survive. Re-collapsing restores one result per document;
+                    # _collapse_documents sums each side's own `doc_hits`
+                    # rather than re-counting, so the total reflects both pools.
+                    if search_kwargs.get("collapse_documents"):
+                        results = _collapse_documents(results)
+                    results = results[:limit]
             except Exception:  # noqa: BLE001
                 pass
 

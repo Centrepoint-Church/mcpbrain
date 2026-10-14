@@ -411,7 +411,7 @@ class ControlServer:
                 # bearer-token gated like every other handler here. Empty query
                 # short-circuits to no results.
                 q = (body.get("query") or "").strip()
-                limit = min(int(body.get("limit") or 5), 10)
+                limit = max(1, min(int(body.get("limit") or 5), 10))
                 expand = bool(body.get("expand"))
                 results = d.search(q, limit, expand=expand) if q else []
                 # Log exposure events for injected chunks (S2 feedback signal).

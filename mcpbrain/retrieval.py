@@ -152,9 +152,9 @@ _KW_WEIGHT = 1.0
 # the live store (2026-10-14, both gold sets, n=20 each; MRR / recall@10,
 # main | older): shipped 0.7.141 0.496/0.80 | 0.288/0.40; fixed 40
 # 0.538/0.85 | 0.301/0.45; fixed 60 0.541/0.90 | 0.293/0.40; fixed 100
-# 0.543/0.90 | 0.289/0.40. Latency gate: brain_search p95 at this depth must
-# stay <= 1.25x the 0.7.141 collapse-off p95 (in-process, 50 gold queries x3
-# after 3 warm-ups); if 100 fails it, use 60.
+# 0.543/0.90 | 0.289/0.40. Latency gate (must stay <= 1.25x the 0.7.141
+# collapse-off p95; in-process, live store, collapse on, 50 gold queries x3
+# after 3 warm-ups): p95 468 ms vs 404 ms baseline, 1.16x — passed at 100.
 FUSION_DEPTH = 100
 
 
@@ -415,6 +415,7 @@ def hybrid_search(store, embedder, query: str, limit: int = 10, *,
     distance gate in daemon.search) reuse it, avoiding a second embed_query —
     the slow part of a search. Identical results either way.
     """
+    limit = max(1, limit)     # a zero/negative limit must not return the whole pool
     qv = query_vec if query_vec is not None else embedder.embed_query(query)
     depth = max(FUSION_DEPTH, limit * 2)
     sem = [d for d, _ in store.vec_knn(qv, depth)]
@@ -484,6 +485,15 @@ def hybrid_search(store, embedder, query: str, limit: int = 10, *,
             for c in candidates:
                 c["score"] = round(c["score"] / new_top, 4)
 
+    # Drop a digest that's redundant with its own thread/file's raw chunk,
+    # over the whole fixed pool (limit-independent) and BEFORE the
+    # content-hash dedup below: a digest's content_hash never matches its raw
+    # sibling's (it's synthesized text, not a copy), so the content-hash pass
+    # can't see this redundancy on its own. The order is measured, not
+    # cosmetic: running it after the content-hash pass scored main gold
+    # 0.536/0.85 instead of 0.543/0.90 (2026-10-14).
+    candidates = _dedupe_by_cluster(candidates)
+
     # Dedup by content_hash AFTER ranking (the order above must be preserved so
     # the best-ranked copy of a duplicate survives) and BEFORE the limit
     # truncation below, so a freed slot goes to genuinely different content
@@ -514,15 +524,6 @@ def hybrid_search(store, embedder, query: str, limit: int = 10, *,
     # whose FULL set differs never joins that root's cluster, so it is never
     # collapsed on that basis (protects two genuinely different documents
     # that happen to share a boilerplate/template chunk).
-    # Drop a digest that's redundant with its own thread/file's raw chunk,
-    # over the whole fixed pool (limit-independent) and BEFORE the
-    # content-hash dedup below: a digest's content_hash never matches its raw
-    # sibling's (it's synthesized text, not a copy), so the content-hash pass
-    # can't see this redundancy on its own. The order is measured, not
-    # cosmetic: running it after the content-hash pass scored main gold
-    # 0.536/0.85 instead of 0.543/0.90 (2026-10-14).
-    candidates = _dedupe_by_cluster(candidates)
-
     roots = {_doc_root(c["doc_id"]) for c in candidates if c.get("content_hash")}
     root_hashes = store.doc_root_content_hashes(list(roots))
 

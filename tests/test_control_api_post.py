@@ -39,6 +39,7 @@ class FakeDaemon:
 
     def search(self, query, limit=5, *, expand=False):
         self.last_expand = expand
+        self.last_limit = limit
         return ([{"doc_id": "d1", "score": 1.0, "text": f"hit for {query}"}]
                 if query else [])
 
@@ -139,6 +140,21 @@ def test_recall_endpoint_forwards_expand(tmp_path):
 
         _post(base + "/api/recall", srv.token, {"query": "x"})
         assert d.last_expand is False
+    finally:
+        srv.stop()
+
+
+def test_recall_endpoint_clamps_limit_to_1_10(tmp_path):
+    """A zero or negative limit must not reach daemon.search, where it would
+    return the whole candidate pool; an oversized one is capped at 10."""
+    d = FakeDaemon()
+    srv = ControlServer(d, home=str(tmp_path))
+    srv.start()
+    try:
+        base = f"http://127.0.0.1:{srv.port}"
+        for asked, got in ((-3, 1), (0, 5), (1, 1), (7, 7), (50, 10)):
+            _post(base + "/api/recall", srv.token, {"query": "x", "limit": asked})
+            assert d.last_limit == got, asked
     finally:
         srv.stop()
 
