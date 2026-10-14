@@ -341,7 +341,10 @@ def test_recency_decay_existing_keys_win_over_fallbacks():
 
 
 def test_recency_decay_empty_date_falls_through_to_captured_at():
-    """enriched-note-* carry `date: ''` — an empty key must not block the fallback."""
+    """An empty `date: ''` must not block the fallback to `captured_at`.
+
+    (enriched-note-* digests carry `date: ''` and NO captured_at, so they stay
+    undated and score 0.0 — deliberately: dating digests measured worse.)"""
     from datetime import datetime, timezone
     from mcpbrain.importance import recency_decay
     now = datetime.now(timezone.utc).isoformat()

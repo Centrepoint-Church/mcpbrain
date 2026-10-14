@@ -361,9 +361,11 @@ def schema_grounding_enabled(home) -> bool:
 def importance_recall_enabled(home) -> bool:
     """Whether B3 three-axis recall (recency + importance) is active.
 
-    When True, hybrid_search incorporates salience and recency into ranking.
-    Default: TRUE (shipped on in 0.7.65 — validated on the production recall path
-    (exclude_cold=True): MRR 0.483→0.571, recall@10 held). Set 'importance_recall':
+    When True, hybrid_search incorporates salience and recency into ranking
+    (weights from importance_weights). Default: TRUE (shipped on in 0.7.65).
+    Re-measured 2026-10-14 on the production path, after the undated-recency and
+    phantom-decay fixes, golden_retrieval_set_mcpbrain_candidate.yaml (30 cases):
+    relevance-only MRR/recall@10 0.535/0.833 -> three-axis 0.602/0.867. Set 'importance_recall':
     false in config.json to disable. Needs salience populated to matter; the daily
     salience cadence drains the whole backlog each run (0.7.66), so the importance
     axis is fully effective within ~a day of upgrade, not weeks.
@@ -404,13 +406,24 @@ def importance_weights(home) -> dict:
     leave-one-set-out check held (weights picked on one set did not lose on the
     other). decay_weight is 0 because no recall path sets `_decay_factor`.
     """
+    global _DECAY_WEIGHT_WARNED
     cfg = read_config(home).get("importance_weights") or {}
-    return {
+    w = {
         "recency_weight":    float(cfg.get("recency_weight", 0.05)),
         "importance_weight": float(cfg.get("importance_weight", 0.15)),
         "decay_weight":      float(cfg.get("decay_weight", 0.0)),
         "recency_alpha":     float(cfg.get("recency_alpha", 0.01)),
     }
+    if w["decay_weight"] > 0.0 and not _DECAY_WEIGHT_WARNED:
+        _DECAY_WEIGHT_WARNED = True
+        log.warning("decay_weight has no effect until a real decay factor is "
+                    "wired into ranking")
+    return w
+
+
+# importance_weights runs on every recall; warn about a no-op decay_weight once
+# per process, not once per search.
+_DECAY_WEIGHT_WARNED = False
 
 
 def tiered_memory_enabled(home) -> bool:

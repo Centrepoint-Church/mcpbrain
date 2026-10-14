@@ -43,7 +43,13 @@ _AGE_DATE_KEYS = ("date", "date_iso", "start", "modified", "modifiedTime")
 
 # Further date keys the three-axis RECENCY term reads, after _AGE_DATE_KEYS:
 # notes (note-*, note-consolidated-*) carry only `captured_at`, and anarlog
-# meetings only `started_at`. Without them ~44k chunks read as "unknown age".
+# meetings only `started_at`. These rescue ~17.3k chunks on the live store
+# (notes ~16.9k, consolidated notes 291, anarlog 153; 2026-10-14).
+#
+# ~17.6k enriched-note-* and ~4.3k enriched-gdrive-* DIGESTS stay undated and
+# score 0.0 — DELIBERATELY. Giving digests their source's date was measured
+# and made ranking WORSE (main gold MRR 0.547 vs 0.568): a recent-looking
+# digest outranks the source document it summarises. Do not "fix" this.
 # Ranking only: deliberately NOT in decay._SOURCE_DATE_KEYS (notes/meetings stay
 # out of the decay/tier pass) and NOT read by score_structural's recency bonus
 # (stored salience is out of scope).
@@ -181,9 +187,10 @@ def recency_decay(metadata: dict, *, alpha: float = 0.01) -> float:
 
     UNKNOWN or unparseable age returns 0.0 — no recency credit. It used to
     return 0.5, which is the score of a ~69-day-old document, while the live
-    corpus median age is ~301 days: every undated chunk (notes, anarlog
-    meetings before their date keys were read, enriched-note-*, about half of
-    enriched-gdrive-*) systematically outranked aging dated documents, and the
+    corpus median age is ~301 days: every undated chunk (notes and anarlog
+    meetings before their date keys were read; enriched-note-* and some
+    enriched-gdrive-* digests, which stay undated on purpose — see
+    _RECENCY_EXTRA_DATE_KEYS) systematically outranked aging dated documents, and the
     gold set flipped against the ranker as its answers aged past ~100 days
     (2026-10-14 investigation). "Neutral" for an additive boost is 0, not the
     middle of the curve. The content-hash dedupe tie-break in retrieval also

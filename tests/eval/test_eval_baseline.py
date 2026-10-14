@@ -151,8 +151,8 @@ def test_gold_three_axis_does_not_regress_on_production_path():
     - 2026-10-14: the gate had flipped — the ranker lost to relevance-only. Root cause
       was two defects, not store drift. (1) importance.recency_decay returned 0.5 for an
       UNKNOWN age, the score of a ~69-day-old doc, while the corpus median age is ~301
-      days, so ~44k undated chunks (notes' `captured_at` and anarlog's `started_at` were
-      never read) systematically outranked aging documents; gold answers aged past ~100
+      days, so ~44k undated chunks (incl. ~17.3k notes/meetings whose `captured_at` /
+      `started_at` were never read) systematically outranked aging documents; gold answers aged past ~100
       days since June, which is why it flipped (today's store at a June clock passes).
       (2) _three_axis_boost fell back to the recency curve for the decay term because
       nothing sets `_decay_factor`, so production ran recency at an effective 0.25 with
@@ -347,3 +347,17 @@ def test_eval_detects_broken_retrieval(fixture_store, monkeypatch):
     assert m["recall_at_k"] == 0.0
     assert m["mrr"] == 0.0
     assert m["recall_at_k"] < RECALL_FLOOR  # the floor would fail -> regression caught
+
+
+def test_production_search_kwargs_honours_importance_recall_off(tmp_path):
+    """daemon.search applies NO three-axis weights when importance_recall is off,
+    so the gold gate's 'production' kwargs must not either."""
+    from mcpbrain.config import write_config
+    from tests.eval.run_eval import production_search_kwargs
+    write_config(str(tmp_path), {"importance_recall": False,
+                                 "importance_weights": {"recency_weight": 0.3}})
+    kw = production_search_kwargs(str(tmp_path))
+    assert kw["recency_weight"] == 0.0
+    assert kw["importance_weight"] == 0.0
+    assert kw["decay_weight"] == 0.0
+    assert kw["exclude_cold"] is False

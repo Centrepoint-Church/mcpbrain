@@ -51,11 +51,12 @@ def compute_decay(strength: float, days_since: float) -> float:
 
 
 # DELIBERATELY excludes `captured_at` (notes) and `started_at` (anarlog
-# meetings). A chunk with no source date here is skipped by the decay/tier
-# pass, so the owner's captured notes and meetings are never demoted to
-# memory_tier='cold' (and so never become consolidation candidates) just for
-# being old. importance.recency_decay reads those two keys for RANKING only;
-# the two readers differ on purpose (decided 2026-10-14). Pinned by
+# meetings): notes and meetings are not given a source-date decay anchor, so
+# the decay pass skips them until they are recalled (a recalled chunk decays
+# from last_accessed); the salience-floor tier pass still applies. This does
+# NOT keep them out of the cold tier or out of consolidation.
+# importance.recency_decay reads those two keys for RANKING only; the two
+# readers differ on purpose (decided 2026-10-14). Pinned by
 # tests/test_decay.py::test_source_date_ignores_note_and_meeting_date_keys.
 _SOURCE_DATE_KEYS = ("modified", "modifiedTime", "date", "start", "created", "timestamp")
 

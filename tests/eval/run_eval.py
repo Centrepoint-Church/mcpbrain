@@ -263,13 +263,21 @@ def production_search_kwargs(home=None) -> dict:
     any user experiences and materially understates MRR (~0.28 baseline vs ~0.56
     production on the live store). --gold and the migration gate must pass these
     so they measure real production quality, not the misleading baseline.
+
+    Honours importance_recall exactly as daemon.search does: when it is off,
+    the three axes are not applied, so all weights are 0.
     """
     from mcpbrain import config
     if home is None:
         home = str(config.app_dir())
+    if config.importance_recall_enabled(home):
+        weights = config.importance_weights(home)
+    else:
+        weights = {"recency_weight": 0.0, "importance_weight": 0.0,
+                   "decay_weight": 0.0, "recency_alpha": 0.01}
     return {"exclude_cold": False,
             "collapse_documents": config.retrieval_collapse_documents_enabled(home),
-            **config.importance_weights(home)}
+            **weights}
 
 
 def main() -> None:

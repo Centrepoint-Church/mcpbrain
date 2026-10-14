@@ -217,10 +217,10 @@ def test_apply_decay_pass_noop_when_disabled(store, tmp_path):
 
 
 def test_source_date_ignores_note_and_meeting_date_keys():
-    """Deliberate: a note (only `captured_at`) or anarlog meeting (only
-    `started_at`) has no decay anchor, so the decay/tier pass skips it and never
-    demotes it to cold. importance.recency_decay reads these keys for ranking
-    only."""
+    """Deliberate: notes (only `captured_at`) and anarlog meetings (only
+    `started_at`) are not given a source-date decay anchor, so the decay pass
+    skips them until they are recalled; the salience-floor tier pass still
+    applies. importance.recency_decay reads these keys for ranking only."""
     from mcpbrain.decay import _source_date
     assert _source_date({"captured_at": "2026-01-02T03:04:05Z"}) is None
     assert _source_date({"started_at": "2026-01-02T03:04:05+08:00"}) is None

@@ -132,3 +132,24 @@ def test_importance_weights_defaults_and_override(tmp_path):
     w = config.importance_weights(str(tmp_path))
     assert w["recency_weight"] == 0.2 and w["decay_weight"] == 0.1
     assert w["importance_weight"] == 0.15
+
+
+def test_importance_weights_warns_once_on_a_no_op_decay_weight(tmp_path, monkeypatch, caplog):
+    """decay_weight does nothing until a real decay factor reaches ranking; a
+    configured value must say so — once, not on every recall."""
+    import logging
+    monkeypatch.setattr(config, "_DECAY_WEIGHT_WARNED", False)
+    write_config(str(tmp_path), {"importance_weights": {"decay_weight": 0.1}})
+    with caplog.at_level(logging.WARNING, logger=config.log.name):
+        config.importance_weights(str(tmp_path))
+        config.importance_weights(str(tmp_path))
+    hits = [r for r in caplog.records if "decay_weight has no effect" in r.getMessage()]
+    assert len(hits) == 1
+
+
+def test_importance_weights_no_warning_at_default(tmp_path, monkeypatch, caplog):
+    import logging
+    monkeypatch.setattr(config, "_DECAY_WEIGHT_WARNED", False)
+    with caplog.at_level(logging.WARNING, logger=config.log.name):
+        config.importance_weights(str(tmp_path))
+    assert not [r for r in caplog.records if "decay_weight" in r.getMessage()]
