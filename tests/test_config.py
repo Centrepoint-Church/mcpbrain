@@ -119,3 +119,16 @@ def test_write_config_without_fchmod(tmp_path, monkeypatch):
 
 def test_embed_skip_tabular_defaults_off(tmp_path):
     assert config.embed_skip_tabular_enabled(str(tmp_path)) is False
+
+
+def test_importance_weights_defaults_and_override(tmp_path):
+    """Defaults re-measured 2026-10-14 (see config.importance_weights); the
+    config.json override path must keep working."""
+    w = config.importance_weights(str(tmp_path))
+    assert w == {"recency_weight": 0.05, "importance_weight": 0.15,
+                 "decay_weight": 0.0, "recency_alpha": 0.01}
+    write_config(str(tmp_path), {"importance_weights": {"recency_weight": 0.2,
+                                                        "decay_weight": 0.1}})
+    w = config.importance_weights(str(tmp_path))
+    assert w["recency_weight"] == 0.2 and w["decay_weight"] == 0.1
+    assert w["importance_weight"] == 0.15

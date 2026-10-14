@@ -211,7 +211,7 @@ def test_the_enriched_chunk_carries_a_date():
     _text, meta = build_semantic_doc({"thread_id": "t1", "summary": "x"}, thread)
 
     assert meta["date"] == "Tue, 02 Jun 2026 16:30:01 +0800"
-    assert recency_decay(meta) != 0.5, "still date-blind to the ranker"
+    assert recency_decay(meta) > 0.0, "still date-blind to the ranker"
 
 
 def test_the_enriched_chunk_carries_no_message_id():

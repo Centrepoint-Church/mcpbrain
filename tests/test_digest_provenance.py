@@ -107,18 +107,18 @@ def test_an_rfc2822_date_does_not_populate_date_iso():
 
 
 def test_the_recovered_date_actually_unblocks_recency_ranking():
-    """The whole point of C2. A digest with no date scores the neutral 0.5
-    fallback; with one it scores by age. If this does not move, the patch is
-    cosmetic."""
+    """The whole point of C2. A digest with no date gets no recency credit
+    (0.0 since 0.7.143; it was a "neutral" 0.5 before); with one it scores by
+    age. If this does not move, the patch is cosmetic."""
     from mcpbrain.importance import recency_decay
 
     meta = {"source_type": "gmail_enriched_v2", "thread_id": "t-1"}
-    assert recency_decay(meta) == 0.5
+    assert recency_decay(meta) == 0.0
 
     d = _digest("Date: Tue, 02 Jun 2026 16:30:01 +0800", dict(meta))
     meta.update(derive_patch(d))
 
-    assert recency_decay(meta) != 0.5, "the recovered date is not reaching the ranker"
+    assert recency_decay(meta) > 0.0, "the recovered date is not reaching the ranker"
 
 
 def test_a_digest_with_no_recoverable_date_is_left_alone():

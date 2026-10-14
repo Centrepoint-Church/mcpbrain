@@ -386,16 +386,28 @@ def importance_weights(home) -> dict:
     """Weights for the three-axis ranker (B3).
 
     Returns dict with keys:
-      recency_weight   (float, default 0.15) — additive recency boost
-      importance_weight (float, default 0.10) — additive salience boost
-      decay_weight     (float, default 0.10) — additive decay factor
-      recency_alpha    (float, default 0.01) — recency exp-decay rate
+      recency_weight    (float, default 0.05) — additive recency boost
+      importance_weight (float, default 0.15) — additive salience boost
+      decay_weight      (float, default 0.0)  — additive decay factor; counts
+                        only for a chunk carrying a real `_decay_factor`
+      recency_alpha     (float, default 0.01) — recency exp-decay rate
+
+    Each is overridable via config.json `importance_weights`.
+
+    Defaults measured 2026-10-14 on the live store (gold MRR / recall@10), after
+    fixing undated chunks scoring 0.5 recency and the decay term silently
+    re-applying the recency curve (so the old 0.15/0.10/0.10 ran recency at an
+    effective 0.25): main gold set ("main30") 0.528/0.900 -> 0.602/0.867;
+    older 20-case set ("old20") 0.287/0.40 -> 0.361/0.45. A plateau, not a
+    spike: recency <= 0.05 and importance 0.15-0.30 are flat on the older set, and a
+    leave-one-set-out check held (weights picked on one set did not lose on the
+    other). decay_weight is 0 because no recall path sets `_decay_factor`.
     """
     cfg = read_config(home).get("importance_weights") or {}
     return {
-        "recency_weight":    float(cfg.get("recency_weight", 0.15)),
-        "importance_weight": float(cfg.get("importance_weight", 0.10)),
-        "decay_weight":      float(cfg.get("decay_weight", 0.10)),
+        "recency_weight":    float(cfg.get("recency_weight", 0.05)),
+        "importance_weight": float(cfg.get("importance_weight", 0.15)),
+        "decay_weight":      float(cfg.get("decay_weight", 0.0)),
         "recency_alpha":     float(cfg.get("recency_alpha", 0.01)),
     }
 

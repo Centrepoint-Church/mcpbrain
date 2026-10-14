@@ -194,19 +194,20 @@ def _three_axis_boost(chunk: dict, *,
     """
     boost = 0.0
 
-    if recency_weight > 0.0 or decay_weight > 0.0:
+    if recency_weight > 0.0:
         from mcpbrain.importance import recency_decay as _rd
         meta = chunk.get("metadata") or {}
-        rd = _rd(meta, alpha=recency_alpha)
-        boost += recency_weight * rd
-        # decay_weight uses the same recency curve when no decay factor is supplied
-        # by the caller; the caller can override by passing pre-computed decay via
-        # chunk["_decay_factor"] (set by decay.update_on_recall path).
+        boost += recency_weight * _rd(meta, alpha=recency_alpha)
+
+    # The decay term counts ONLY when the caller supplied a real decay factor in
+    # chunk["_decay_factor"]. It used to fall back to the recency curve, and
+    # since nothing in production sets _decay_factor, production silently ran
+    # recency at recency_weight + decay_weight and had no decay axis at all
+    # (2026-10-14 investigation). No factor -> no decay term.
+    if decay_weight > 0.0:
         df = chunk.get("_decay_factor")
         if df is not None:
             boost += decay_weight * float(df)
-        elif decay_weight > 0.0:
-            boost += decay_weight * rd
 
     if importance_weight > 0.0:
         # salience is stored on the chunk dict by _enrich_with_salience below;

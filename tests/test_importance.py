@@ -299,3 +299,50 @@ def test_salience_pass_blends_llm_when_enabled(monkeypatch, tmp_path):
     assert result["llm_scored"] >= 1
     # blended = 0.6*structural + 0.4*10 → strictly above pure structural baseline
     assert s.get_chunk_salience("d1") > 3.0
+
+
+# ---------------------------------------------------------------------------
+# recency_decay: unknown age and the note/meeting date keys (0.7.143)
+# ---------------------------------------------------------------------------
+
+def test_recency_decay_unknown_age_is_zero():
+    """An undated chunk gets NO recency credit. 0.5 (the old "neutral") is the
+    score of a ~69-day-old doc, which made every undated chunk outrank aging
+    dated documents on a corpus whose median age is ~301 days."""
+    from mcpbrain.importance import recency_decay
+    assert recency_decay({}) == 0.0
+    assert recency_decay({"date": ""}) == 0.0
+    assert recency_decay({"date": "not a date"}) == 0.0
+
+
+def test_recency_decay_reads_captured_at():
+    """Notes carry only `captured_at`."""
+    from datetime import datetime, timezone
+    from mcpbrain.importance import recency_decay
+    now = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+    assert recency_decay({"captured_at": now}) > 0.98
+
+
+def test_recency_decay_reads_started_at():
+    """anarlog meetings carry only `started_at`."""
+    from datetime import datetime, timezone
+    from mcpbrain.importance import recency_decay
+    now = datetime.now(timezone.utc).isoformat()
+    assert recency_decay({"started_at": now}) > 0.98
+
+
+def test_recency_decay_existing_keys_win_over_fallbacks():
+    """The fallbacks are read only AFTER the existing date keys."""
+    from datetime import datetime, timezone
+    from mcpbrain.importance import recency_decay
+    now = datetime.now(timezone.utc).isoformat()
+    r = recency_decay({"date": "Mon, 01 Jan 2024 00:00:00 +0000", "captured_at": now})
+    assert r < 0.5
+
+
+def test_recency_decay_empty_date_falls_through_to_captured_at():
+    """enriched-note-* carry `date: ''` — an empty key must not block the fallback."""
+    from datetime import datetime, timezone
+    from mcpbrain.importance import recency_decay
+    now = datetime.now(timezone.utc).isoformat()
+    assert recency_decay({"date": "", "captured_at": now}) > 0.98

@@ -39,11 +39,27 @@ _MAX = 10.0
 _MIN = 1.0
 
 
-def _parse_age_days(metadata: dict) -> float | None:
-    """Days since the chunk's date. Returns None if unparseable."""
-    date_str = (metadata.get("date") or metadata.get("date_iso")
-                or metadata.get("start") or metadata.get("modified")
-                or metadata.get("modifiedTime") or "")
+_AGE_DATE_KEYS = ("date", "date_iso", "start", "modified", "modifiedTime")
+
+# Further date keys the three-axis RECENCY term reads, after _AGE_DATE_KEYS:
+# notes (note-*, note-consolidated-*) carry only `captured_at`, and anarlog
+# meetings only `started_at`. Without them ~44k chunks read as "unknown age".
+# Mirrored in decay._SOURCE_DATE_KEYS. Deliberately NOT read by
+# score_structural's recency bonus, whose stored salience is out of scope here.
+_RECENCY_EXTRA_DATE_KEYS = ("captured_at", "started_at")
+
+
+def _parse_age_days(metadata: dict,
+                    extra_keys: tuple[str, ...] = ()) -> float | None:
+    """Days since the chunk's date. Returns None if unparseable.
+
+    Reads the first non-empty value of _AGE_DATE_KEYS, then extra_keys."""
+    date_str = ""
+    for key in _AGE_DATE_KEYS + tuple(extra_keys):
+        val = metadata.get(key)
+        if val and isinstance(val, str):
+            date_str = val
+            break
     if not date_str:
         return None
     now = datetime.now(timezone.utc)
@@ -159,12 +175,22 @@ def score_structural(metadata: dict, *, owner_email: str = "") -> float:
 def recency_decay(metadata: dict, *, alpha: float = 0.01) -> float:
     """Exponential recency weight for the three-axis ranker.
 
-    Returns a value in (0, 1]: 1.0 for today's content, falling with age.
+    Returns a value in [0, 1]: 1.0 for today's content, falling with age.
     alpha controls decay rate: 0.01 → half-life ~69 days.
+
+    UNKNOWN or unparseable age returns 0.0 — no recency credit. It used to
+    return 0.5, which is the score of a ~69-day-old document, while the live
+    corpus median age is ~301 days: every undated chunk (notes, anarlog
+    meetings before their date keys were read, enriched-note-*, about half of
+    enriched-gdrive-*) systematically outranked aging dated documents, and the
+    gold set flipped against the ranker as its answers aged past ~100 days
+    (2026-10-14 investigation). "Neutral" for an additive boost is 0, not the
+    middle of the curve. The content-hash dedupe tie-break in retrieval also
+    reads this: 0.0 makes an undated copy lose to a dated one.
     """
-    age = _parse_age_days(metadata)
+    age = _parse_age_days(metadata, _RECENCY_EXTRA_DATE_KEYS)
     if age is None:
-        return 0.5  # unknown age: neutral
+        return 0.0
     return math.exp(-alpha * age)
 
 

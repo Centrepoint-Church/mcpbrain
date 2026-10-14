@@ -50,7 +50,10 @@ def compute_decay(strength: float, days_since: float) -> float:
     return math.exp(-days_since / max(strength, 0.1))
 
 
-_SOURCE_DATE_KEYS = ("modified", "modifiedTime", "date", "start", "created", "timestamp")
+# `captured_at` (notes) and `started_at` (anarlog meetings) mirror the date
+# keys importance.recency_decay reads, so the two age readers agree.
+_SOURCE_DATE_KEYS = ("modified", "modifiedTime", "date", "start", "created", "timestamp",
+                     "captured_at", "started_at")
 
 
 def _source_date(metadata) -> datetime | None:

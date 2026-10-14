@@ -81,12 +81,6 @@ GOLD_RECALL_FLOOR = 0.55   # measured doc-level baseline 0.750 (production path)
 GOLD_MRR_FLOOR = 0.35      # measured baseline 0.556 (production path)
 MIN_COVERED = 15           # with 20 cases need at least 15 covered to gate meaningfully
 
-# The production recall ranking as of 0.7.72 (importance_recall ON). Mirrors the
-# weights daemon.search applies via config.importance_weights so the eval measures
-# what users actually get.
-_PROD_WEIGHTS = {"recency_weight": 0.15, "importance_weight": 0.10,
-                 "decay_weight": 0.10, "recency_alpha": 0.01}
-
 
 def test_gold_recall_floor():
     """Gold set: recall@10 / MRR over COVERABLE cases must clear the floor.
@@ -106,7 +100,8 @@ def test_gold_recall_floor():
         pytest.skip("real brain store unavailable or empty")
 
     store, emb = result
-    m = gold_eval(store, emb, k=10, search_kwargs={"exclude_cold": False, **_PROD_WEIGHTS})
+    from tests.eval.run_eval import production_search_kwargs
+    m = gold_eval(store, emb, k=10, search_kwargs=production_search_kwargs())
     print(f"\ngold set: covered {m['covered']}/{m['total']} cases "
           f"({m['missing']} not yet in corpus)")
     if m["covered"] < MIN_COVERED:
@@ -130,9 +125,9 @@ def test_production_search_kwargs_matches_shipped_defaults():
     from tests.eval.run_eval import production_search_kwargs
     kw = production_search_kwargs("/nonexistent-home")  # no config.json → shipped defaults
     assert kw["exclude_cold"] is False
-    assert kw["recency_weight"] == 0.15
-    assert kw["importance_weight"] == 0.10
-    assert kw["decay_weight"] == 0.10
+    assert kw["recency_weight"] == 0.05
+    assert kw["importance_weight"] == 0.15
+    assert kw["decay_weight"] == 0.0
     assert kw["recency_alpha"] == 0.01
 
 
@@ -142,8 +137,10 @@ def test_gold_three_axis_does_not_regress_on_production_path():
     justified enabling it — it must NOT regress recall@10 or MRR vs relevance-only on
     the production path. A future change that regresses the enabled ranker fails here.
 
-    Both baseline and three-axis use the PRODUCTION PATH (exclude_cold=True) — the same
-    path daemon.search() uses when tiered_memory is on.
+    Both sides take production_search_kwargs() — the exact kwargs daemon.search uses
+    (cold included, document collapse as configured, the CONFIGURED weights) — and the
+    baseline is the same dict with all three weights zeroed. No hardcoded literals: a
+    copy of the weights here would keep gating the old weights after a default moved.
 
     HISTORY:
     - 2026-06-23 (exclude_cold=False path — SUPERSEDED): the ranker regressed, because
@@ -151,6 +148,16 @@ def test_gold_three_axis_does_not_regress_on_production_path():
     - 2026-06-24 (PRODUCTION PATH, exclude_cold=True): with cold chunks excluded (the
       user-facing path), it does NOT regress — MRR 0.483→0.571 (+0.088), recall@10 holds
       at 0.750 over 20 cases. `importance_recall` ENABLED in live config.json.
+    - 2026-10-14: the gate had flipped — the ranker lost to relevance-only. Root cause
+      was two defects, not store drift. (1) importance.recency_decay returned 0.5 for an
+      UNKNOWN age, the score of a ~69-day-old doc, while the corpus median age is ~301
+      days, so ~44k undated chunks (notes' `captured_at` and anarlog's `started_at` were
+      never read) systematically outranked aging documents; gold answers aged past ~100
+      days since June, which is why it flipped (today's store at a June clock passes).
+      (2) _three_axis_boost fell back to the recency curve for the decay term because
+      nothing sets `_decay_factor`, so production ran recency at an effective 0.25 with
+      no real decay. Fixed: unknown age -> 0.0, the two date keys read, decay only from a
+      real factor, defaults 0.05/0.15/0.0 (main30 MRR/recall 0.528/.900 -> 0.602/.867).
 
     Read-only: uses whatever salience exists; mutates nothing.
     """
@@ -163,14 +170,18 @@ def test_gold_three_axis_does_not_regress_on_production_path():
         pytest.skip("real brain store unavailable or empty")
     store, emb = result
 
-    base = gold_eval(store, emb, k=10, search_kwargs={"exclude_cold": False})
+    from tests.eval.run_eval import production_search_kwargs
+    prod = production_search_kwargs()
+    if not (prod["recency_weight"] or prod["importance_weight"] or prod["decay_weight"]):
+        pytest.skip("configured three-axis weights are all 0 — nothing to compare")
+    relevance_only = {**prod, "recency_weight": 0.0, "importance_weight": 0.0,
+                      "decay_weight": 0.0}
+
+    base = gold_eval(store, emb, k=10, search_kwargs=relevance_only)
     if base["covered"] < MIN_COVERED:
         pytest.skip(f"only {base['covered']} coverable cases (need >= {MIN_COVERED})")
 
-    on = gold_eval(store, emb, k=10, search_kwargs={
-        "exclude_cold": False,
-        "recency_weight": 0.15, "importance_weight": 0.10,
-        "decay_weight": 0.10, "recency_alpha": 0.01})
+    on = gold_eval(store, emb, k=10, search_kwargs=prod)
 
     print(f"\n3-axis: baseline recall@10={base['recall_at_k']:.3f} → "
           f"on={on['recall_at_k']:.3f}  (MRR {base['mrr']:.3f} → {on['mrr']:.3f}, "

@@ -214,3 +214,13 @@ def test_apply_decay_pass_noop_when_disabled(store, tmp_path):
     with store._connect() as db:
         row = db.execute("SELECT memory_tier FROM chunks WHERE doc_id='doc-nd'").fetchone()
     assert row["memory_tier"] != "cold"
+
+
+def test_source_date_reads_captured_at_and_started_at():
+    """Mirrors importance.recency_decay's date keys: notes carry only
+    `captured_at`, anarlog meetings only `started_at`."""
+    from mcpbrain.decay import _source_date
+    assert _source_date({"captured_at": "2026-01-02T03:04:05Z"}).year == 2026
+    assert _source_date({"started_at": "2026-01-02T03:04:05+08:00"}).day == 1
+    assert _source_date({"date": "", "captured_at": "2025-06-01T00:00:00Z"}).year == 2025
+    assert _source_date({}) is None

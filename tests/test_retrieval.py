@@ -627,3 +627,58 @@ def test_hybrid_search_does_not_let_a_digest_crowd_out_its_own_thread(tmp_path):
     assert "enriched-t1" not in doc_ids, (
         f"digest survived alongside its own raw sibling: {doc_ids}"
     )
+
+
+def test_three_axis_boost_has_no_decay_term_without_a_decay_factor():
+    """The decay term used to fall back to the recency curve, so production
+    (where nothing sets _decay_factor) ran recency at recency+decay weight."""
+    from mcpbrain.retrieval import _three_axis_boost
+    chunk = {"metadata": {"date": "2026-01-01T00:00:00Z"}}
+    assert _three_axis_boost(chunk, decay_weight=0.5) == 0.0
+    only_recency = _three_axis_boost(chunk, recency_weight=0.1)
+    both = _three_axis_boost(chunk, recency_weight=0.1, decay_weight=0.5)
+    assert only_recency > 0.0
+    assert abs(both - only_recency) < 1e-6  # no decay term (it was +0.5 * recency)
+
+
+def test_three_axis_boost_counts_a_supplied_decay_factor():
+    from mcpbrain.retrieval import _three_axis_boost
+    chunk = {"metadata": {}, "_decay_factor": 0.4}
+    assert abs(_three_axis_boost(chunk, decay_weight=0.5) - 0.2) < 1e-9
+
+
+def test_three_axis_boost_gives_an_undated_chunk_no_recency():
+    from mcpbrain.retrieval import _three_axis_boost
+    assert _three_axis_boost({"metadata": {}}, recency_weight=0.5) == 0.0
+
+
+def test_content_dedupe_prefers_a_dated_copy_over_an_undated_one(tmp_path):
+    """The duplicate-copy tie-break picks the more recent copy via
+    recency_decay. An undated copy must lose to a dated one even when the dated
+    one is old: under the old 0.5 'neutral' the undated copy beat anything
+    older than ~69 days."""
+    class _Emb:
+        dim = 4
+
+        def embed_passages(self, texts):
+            return [[1.0, 0.0, 0.0, 0.0] for _ in texts]
+
+        def embed_query(self, text):
+            return [1.0, 0.0, 0.0, 0.0]
+
+    store = Store(tmp_path / "b.sqlite3", dim=4)
+    store.init()
+    emb = _Emb()
+    body = "The fixed asset register for the 2023 financial year."
+    store.upsert_chunk("gdrive-undated-0", body, "same-hash",
+                       {"source_type": "gdrive", "file_id": "undated"})
+    store.upsert_chunk("gdrive-dated-0", body, "same-hash",
+                       {"source_type": "gdrive", "file_id": "dated",
+                        "modified": "2024-01-01T00:00:00Z"})
+    for d in ("gdrive-undated-0", "gdrive-dated-0"):
+        store.embed_doc(d, emb, home=str(tmp_path))
+
+    hits = hybrid_search(store, emb, "asset register", limit=10)
+
+    ids = [h["doc_id"] for h in hits]
+    assert "gdrive-dated-0" in ids and "gdrive-undated-0" not in ids, ids
