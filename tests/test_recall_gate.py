@@ -58,8 +58,8 @@ def test_gate_passes_on_topic_and_attaches_distance(tmp_path, monkeypatch):
 
 
 def test_hit_outside_the_knn_window_reports_no_distance(tmp_path, monkeypatch):
-    """A survivor the KNN window never measured (keyword-only, or deep in the
-    limit*6 collapse pool) gets distance None -- not the BEST distance, which
+    """A survivor the KNN window never measured (keyword-only: the window is
+    the same FUSION_DEPTH hybrid_search reads) gets distance None -- not the BEST distance, which
     would claim it is as close as the nearest chunk."""
     monkeypatch.setenv("MCPBRAIN_HOME", str(tmp_path))
     d = _daemon(tmp_path, knn=[("d1", 0.62), ("d2", 0.70)])

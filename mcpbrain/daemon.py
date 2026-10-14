@@ -51,7 +51,7 @@ from mcpbrain.agents import win_supervised
 from mcpbrain.backup import make_encrypted_snapshot, upload_snapshot
 from mcpbrain.budget import Budget
 from mcpbrain.config import app_dir
-from mcpbrain.retrieval import hybrid_search
+from mcpbrain.retrieval import FUSION_DEPTH, hybrid_search
 from mcpbrain.sync import run_sync_cycle
 from mcpbrain import onboarding
 
@@ -2184,7 +2184,9 @@ class Daemon:
                 # rather than crashing the control-API caller; the wizard drives the
                 # download and recall works once it's cached.
                 return []
-            knn = self._store.vec_knn(qv, max(limit * 2, 8))
+            # Same depth hybrid_search reads from vec_knn, so every hit the
+            # vector ranker contributed has a measured distance below.
+            knn = self._store.vec_knn(qv, max(FUSION_DEPTH, limit * 2))
             if not knn or knn[0][1] > config.recall_max_distance(str(app_dir())):
                 return []  # nothing close enough -> off-topic -> inject nothing
             dist = {doc: d for doc, d in knn}
@@ -2231,8 +2233,8 @@ class Daemon:
         # Shape the ranked hits into compact result dicts. Use the existing
         # distance field (set by router for synthetic results like community
         # summaries) when present; otherwise look it up from KNN. A hit outside
-        # the KNN window (keyword-only, or ranked deep in the limit*6 collapse
-        # pool) has no measured distance: report None, never the BEST distance,
+        # the KNN window (keyword-only: the window is the same FUSION_DEPTH
+        # hybrid_search reads) has no measured distance: report None, never the BEST distance,
         # which would claim it is as close as the nearest chunk. No consumer
         # reads it as a float (prompt_recall/feedback rank on score;
         # maybe_expand passes it through).

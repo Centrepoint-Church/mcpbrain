@@ -3390,8 +3390,9 @@ class Store:
         """Batched get_chunk (+ optional get_chunk_salience): one connection,
         not one per id.
 
-        hybrid_search's collapse_documents candidate pool is limit*6 per
-        ranker (~90 ids) and used to call get_chunk/get_chunk_salience once
+        hybrid_search's candidate pool (FUSION_DEPTH per ranker, up to ~200
+        ids; it was limit*6 under collapse_documents when this was written)
+        used to call get_chunk/get_chunk_salience once
         PER CANDIDATE -- each a separate SQLite connection open. Measured:
         6.6k -> 18.2k connection opens over 50 queries, pushing p95 latency
         1.5-1.65x over the collapse-off figure (gate <= 1.25x). This fetches

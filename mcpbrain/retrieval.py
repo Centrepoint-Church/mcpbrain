@@ -140,6 +140,23 @@ _RRF_K = 60
 _VEC_WEIGHT = 1.0
 _KW_WEIGHT = 1.0
 
+# Per-ranker candidate depth for hybrid_search: how many hits it takes from
+# EACH of vec_knn and fts_search before RRF fusion. Fixed, NOT derived from the
+# caller's `limit` (only raised when a caller asks for more than half of it).
+#
+# RRF ordering depends on list depth: a deeper list lets "moderate in both
+# rankers" overtake "top in one". With depth = limit*2 (and limit*6 when
+# collapse_documents was on, 0.7.140) a document's RANK depended on how many
+# results the caller asked for, and the 6x collapse pool pushed two gold
+# answers out of the top 10 (main gold recall@10 0.85 -> 0.80). Measured on
+# the live store (2026-10-14, both gold sets, n=20 each; MRR / recall@10,
+# main | older): shipped 0.7.141 0.496/0.80 | 0.288/0.40; fixed 40
+# 0.538/0.85 | 0.301/0.45; fixed 60 0.541/0.90 | 0.293/0.40; fixed 100
+# 0.543/0.90 | 0.289/0.40. Latency gate: brain_search p95 at this depth must
+# stay <= 1.25x the 0.7.141 collapse-off p95 (in-process, 50 gold queries x3
+# after 3 warm-ups); if 100 fails it, use 60.
+FUSION_DEPTH = 100
+
 
 def _rrf(rankings: list[list[str]], k: int = _RRF_K,
          vec_weight: float = _VEC_WEIGHT,
@@ -274,35 +291,32 @@ def _cluster_key(chunk: dict) -> str | None:
     return key
 
 
-def _dedupe_by_cluster(hits: list[dict], limit: int | None = None) -> list[dict]:
-    """Drop a digest (`enriched-<cluster>`) when its own cluster's raw chunk
-    is also in the pool.
+def _dedupe_by_cluster(hits: list[dict]) -> list[dict]:
+    """Drop a digest (`enriched-<cluster>`) when a raw chunk of its own
+    cluster is anywhere in `hits`; keep it when none is.
 
     A digest is a synthesized summary of its own thread/file's raw chunks —
-    pure derived output, never independent information. When both are in the
-    results it is redundant, and because a digest is synthetic text it can
-    never itself match a query's actual expected source document — so
-    letting it occupy a slot ahead of its own raw sibling only pushes the
-    real answer down a rank for no benefit (confirmed on the gold set: a
-    digest outranking its own thread's raw chunk by one position turned a
-    correct #1 hit into a #2 miss).
+    pure derived output, never independent information, and never a citable
+    source: it can never itself match a query's actual expected source
+    document. When raw evidence of the cluster was retrieved at all, the raw
+    hit is the better result, so the digest is redundant wherever the two
+    rank (confirmed on the gold set: a digest outranking its own thread's raw
+    chunk by one position turned a correct #1 hit into a #2 miss). A digest
+    surfaces only when no raw sibling was retrieved — dropping it then would
+    be content loss, not duplicate removal. Two raw chunks of the same cluster
+    are never collapsed against each other; only a digest-vs-raw pair is
+    redundant.
 
-    Kept unconditionally when no raw sibling of its cluster is in THIS pool
-    (filtered out, beyond the retrieval boundary, etc.) — dropping it then
-    would be content loss, not duplicate removal. Two raw chunks of the same
-    cluster are never collapsed against each other; only a digest-vs-raw
-    pair is redundant.
-
-    `limit`, when given, bounds what counts as "in the pool" to the first
-    limit*2 positions — the horizon the pool had before collapse_documents
-    deepened it to limit*6. Without it, a raw sibling ranked far down the
-    deep pool (#40, say) would drop a #1 digest even though that sibling
-    never reaches the top `limit` — losing the thread from the results.
-    None (collapse off) keeps the whole pool, today's exact behaviour.
+    hybrid_search applies this to the FIXED FUSION_DEPTH candidate pool, before
+    any cut to `limit`, so the decision is independent of `limit` and the
+    ranking stays a prefix across limits, digests included. (0.7.140 bounded
+    the check to a limit*2 horizon so a #1 digest with its only raw sibling
+    far down survived; with a fixed pool that kept digests crowding real
+    answers out of the top 10 — main gold 0.543/0.90 whole-pool vs 0.460/0.80
+    — so the horizon was removed in 0.7.142.)
     """
-    horizon = hits if limit is None else hits[:limit * 2]
     raw_clusters: set[str] = set()
-    for hit in horizon:
+    for hit in hits:
         if hit.get("doc_id", "").startswith("enriched-"):
             continue
         key = _cluster_key(hit)
@@ -387,15 +401,22 @@ def hybrid_search(store, embedder, query: str, limit: int = 10, *,
       recency_alpha   — exp decay rate for the recency term (0.01 → ~69d half-life)
       exclude_cold    — when True, skip memory_tier='cold' chunks (B2)
       collapse_documents — when True, collapse to one hit per document, best
-        chunk (MaxP), with a `doc_hits` count on the survivor; fetches
-        limit*6 per ranker instead of limit*2 (spec 2026-10-07 §3.2).
+        chunk (MaxP), with a `doc_hits` count on the survivor (spec 2026-10-07
+        §3.2). A PURE POST-FILTER over the same fixed-depth ranking the
+        collapse-off path produces: it can only promote a later document into
+        a freed slot, never reorder.
+
+    Ranking does not depend on `limit`: each ranker is read to
+    max(FUSION_DEPTH, limit*2), so for any limit <= FUSION_DEPTH // 2 the
+    fused, filtered, deduped ranking is identical and `limit` only decides
+    where it is cut.
 
     query_vec lets a caller that already embedded the query (e.g. the recall
     distance gate in daemon.search) reuse it, avoiding a second embed_query —
     the slow part of a search. Identical results either way.
     """
     qv = query_vec if query_vec is not None else embedder.embed_query(query)
-    depth = limit * 6 if collapse_documents else limit * 2
+    depth = max(FUSION_DEPTH, limit * 2)
     sem = [d for d, _ in store.vec_knn(qv, depth)]
     kw = [d for d, _ in store.fts_search(query, depth)]
     fused = _rrf([sem, kw], k=rrf_k, vec_weight=vec_weight, kw_weight=kw_weight)
@@ -415,8 +436,8 @@ def hybrid_search(store, embedder, query: str, limit: int = 10, *,
 
     # Batched: one connection for the whole candidate pool instead of two
     # get_chunk/get_chunk_salience calls (two connection opens) PER candidate.
-    # collapse_documents's limit*6 pool made this the dominant latency cost
-    # (6.6k -> 18.2k connection opens over 50 queries; see store.get_chunks).
+    # The deep candidate pool made this the dominant latency cost (6.6k ->
+    # 18.2k connection opens over 50 queries; see store.get_chunks).
     # Skip the call entirely when there's nothing to fetch (no-op either way,
     # but spares a minimal fake Store in tests from implementing get_chunks).
     chunks = store.get_chunks(ordered, with_salience=use_three_axis) if ordered else {}
@@ -463,19 +484,12 @@ def hybrid_search(store, embedder, query: str, limit: int = 10, *,
             for c in candidates:
                 c["score"] = round(c["score"] / new_top, 4)
 
-    # Drop a digest that's redundant with its own thread/file's raw chunk
-    # BEFORE the content-hash dedup below: a digest's content_hash never
-    # matches its raw sibling's (it's synthesized text, not a copy), so the
-    # content-hash pass can't see this redundancy on its own.
-    candidates = _dedupe_by_cluster(
-        candidates, limit=limit if collapse_documents else None)
-
     # Dedup by content_hash AFTER ranking (the order above must be preserved so
     # the best-ranked copy of a duplicate survives) and BEFORE the limit
     # truncation below, so a freed slot goes to genuinely different content
     # instead of shortening the result set. Safe to do here because `candidates`
-    # is still the full fused-and-filtered pool (bounded by the limit*2 vec/kw
-    # retrieval above, not by `limit` itself) — truncating to `limit` first and
+    # is still the full fused-and-filtered pool (bounded by the FUSION_DEPTH
+    # vec/kw retrieval above, not by `limit` itself) — truncating to `limit` first and
     # deduping after would just make the list shorter (the same class of bug
     # the 0.7.103 expansion fix and 0.7.110 open-actions fix each had to undo).
     #
@@ -500,6 +514,15 @@ def hybrid_search(store, embedder, query: str, limit: int = 10, *,
     # whose FULL set differs never joins that root's cluster, so it is never
     # collapsed on that basis (protects two genuinely different documents
     # that happen to share a boilerplate/template chunk).
+    # Drop a digest that's redundant with its own thread/file's raw chunk,
+    # over the whole fixed pool (limit-independent) and BEFORE the
+    # content-hash dedup below: a digest's content_hash never matches its raw
+    # sibling's (it's synthesized text, not a copy), so the content-hash pass
+    # can't see this redundancy on its own. The order is measured, not
+    # cosmetic: running it after the content-hash pass scored main gold
+    # 0.536/0.85 instead of 0.543/0.90 (2026-10-14).
+    candidates = _dedupe_by_cluster(candidates)
+
     roots = {_doc_root(c["doc_id"]) for c in candidates if c.get("content_hash")}
     root_hashes = store.doc_root_content_hashes(list(roots))
 
@@ -556,7 +579,7 @@ def hybrid_search(store, embedder, query: str, limit: int = 10, *,
     # surviving primary root contributes" is limited to the CANDIDATE POOL being
     # deduped here. Those two sets are not the same: `metadata.expired`
     # filtering, exclude_cold cold-marking (independent per chunk — 109,694
-    # chunks are cold on the live store) and the limit*2 retrieval boundary can
+    # chunks are cold on the live store) and the FUSION_DEPTH retrieval boundary can
     # all put a cluster-mate's chunk in the pool while the primary root's chunk
     # with that same content_hash is absent from it. Dropping by cluster
     # membership alone then makes that content vanish from the results

@@ -356,3 +356,28 @@ def test_route_error_returns_empty(tmp_path):
     with patch("mcpbrain.query_router.hybrid_search", side_effect=RuntimeError("boom")):
         result = route(store, embedder, "query", 5, home=home)
     assert result == []
+
+
+def test_route_crag_collapses_before_cutting_to_limit(tmp_path):
+    """Both sides contribute a chunk of F1; collapsing AFTER cutting the merge
+    to `limit` would leave one document in two slots. Collapse first, then
+    cut, so `limit` documents still come back."""
+    home = _make_home(tmp_path, retrieval_crag=True, crag_min_score=0.50)
+    store = _make_store()
+    embedder = MagicMock()
+    primary = [{"doc_id": "gdrive-F1-0", "score": 0.3, "metadata": {"file_id": "F1"}},
+               {"doc_id": "gdrive-F2-0", "score": 0.25, "metadata": {"file_id": "F2"}}]
+    secondary = [{"doc_id": "gdrive-F1-3", "score": 0.8, "metadata": {"file_id": "F1"}},
+                 {"doc_id": "gdrive-F3-0", "score": 0.2, "metadata": {"file_id": "F3"}}]
+
+    call_count = [0]
+    def mock_hybrid(*a, **kw):
+        call_count[0] += 1
+        return primary if call_count[0] == 1 else secondary
+
+    with patch("mcpbrain.query_router.hybrid_search", side_effect=mock_hybrid):
+        with patch("mcpbrain.query_router._crag_rewrite", return_value="better query"):
+            result = route(store, embedder, "vague query", 2, home=home,
+                           collapse_documents=True)
+
+    assert [r["doc_id"] for r in result] == ["gdrive-F1-3", "gdrive-F2-0"]

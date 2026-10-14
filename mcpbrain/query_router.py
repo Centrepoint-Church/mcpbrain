@@ -314,7 +314,14 @@ def route(store, embedder, query: str, limit: int, *,
                                               **search_kwargs)
                     for r in secondary:
                         r["provenance"] = "crag_rewrite"
-                    results = _merge_crag(results, secondary, limit)
+                    collapse = bool(search_kwargs.get("collapse_documents"))
+                    # Collapse BEFORE cutting to `limit` (merge uncut when
+                    # collapsing): cutting first and collapsing after would
+                    # return fewer than `limit` documents whenever both sides
+                    # contributed a chunk of the same one.
+                    results = _merge_crag(
+                        results, secondary,
+                        len(results) + len(secondary) if collapse else limit)
                     # The primary and CRAG-rewrite searches each ran their own
                     # hybrid_search call, so when collapse_documents is on each
                     # side already collapsed to one hit per document on its own
@@ -326,8 +333,8 @@ def route(store, embedder, query: str, limit: int, *,
                     # one-result-per-document guarantee for the routed path too;
                     # _collapse_documents sums each side's own `doc_hits` rather
                     # than re-counting, so the total still reflects both pools.
-                    if search_kwargs.get("collapse_documents"):
-                        results = _collapse_documents(results)
+                    if collapse:
+                        results = _collapse_documents(results)[:limit]
             except Exception:  # noqa: BLE001
                 pass
 
