@@ -334,7 +334,50 @@ say "call brain_owner_context". **28 tools** after release (was 27).
   `sse-starlette` resolves 3.5.0 for the fleet vs 3.4.4 in the lock — only mcp's
   SSE transport uses it (mcpbrain serves stdio), and the live stdio call above ran
   on 3.5.0. **The Windows HARDWARE QA GATE remains OPEN.**
-- **Current state (2026-10-12): the four version files (+ `uv.lock`) are at
+- **Current state (2026-10-14): the four version files (+ `uv.lock`) are at
+  `0.7.142`, RELEASED** — source `4b324bfb`, gh-pages `75aafa65`, plugin `32adb3d`;
+  index serves only `mcpbrain-0.7.142-py3-none-any.whl`, `install.ps1` 200; fleet
+  resolves mcp 2.3.0 / fastembed 0.9.0 / **google-auth 2.62.0** / pymupdf 1.28.2 /
+  httplib2 0.32.0; full suite under that set **4589 passed, 1 failed** — the failure is
+  `test_gold_three_axis_does_not_regress_on_production_path` (live store; fails
+  identically on pre-change code). **OPEN: the three-axis recency/importance weights
+  no longer beat relevance-only on today's store** (MRR 0.558 off vs 0.538 on) —
+  investigate on its own; do NOT loosen that test's epsilon.
+  Installed from the index; `/api/status` 0.7.142; doctor 0 need action.
+  **BINDING GOLD GATE FOR THE 0.7.140 EXTRACTION/TABLE-FLOW ROLLOUT: PASSED** on the
+  live store via `run_eval.py --gold`: **recall@10 0.900, MRR 0.543** (pre-rollout
+  9 Oct store 0.850 / 0.439; older set 0.283/0.40 → 0.289/0.40). Gold files remapped
+  through `reflow_map` id 434285 and committed to `mcpbrain-tenant` (`aa241dd`).
+  **0.7.142 = fixed-depth fusion.** Root cause found while running that gate: RRF
+  ordering depended on the CALLER'S `limit` (each ranker fetched `limit*2`, and
+  0.7.140's collapse fetched `limit*6`) — deeper lists let "moderate in both rankers"
+  beat "top in one", so 0.7.140's collapse pushed two gold answers out of the top 10
+  (recall 0.85 → 0.80) and a document's rank changed with how many results were asked
+  for. Now `retrieval.FUSION_DEPTH = 100` per ranker (`max(FUSION_DEPTH, limit*2)`),
+  `collapse_documents` is a PURE POST-FILTER (keep first hit per document, then cut —
+  can only promote, never reorder), and the digest rule is WHOLE-POOL: an
+  `enriched-<cluster>` digest is dropped whenever any raw sibling of its cluster is in
+  the fixed pool (synthetic text is never the citable source), applied before the
+  content-hash dedupe (measured: after it scored 0.536/0.85). The 0.7.140
+  limit-derived digest horizon ("M1") is GONE — kept, it left digests in 18 of 20 main
+  top-10s and scored 0.460/0.80. CRAG merge now dedupes digests across both sides
+  before collapsing and cutting; `hybrid_search` and `/api/recall` clamp `limit` ≥ 1
+  (a negative limit used to return the whole pool). Pinned by prefix-stability tests
+  (top-5 ⊂ top-10 ⊂ top-20, collapse on/off, digests included) that FAIL on 0.7.141.
+  Latency p95 468 ms vs 404 ms (1.16×, gate 1.25×). The daemon's distance KNN also runs
+  at FUSION_DEPTH (two depth-100 KNNs per recall; within the gate).
+  **Rollout closure:** both attended reflow drains done (11,510 + 5,268 owners);
+  39,691 queued Drive `remove` events from a confirmed shared-drive clean-up were
+  cleared by an attended pass with the daemon booted out (2 min 13 s; 226 files had
+  content; snapshot `brain.sqlite3.pre-remove-drain-*`) — at the default
+  `sync_work_limit` they would have taken weeks behind shared-drive upserts. The
+  temporary local `sync_work_limit` 1000 / `tuning.cycle_budget_s` 240 were REVERTED
+  (backup `config.json.bak-pre-revert-*`). Leftover: 9 owners failing every attempt
+  (7 OCR-empty PDFs, 2 Gmail attachments the lineage guard refuses) — they give up and
+  keep their old chunks. 20 draft gold candidates still await owner queries in
+  `mcpbrain-tenant/eval/candidates-2026-10.yaml`.
+  **The Windows HARDWARE QA GATE remains OPEN.**
+- **Earlier (2026-10-12): the four version files (+ `uv.lock`) are at
   `0.7.141`, RELEASED** — source `7c0dc234`, gh-pages `acebf6d5`, plugin `9a4db87`;
   index serves only `mcpbrain-0.7.141-py3-none-any.whl`, `install.ps1` 200; fleet
   resolves mcp 2.3.0 / fastembed 0.9.0 / google-auth 2.61.0 / pymupdf 1.28.2 /
