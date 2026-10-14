@@ -1,7 +1,7 @@
 """Enriched-digest provenance can be repaired WITHOUT re-running the model.
 
-C2 (no date -> importance.recency_decay returns its neutral 0.5 for the
-highest-value chunks in the store) and C4 (calendar-derived digests labelled
+C2 (no date -> importance.recency_decay gives the highest-value chunks in the
+store 0.0, no recency boost) and C4 (calendar-derived digests labelled
 gmail_enriched_v2) were both fixed in build_semantic_doc, which only runs on
 re-enrichment — so neither reached the 22,357 digests already stored.
 

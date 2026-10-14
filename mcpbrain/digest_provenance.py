@@ -3,7 +3,8 @@
 `semantic.build_semantic_doc` gained `date` / `date_iso` / correct `source_type`
 in spec 2, but it only runs when a thread is RE-enriched — so none of it reached
 the 22,357 digests already in the store. Measured there: 0 of 22,324 carried a
-date, meaning `importance.recency_decay` returned its neutral 0.5 fallback for
+date, so `importance.recency_decay` could not rank by age (it returned a
+"neutral" 0.5 then; an undated chunk now gets 0.0, no recency boost) for
 the LLM-digested summaries, the highest-value chunks in the corpus and the only
 significant population the recency axis could not rank.
 

@@ -473,8 +473,9 @@ def phase_digest_provenance(store, apply: bool, *, limit: int | None) -> int:
 
     C2 and C4 were fixed in build_semantic_doc, which only runs on RE-enrichment,
     so neither reached the 22,357 digests already stored: 0 of them carried a
-    date, so importance.recency_decay returned its neutral 0.5 for the
-    LLM-digested summaries — the highest-value chunks in the store.
+    date, so importance.recency_decay could not rank the LLM-digested summaries
+    by age (a "neutral" 0.5 then; an undated chunk now gets 0.0, no recency
+    boost) — the highest-value chunks in the store.
 
     Forcing re-enrichment to fix that was the wrong instrument. `date` is
     recoverable from the digest's own "Date:" line for ~70% of them, and

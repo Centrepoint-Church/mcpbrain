@@ -155,8 +155,8 @@ def build_semantic_doc(extraction: dict, thread: dict, owner=None, taxonomy=None
         "subject": subject[:200],
         "org": org,
         "content_type": content_type,
-        # C2: without a date, importance.recency_decay returns its neutral 0.5
-        # fallback for all 21,162 of these. `date` is the lead's RFC2822 header,
+        # C2: without a date, importance.recency_decay gives all 21,162 of these
+        # 0.0 (no recency boost; it was a "neutral" 0.5 before 0.7.143). `date` is the lead's RFC2822 header,
         # which importance._parse_age_days already handles.
         "date": date[:80],
         # NO `message_id` here, deliberately (C3 reverted, 2026-07-30). It was

@@ -216,11 +216,12 @@ def test_apply_decay_pass_noop_when_disabled(store, tmp_path):
     assert row["memory_tier"] != "cold"
 
 
-def test_source_date_reads_captured_at_and_started_at():
-    """Mirrors importance.recency_decay's date keys: notes carry only
-    `captured_at`, anarlog meetings only `started_at`."""
+def test_source_date_ignores_note_and_meeting_date_keys():
+    """Deliberate: a note (only `captured_at`) or anarlog meeting (only
+    `started_at`) has no decay anchor, so the decay/tier pass skips it and never
+    demotes it to cold. importance.recency_decay reads these keys for ranking
+    only."""
     from mcpbrain.decay import _source_date
-    assert _source_date({"captured_at": "2026-01-02T03:04:05Z"}).year == 2026
-    assert _source_date({"started_at": "2026-01-02T03:04:05+08:00"}).day == 1
-    assert _source_date({"date": "", "captured_at": "2025-06-01T00:00:00Z"}).year == 2025
-    assert _source_date({}) is None
+    assert _source_date({"captured_at": "2026-01-02T03:04:05Z"}) is None
+    assert _source_date({"started_at": "2026-01-02T03:04:05+08:00"}) is None
+    assert _source_date({"date": "", "captured_at": "2025-06-01T00:00:00Z"}) is None

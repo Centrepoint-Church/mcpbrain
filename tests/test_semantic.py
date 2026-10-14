@@ -198,7 +198,7 @@ def test_apply_summary_notes_semantic_doc(tmp_path):
 
 def test_the_enriched_chunk_carries_a_date():
     """C2: 21,162 gmail_enriched_v2 chunks carry no date in any form, so
-    importance.recency_decay returns its neutral 0.5 fallback for all of them.
+    importance.recency_decay gives all of them 0.0 (no recency boost).
     These are the LLM-digested summaries — the highest-value chunks in the store
     — and the only significant population the recency axis cannot rank. Their
     source chunks DO carry dates; the value was simply not propagated."""

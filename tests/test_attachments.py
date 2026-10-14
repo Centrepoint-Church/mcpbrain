@@ -99,7 +99,7 @@ def test_a_pdf_attachment_becomes_chunks_carrying_its_message_and_thread(monkeyp
     assert c.metadata["attachment_name"] == "Invoice.pdf"
     assert c.metadata["date"].startswith("Tue, 02 Jun 2026"), (
         "the parent's date must be propagated or the chunk is date-blind and "
-        "recency_decay returns its neutral 0.5 fallback"
+        "recency_decay gives it 0.0 (no recency boost)"
     )
 
 

@@ -13,8 +13,8 @@ and `thread_id`, so they join their thread for enrichment, thread expansion and
 distinguished by `content_type: "email_attachment"`.
 
 They also inherit the parent's `date`, without which they would be date-blind
-and `importance.recency_decay` would return its neutral 0.5 fallback for every
-one — the same defect C2 documents for the enriched layer.
+and `importance.recency_decay` would give every one 0.0 (no recency boost) —
+the same defect C2 documents for the enriched layer.
 
 Fetching lives here rather than in normalise.py because that module is declared
 pure data transformation ("No Google API calls here"), and the boundary is worth

@@ -44,8 +44,9 @@ _AGE_DATE_KEYS = ("date", "date_iso", "start", "modified", "modifiedTime")
 # Further date keys the three-axis RECENCY term reads, after _AGE_DATE_KEYS:
 # notes (note-*, note-consolidated-*) carry only `captured_at`, and anarlog
 # meetings only `started_at`. Without them ~44k chunks read as "unknown age".
-# Mirrored in decay._SOURCE_DATE_KEYS. Deliberately NOT read by
-# score_structural's recency bonus, whose stored salience is out of scope here.
+# Ranking only: deliberately NOT in decay._SOURCE_DATE_KEYS (notes/meetings stay
+# out of the decay/tier pass) and NOT read by score_structural's recency bonus
+# (stored salience is out of scope).
 _RECENCY_EXTRA_DATE_KEYS = ("captured_at", "started_at")
 
 

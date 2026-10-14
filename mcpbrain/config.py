@@ -397,9 +397,10 @@ def importance_weights(home) -> dict:
     Defaults measured 2026-10-14 on the live store (gold MRR / recall@10), after
     fixing undated chunks scoring 0.5 recency and the decay term silently
     re-applying the recency curve (so the old 0.15/0.10/0.10 ran recency at an
-    effective 0.25): main gold set ("main30") 0.528/0.900 -> 0.602/0.867;
-    older 20-case set ("old20") 0.287/0.40 -> 0.361/0.45. A plateau, not a
-    spike: recency <= 0.05 and importance 0.15-0.30 are flat on the older set, and a
+    effective 0.25): golden_retrieval_set_mcpbrain_candidate.yaml (30 cases)
+    0.528/0.900 -> 0.602/0.867; golden_retrieval_set.yaml (20 covered)
+    0.287/0.40 -> 0.361/0.45. A plateau, not a
+    spike: recency <= 0.05 and importance 0.15-0.30 are flat on golden_retrieval_set.yaml, and a
     leave-one-set-out check held (weights picked on one set did not lose on the
     other). decay_weight is 0 because no recall path sets `_decay_factor`.
     """

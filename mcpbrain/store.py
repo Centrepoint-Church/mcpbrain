@@ -27,8 +27,9 @@ from mcpbrain.chunking import action_fingerprint as _action_fingerprint, slugify
 #
 # The bump existed to make spec 2's C2/C3/C4 fixes reach the 22,357 digests
 # already stored — build_semantic_doc only runs on re-enrichment, so 0 of them
-# carried a date and importance.recency_decay returned its neutral 0.5 for the
-# highest-value chunks in the store. That problem was real. Forcing the whole
+# carried a date, so importance.recency_decay could not rank the highest-value
+# chunks in the store by age (it returned a "neutral" 0.5 then; an undated
+# chunk now gets 0.0, no recency boost at all). That problem was real. Forcing the whole
 # corpus back through the model was the wrong solution:
 #
 #   * `source_type` (C4) is 100% derivable from `thread_id`, and `date` (C2) is
