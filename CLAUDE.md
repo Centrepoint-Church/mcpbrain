@@ -334,7 +334,37 @@ say "call brain_owner_context". **28 tools** after release (was 27).
   `sse-starlette` resolves 3.5.0 for the fleet vs 3.4.4 in the lock — only mcp's
   SSE transport uses it (mcpbrain serves stdio), and the live stdio call above ran
   on 3.5.0. **The Windows HARDWARE QA GATE remains OPEN.**
-- **Current state (2026-10-14): the four version files (+ `uv.lock`) are at
+- **Current state (2026-10-14, later): the four version files (+ `uv.lock`) are at
+  `0.7.143`, RELEASED** — source `74f05cf0`, gh-pages `b9129c2c`, plugin `4fcc08e`;
+  index serves only `mcpbrain-0.7.143-py3-none-any.whl`; fleet resolves mcp 2.3.0 /
+  fastembed 0.9.0 / google-auth 2.62.0 / pymupdf 1.28.2 / httplib2 0.32.0; full suite
+  under that set **4604 passed, 0 failed** (the live-store three-axis gold gate is
+  GREEN again). Installed from the index; `/api/status` 0.7.143; doctor 0 need action.
+  **0.7.143 fixes the three-axis ranker** (investigation 2026-10-14; it lost to
+  relevance-only, MRR 0.558 → 0.538). Two DEFECTS, not store drift: (1)
+  `importance.recency_decay` scored an UNKNOWN age 0.5 — a 69-day-old document — so
+  ~44k undated chunks (notes/meetings whose `captured_at`/`started_at` were never
+  read, enriched digests) systematically outranked aging documents; the gate flipped
+  only because the June gold answers aged past ~100 days (today's store re-run at a
+  June clock reproduces the old pass). Unknown age now scores 0.0 and
+  `captured_at`/`started_at` are read (~17.3k chunks rescued). ~17.6k enriched-note +
+  4.3k enriched-gdrive digests stay UNDATED ON PURPOSE — dating them measured worse
+  (0.547 vs 0.568); do not "fix" it. (2) `_three_axis_boost`'s decay term read a
+  `_decay_factor` nothing sets and fell back to recency, so production ran recency at
+  0.25 and no real decay; decay now counts only with a real factor. Defaults
+  re-derived on a plateau (leave-one-set-out held): **recency 0.05, importance 0.15,
+  decay 0.0** (a configured `decay_weight` > 0 logs once that it is inert). The
+  decay/tier pass still does NOT read `captured_at`/`started_at` — deliberate, so
+  notes get no source-date decay anchor (the salience-floor tier pass still applies).
+  The gold gate and `production_search_kwargs` now use the configured weights and
+  honour `importance_recall`. **Gold (30-case main set, production path): 0.602 /
+  0.867** (relevance-only 0.535/0.833; before the fix 0.528/0.900 — one case lost at
+  rank 10 that the over-weighted recency had rescued); older set 0.287/0.40 →
+  0.361/0.45. **Main gold set grew 20 → 30** (10 owner-store multi-part cases drafted by
+  Claude, owner may edit; 10 candidates rejected: 7 marketing/template emails, 3
+  personnel) — `mcpbrain-tenant` `664f6b6`. Snapshots `brain.sqlite3.pre-*` and old
+  `config.json.bak-*` deleted after the 13 Oct backup.
+- **Earlier (2026-10-14): the four version files (+ `uv.lock`) are at
   `0.7.142`, RELEASED** — source `4b324bfb`, gh-pages `75aafa65`, plugin `32adb3d`;
   index serves only `mcpbrain-0.7.142-py3-none-any.whl`, `install.ps1` 200; fleet
   resolves mcp 2.3.0 / fastembed 0.9.0 / **google-auth 2.62.0** / pymupdf 1.28.2 /
