@@ -218,7 +218,7 @@ def test_backup_transient_build_failure_rebuilds_later_and_backs_up(home, monkey
     monkeypatch.setattr(dmod, "_mac_user_is_active", lambda: True)
     monkeypatch.setattr(dmod, "make_encrypted_snapshot", lambda *a, **k: home / "snap.enc")
     monkeypatch.setattr(dmod, "upload_snapshot",
-                        lambda svc, path, sd, uid: uploaded.append(svc) or "FILE1")
+                        lambda svc, path, sd, uid, **kw: uploaded.append(svc) or "FILE1")
     monkeypatch.setattr("mcpbrain.backup.prune_snapshots", lambda *a, **k: None)
     out = d.maybe_backup()
     assert out["backed_up"] is True
@@ -371,7 +371,7 @@ def _restore_rig(home, monkeypatch, *, snapshot="SNAP1", find_errors=(), build_e
     monkeypatch.setattr(dmod, "_mac_user_is_active", lambda: True)
     monkeypatch.setattr(dmod, "make_encrypted_snapshot", lambda *a, **k: home / "snap.enc")
     monkeypatch.setattr(dmod, "upload_snapshot",
-                        lambda svc, path, sd, uid: rec["uploaded"].append(path) or "F")
+                        lambda svc, path, sd, uid, **kw: rec["uploaded"].append(path) or "F")
     monkeypatch.setattr("mcpbrain.backup.prune_snapshots",
                         lambda *a, **k: rec["pruned"].append(1))
     return rec
@@ -569,7 +569,7 @@ def test_prune_held_is_surfaced_in_status(home, monkeypatch):
                         FlakyBuild(result={"drive_service": object()}))
     monkeypatch.setattr(dmod, "_mac_user_is_active", lambda: True)
     monkeypatch.setattr(dmod, "make_encrypted_snapshot", lambda *a, **k: home / "s.enc")
-    monkeypatch.setattr(dmod, "upload_snapshot", lambda *a: "F")
+    monkeypatch.setattr(dmod, "upload_snapshot", lambda *a, **kw: "F")
 
     def prune(*a, held=None, **k):
         held.update(newest_bytes=10, largest_kept_bytes=1000)

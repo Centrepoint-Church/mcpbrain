@@ -9,7 +9,10 @@ latest-writes roundtrip test below is the behavioural proof: a freshly
 committed row must survive the snapshot.
 """
 
+import errno
 import sqlite3
+
+import pytest
 from pathlib import Path
 
 import sqlite_vec
@@ -1088,6 +1091,11 @@ class _FakeCreate:
     def execute(self, num_retries=0):
         self.executes.append(num_retries)
         return {"id": self.canned_id}
+
+    def next_chunk(self, num_retries=0):
+        # A resumable media create, driven chunk by chunk (one chunk here).
+        self.executes.append(num_retries)
+        return None, {"id": self.canned_id}
 
 
 class _FakeList:
@@ -2350,3 +2358,99 @@ def test_live_bytes_does_not_create_file_for_missing_store(tmp_path):
         assert not missing_path.exists(), (
             f"_live_bytes created a stray file at {missing_path}; "
             "sqlite3.connect must not auto-create on a missing path")
+
+
+# --- resuming a dropped upload in place ---------------------------------------
+
+
+class _Status:
+    def __init__(self, sent, total):
+        self.resumable_progress = sent
+        self.total_size = total
+
+
+class _ScriptedUpload:
+    """A resumable request whose next_chunk follows a script: an exception is
+    raised, an int is a chunk landing at that byte offset, a dict finishes."""
+
+    def __init__(self, script, total=100):
+        self.script = list(script)
+        self.total = total
+        self.calls = []
+
+    def next_chunk(self, num_retries=0):
+        self.calls.append(num_retries)
+        step = self.script.pop(0)
+        if isinstance(step, BaseException):
+            raise step
+        if isinstance(step, dict):
+            return None, step
+        return _Status(step, self.total), None
+
+
+def test_dropped_chunks_are_resumed_not_restarted():
+    """Live 2026-10-15..18: Errno 49, broken pipe and a read timeout each threw
+    away a 768MB upload. A transient chunk failure now resumes the session."""
+    from mcpbrain.backup import _drive_media_upload
+
+    req = _ScriptedUpload([
+        25, OSError(errno.EADDRNOTAVAIL, "Can't assign requested address"),
+        50, BrokenPipeError(32, "Broken pipe"), TimeoutError("The read operation timed out"),
+        75, {"id": "done"}])
+    slept, progress = [], []
+    out = _drive_media_upload(req, sleep=slept.append,
+                              on_progress=lambda s, t: progress.append(s))
+    assert out == {"id": "done"}
+    assert progress == [25, 50, 75]
+    assert slept == [5, 5, 15], "backoff resets once a chunk lands"
+    assert set(req.calls) == {0}, "never asks the library to retry a drained slice"
+
+
+def test_a_permanent_chunk_error_is_raised_at_once():
+    from googleapiclient.errors import HttpError
+    from mcpbrain.backup import _drive_media_upload
+
+    class _Resp(dict):
+        status = 403
+        reason = "Forbidden"
+
+    req = _ScriptedUpload([HttpError(_Resp(), b"{}")])
+    slept = []
+    with pytest.raises(HttpError):
+        _drive_media_upload(req, sleep=slept.append)
+    assert slept == []
+
+
+def test_a_link_that_stays_down_gives_up_after_the_backoff():
+    from mcpbrain.backup import _MEDIA_RESUME_BACKOFF_S, _drive_media_upload
+
+    n = len(_MEDIA_RESUME_BACKOFF_S)
+    req = _ScriptedUpload([TimeoutError("timed out")] * (n + 1))
+    slept = []
+    with pytest.raises(TimeoutError):
+        _drive_media_upload(req, sleep=slept.append)
+    assert slept == list(_MEDIA_RESUME_BACKOFF_S)
+
+
+def test_a_500_on_a_chunk_is_resumed():
+    """Google documents 500 on a resumable chunk as 'resume the upload'."""
+    from googleapiclient.errors import HttpError
+    from mcpbrain.backup import _drive_media_upload
+
+    class _Resp(dict):
+        status = 500
+        reason = "Internal"
+
+    req = _ScriptedUpload([HttpError(_Resp(), b"{}"), {"id": "ok"}])
+    assert _drive_media_upload(req, sleep=lambda s: None) == {"id": "ok"}
+
+
+def test_default_media_uses_small_resumable_chunks(tmp_path):
+    from mcpbrain.backup import _MEDIA_CHUNK_BYTES, _default_media
+
+    f = tmp_path / "x.enc"
+    f.write_bytes(b"x")
+    media = _default_media(f)
+    assert media.resumable() is True
+    assert media.chunksize() == _MEDIA_CHUNK_BYTES
+    assert _MEDIA_CHUNK_BYTES % (256 * 1024) == 0

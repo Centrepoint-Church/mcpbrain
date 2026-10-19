@@ -33,7 +33,7 @@ def main(argv=None):
                  "records-prune","records-health",
                  "session-start","session-end","pre-compact","user-prompt-submit",
                  "monitor","restore","fleet-report","doctor","enrich-eval","bootstrap",
-                 "tenant"):
+                 "tenant", "backup"):
         sub.add_parser(name, add_help=(name == "mcp-server"))
     ns, rest = p.parse_known_args(argv)
     def _records_cadence_main(argv):
@@ -62,4 +62,6 @@ def main(argv=None):
             "mcpbrain.onboarding", fromlist=["bootstrap_main"]).bootstrap_main(rest),
         "tenant": lambda: __import__(
             "mcpbrain.tenant", fromlist=["cli_main"]).cli_main(rest),
+        "backup": lambda: __import__(
+            "mcpbrain.backup_now", fromlist=["main"]).main(rest),
     }[ns.cmd]()

@@ -44,7 +44,7 @@ _DISPOSITIONS: dict[str, dict] = {
     "enrichment": {"kind": "guided", "label": "Enrichment",
                    "guided": "Open Claude or run /mcpbrain:install in Claude Code"},
     "backup":     {"kind": "guided", "label": "Backup",
-                   "guided": "Re-run a backup from the mcpbrain wizard"},
+                   "guided": "Run: mcpbrain backup"},
 }
 
 # States that mean "needs attention". not_started is deliberately healthy for

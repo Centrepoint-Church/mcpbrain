@@ -247,6 +247,10 @@ class ControlClient:
         """Wake the daemon for an immediate sync->drain->prepare cycle."""
         return self._request("/api/sync-now", method="POST")
 
+    def request_backup(self) -> dict:
+        """POST /api/backup/run (back up on the daemon's next loop iteration)."""
+        return self._request("/api/backup/run", method="POST", error_body=True)
+
     def start_enrich_backfill(self) -> dict:
         return self._request("/api/enrich-backfill/start", method="POST")
 

@@ -95,6 +95,14 @@ def _configure_logging(root=None):
 
 EMBED_BACKEND = "fastembed:bge-small:v1"
 DEFAULT_BACKUP_INTERVAL_S = 3600
+# After a FAILED backup, the next attempt is due after this, doubling per
+# consecutive failure, never later than the configured interval. Before it a
+# failure waited out the whole interval (86400s here): live 2026-10-15..18, a
+# flaky link failed four daily attempts and left the store five days without a
+# backup, which in turn held the reflow seed's 24h backup gate shut. An hour
+# still bounds a backup that can never succeed to a handful of attempts a day,
+# not the every-cycle re-snapshot of the 2026-08-04 incident.
+BACKUP_RETRY_BASE_S = 3600
 _CLICKUP_SYNC_INTERVAL_S: float = 300.0
 
 # Spool prepare bounds. The per-cycle thread ceiling now lives in config
@@ -1017,6 +1025,7 @@ class Daemon:
                  lock=None, enrich_client=None, enrich_batch: int = 100, backup=None,
                  backup_interval_s: float | None = None,
                  last_backup_attempt_epoch: float | None = None,
+                 backup_failures: int = 0,
                  communities_interval_s: float | None = None,
                  lint_interval_s: float | None = None,
                  synthesise_interval_s: float | None = None,
@@ -1134,6 +1143,14 @@ class Daemon:
         # snapshot orphans the temp dir under construction -- the mechanism that
         # left ~24GB of mcpbrain-snap-* on disk and froze the host on 2026-07-27.
         self._backup_in_progress = threading.Event()
+        # Consecutive failed backups (seeded from backup_state.json at start-up
+        # so a restart keeps the short retry); shortens the interval -- see
+        # BACKUP_RETRY_BASE_S.
+        self._backup_failures = max(0, int(backup_failures or 0))
+        # Set by request_backup(): the next maybe_backup is due now.
+        self._backup_requested = threading.Event()
+        # Non-null while a backup runs: what it is doing, for /api/status.
+        self._backup_progress: dict | None = None
         # Periodic community detection is OFF unless communities_interval_s is set.
         # Tiered like resolve: OFF by default; time-based cadence via self._clock.
         self._communities_interval_s: float | None = communities_interval_s
@@ -1949,6 +1966,11 @@ class Daemon:
             "restore_error": getattr(self, "_restore_error", None),
             # Non-null while the snapshot prune is holding off (see backup.py).
             "prune_held": getattr(self, "_prune_held", None),
+            # Non-null while a backup runs (phase, bytes sent) -- `mcpbrain
+            # backup` polls this.
+            "backup_running": getattr(self, "_backup_progress", None),
+            "backup_requested": bool(getattr(self, "_backup_requested", None)
+                                     and self._backup_requested.is_set()),
         }
 
     def config_profile(self) -> dict:
@@ -2506,6 +2528,17 @@ class Daemon:
         """Wake the loop for an immediate cycle."""
         self._wake.set()
 
+    def request_backup(self) -> bool:
+        """Make the next maybe_backup due now, regardless of the interval or the
+        failure backoff, and wake the loop. Returns False when backup is not
+        configured (nothing will run)."""
+        with self._config_lock:
+            if self._backup is None:
+                return False
+        self._backup_requested.set()
+        self._wake.set()
+        return True
+
     def stop(self) -> None:
         """Signal the loop to exit, and wake it so run() returns promptly.
 
@@ -2857,7 +2890,16 @@ class Daemon:
         if getattr(self, "_restore_pending", False):
             return {"backed_up": False, "skipped": "restore_pending"}
 
-        if self._last_backup is not None:
+        # getattr: an instance built without __init__ has neither (same
+        # convention as _last_backup_wall below).
+        requested_ev = getattr(self, "_backup_requested", None)
+        requested = bool(requested_ev is not None and requested_ev.is_set())
+        failures_so_far = getattr(self, "_backup_failures", 0)
+        if failures_so_far:
+            # A failed backup retries sooner than the interval.
+            interval = min(interval, BACKUP_RETRY_BASE_S
+                           * 2 ** min(failures_so_far - 1, 16))
+        if self._last_backup is not None and not requested:
             elapsed = self._clock() - self._last_backup
             # getattr: an instance built without __init__ (or a path that sets
             # _last_backup alone) has no wall twin -- fall back to monotonic.
@@ -2879,7 +2921,8 @@ class Daemon:
         # the whole point is that the NEXT check (the next maintenance tick,
         # ~60s away) re-evaluates, rather than waiting out the full interval
         # and risking landing in the same overnight window again.
-        if sys.platform == "darwin" and not _mac_user_is_active():
+        if (not requested and sys.platform == "darwin"
+                and not _mac_user_is_active()):
             log.info("periodic backup due, but system is dark-waking "
                      "(not user-active) — deferring to next check")
             return {"backed_up": False, "deferred": True}
@@ -2895,7 +2938,15 @@ class Daemon:
         # Backing off on attempt bounds a broken backup to one attempt/interval.
         self._last_backup = self._clock()
         self._last_backup_wall = self._wall_clock()
+        if requested_ev is not None:
+            requested_ev.clear()
         home = str(app_dir())
+        started = self._wall_clock()
+        self._backup_progress = {"phase": "snapshot", "started": started}
+
+        def _uploaded(sent, total):
+            self._backup_progress = {"phase": "upload", "started": started,
+                                     "sent": sent, "total": total}
         try:
             # Bundle the whole system: store + the local records repo (world-model,
             # continuity, memory — its only off-machine copy) + config.json.
@@ -2903,8 +2954,11 @@ class Daemon:
                 self._store.path, cfg.out_path, cfg.key,
                 records_dir=config.records_dir(home),
                 config_path=str(Path(home) / "config.json"))
+            self._backup_progress = {"phase": "upload", "started": started,
+                                     "sent": 0, "total": None}
             file_id = upload_snapshot(
-                cfg.drive_service, path, cfg.shared_drive_id, cfg.user_id
+                cfg.drive_service, path, cfg.shared_drive_id, cfg.user_id,
+                on_progress=_uploaded,
             )
             # Bound history: keep the newest `retain` snapshots, prune older.
             # Best-effort — a prune failure must not fail the (successful) backup.
@@ -2921,6 +2975,8 @@ class Daemon:
             # write_backup_state always sets this to prev_failures + 1 (>= 1)
             # on the failure branch, so it's never missing/0/None here.
             failures = bstate["consecutive_failures"]
+            self._backup_failures = failures
+            self._backup_progress = None
             if failures >= 2:
                 log.warning(
                     "periodic backup: %d consecutive failures, rebuilding "
@@ -2952,6 +3008,8 @@ class Daemon:
         # SUCCEEDING but slow one.
         self._last_backup = self._clock()
         self._last_backup_wall = self._wall_clock()
+        self._backup_failures = 0
+        self._backup_progress = None
         write_backup_state(home, ok=True)
         return {"backed_up": True, "file_id": file_id, "path": str(path)}
 
@@ -5025,6 +5083,17 @@ def last_backup_attempt_epoch(home) -> float | None:
         return None
 
 
+def backup_failures(home) -> int:
+    """Consecutive failed backups recorded in ``backup_state.json`` (0 when
+    unknown). Seeds ``Daemon``'s failure backoff at start-up, the same way
+    ``last_backup_attempt_epoch`` seeds its clock."""
+    try:
+        state = json.loads((Path(home) / "backup_state.json").read_text())
+        return max(0, int(state.get("consecutive_failures") or 0))
+    except (OSError, ValueError, TypeError, AttributeError):
+        return 0
+
+
 def write_backup_state(home, *, ok: bool, error: str | None = None) -> dict:
     """Record the outcome of a backup ATTEMPT to ``backup_state.json``.
 
@@ -5541,6 +5610,7 @@ def main(argv=None) -> None:
                     backup=backup_cfg, backup_interval_s=backup_interval,
                     last_backup_attempt_epoch=last_backup_attempt_epoch(
                         str(config.app_dir())),
+                    backup_failures=backup_failures(str(config.app_dir())),
                     communities_interval_s=cadences["communities_interval_s"],
                     lint_interval_s=cadences["lint_interval_s"],
                     synthesise_interval_s=cadences["synthesise_interval_s"],

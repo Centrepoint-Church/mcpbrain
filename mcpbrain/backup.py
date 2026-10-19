@@ -776,12 +776,13 @@ def _default_media(path):
     Callers must still pass the long socket timeout
     (``timeout_s=DEFAULT_HTTP_TIMEOUT_S`` /
     ``drive_timeout_s=DEFAULT_HTTP_TIMEOUT_S``) to
-    ``build_service``/``build_google_services``. A mid-upload network blip fails
-    this run and the cadence retries.
+    ``build_service``/``build_google_services``. A mid-upload network blip is
+    resumed in place by ``_drive_media_upload``; only a failure that outlasts
+    its backoff fails the run.
     """
     from googleapiclient.http import MediaFileUpload
 
-    return MediaFileUpload(str(path), resumable=True)
+    return MediaFileUpload(str(path), resumable=True, chunksize=_MEDIA_CHUNK_BYTES)
 
 
 # num_retries for a RESUMABLE media create. Zero, deliberately.
@@ -802,10 +803,69 @@ def _default_media(path):
 # explicitly muzzled. This is a regression the non-resumable path did not have:
 # it built `self.body` once, so its retries genuinely re-sent the bytes.
 #
-# The real backoff is the cadence: a failed backup is logged, backed off one
-# interval, and retried from scratch. Raising this above 0 requires driving
-# `next_chunk` by hand so each attempt re-seeks.
+# Retrying is instead done by _drive_media_upload, which drives `next_chunk`
+# by hand: after a failed chunk googleapiclient enters its error state, and the
+# NEXT `next_chunk` call asks Drive how many bytes it holds (an empty PUT with
+# `Content-Range: bytes */size`) and builds a fresh slice from there -- a real
+# resume, not a resend of a drained stream.
 _MEDIA_NUM_RETRIES = 0
+
+# Resumable chunk size. googleapiclient's default is 100MB, so one dropped
+# connection threw away up to 100MB of upload; on a flaky link (a phone
+# hotspot, live 2026-10-15..18: Errno 49, broken pipe, read timeout -- four
+# daily backups in a row lost a 768MB upload) a smaller chunk loses less per
+# drop. Must be a multiple of 256KiB.
+_MEDIA_CHUNK_BYTES = 32 * 1024 * 1024
+
+# Waits between resume attempts after a transient chunk failure. The count
+# resets whenever a chunk lands, so this bounds consecutive failures WITHOUT
+# progress, not the upload's total retries: a link that drops every few
+# chunks still finishes, a link that is down gives up in ~8 minutes and
+# leaves the next attempt to the cadence. Kept short because the upload runs
+# holding the bulk lock (see daemon._backup_under_bulk_lock).
+_MEDIA_RESUME_BACKOFF_S = (5, 15, 30, 60, 120, 240)
+
+
+def _is_transient_upload_error(exc) -> bool:
+    """A chunk failure worth resuming: the network's fault or Drive's.
+
+    The sync stack's classifier (rate limits, 502/503/504, DNS, resets,
+    timeouts, broken pipes, Errno 49), plus a plain 500 -- for a resumable
+    chunk, Google documents a 500 as "resume the upload", unlike a sync read
+    where a file that always 500s must eventually be given up on. Lazy import:
+    reflow_handler pulls in the sync stack."""
+    from mcpbrain.sync.reflow_handler import _http_status, _is_transient
+    return _is_transient(exc) or _http_status(exc) == 500
+
+
+def _drive_media_upload(request, *, on_progress=None, sleep=time.sleep):
+    """Run a resumable media `request` to completion, resuming after transient
+    chunk failures (see _MEDIA_NUM_RETRIES for why the library cannot do this
+    itself). Returns the final response body.
+
+    `on_progress(sent_bytes, total_bytes)` is called after every chunk that
+    lands. A permanent error, or one that outlasts _MEDIA_RESUME_BACKOFF_S with
+    no chunk landing in between, is raised.
+    """
+    failures = 0
+    response = None
+    while response is None:
+        try:
+            status, response = request.next_chunk(num_retries=_MEDIA_NUM_RETRIES)
+        except Exception as exc:
+            if (failures >= len(_MEDIA_RESUME_BACKOFF_S)
+                    or not _is_transient_upload_error(exc)):
+                raise
+            delay = _MEDIA_RESUME_BACKOFF_S[failures]
+            failures += 1
+            log.warning("upload chunk failed (%s); resuming in %ss (attempt %d/%d)",
+                        exc, delay, failures, len(_MEDIA_RESUME_BACKOFF_S))
+            sleep(delay)
+            continue
+        failures = 0
+        if status is not None and on_progress is not None:
+            on_progress(status.resumable_progress, status.total_size)
+    return response
 
 # Every OTHER Drive call in this module is a plain metadata list/create/delete
 # or an in-memory-body upload — none has _MEDIA_NUM_RETRIES' "can't re-seek a
@@ -819,7 +879,8 @@ _NUM_RETRIES = 5
 
 
 def upload_snapshot(
-    service, file_path, shared_drive_id: str, user_id: str, *, media_factory=None
+    service, file_path, shared_drive_id: str, user_id: str, *, media_factory=None,
+    on_progress=None,
 ) -> str:
     """Upload an (already-encrypted) snapshot to <shared_drive>/<user_id>/ on a
     Shared Drive. Finds or creates the per-user folder, uploads file_path into
@@ -882,21 +943,18 @@ def upload_snapshot(
         )
 
     # 3. Upload the artifact into the per-user folder (resumable, chunk-streamed
-    # — see _default_media). execute() drives the chunk loop for a resumable
-    # media body. Pass a str path to the factory (matches
+    # — see _default_media), resuming in place after a dropped chunk — see
+    # _drive_media_upload. Pass a str path to the factory (matches
     # MediaFileUpload(str(path))).
-    #
-    # num_retries=0 IS THE FIX, not an oversight — see _MEDIA_NUM_RETRIES.
     media = media_factory(str(file_path))
-    created = (
-        service.files()
-        .create(
+    created = _drive_media_upload(
+        service.files().create(
             body={"name": file_path.name, "parents": [folder_id]},
             media_body=media,
             supportsAllDrives=True,
             fields="id",
-        )
-        .execute(num_retries=_MEDIA_NUM_RETRIES)
+        ),
+        on_progress=on_progress,
     )
     return created["id"]
 
@@ -1162,16 +1220,15 @@ def upload_to_folder(service, file_path, parent_folder_id: str, *,
     """Upload file_path directly into parent_folder_id (a folder anywhere, incl.
     inside a Shared Drive). Returns the created file id.
 
-    num_retries=0 for the same reason upload_snapshot uses it — the media body
-    is resumable and the library cannot re-seek a retried chunk. See
-    _MEDIA_NUM_RETRIES.
+    Resumes after a dropped chunk the same way upload_snapshot does — see
+    _drive_media_upload.
     """
     file_path = Path(file_path)
     media = (media_factory or _default_media)(str(file_path))
-    created = service.files().create(
+    created = _drive_media_upload(service.files().create(
         body={"name": name or file_path.name, "parents": [parent_folder_id]},
         media_body=media, supportsAllDrives=True, fields="id",
-    ).execute(num_retries=_MEDIA_NUM_RETRIES)
+    ))
     return created["id"]
 
 

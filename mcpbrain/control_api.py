@@ -590,6 +590,13 @@ class ControlServer:
                 p = write_capture(str(self.home), envelope)
                 return h_json(h, 200, {"queued": True, "path": str(p)})
 
+            if h.path == "/api/backup/run":
+                # Back up now: due on the daemon's next loop iteration, past the
+                # interval and the failure backoff. `mcpbrain backup` polls
+                # /api/status (backup_running) and backup_state.json for the result.
+                if not d.request_backup():
+                    return h_json(h, 409, {"error": "backup is not configured"})
+                return h_json(h, 202, {"requested": True})
             if h.path == "/api/backup/enable":
                 try:
                     from mcpbrain import backup_setup, auth as _auth, config as _config

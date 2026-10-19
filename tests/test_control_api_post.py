@@ -543,3 +543,33 @@ def test_enrich_backfill_start_cancel_endpoints(tmp_path):
         assert d.backfill_cancelled
     finally:
         srv.stop()
+
+
+def test_backup_run_endpoint(tmp_path):
+    """POST /api/backup/run asks the daemon to back up now: 202 when it will,
+    409 when backup is not configured (nothing would run)."""
+    import urllib.error
+
+    import pytest
+
+    d = FakeDaemon()
+    d.configured = True
+    d.requests = 0
+
+    def request_backup():
+        d.requests += 1
+        return d.configured
+    d.request_backup = request_backup
+    srv = ControlServer(d, home=str(tmp_path))
+    srv.start()
+    try:
+        base = f"http://127.0.0.1:{srv.port}"
+        r = _post(base + "/api/backup/run", srv.token, {})
+        assert r.status == 202 and json.loads(r.read()) == {"requested": True}
+        d.configured = False
+        with pytest.raises(urllib.error.HTTPError) as exc:
+            _post(base + "/api/backup/run", srv.token, {})
+        assert exc.value.code == 409
+        assert d.requests == 2
+    finally:
+        srv.stop()

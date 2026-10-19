@@ -1299,13 +1299,20 @@ def test_backwards_wall_clock_jump_does_not_suppress_a_due_backup(tmp_path, monk
         "a backwards wall-clock jump suppressed a backup monotonic says is due")
 
 
-def test_failed_attempt_still_advances_the_cadence_on_both_clocks(tmp_path, monkeypatch):
-    """Retry semantics unchanged: a failure backs off a full interval."""
+def test_failed_attempt_retries_after_the_failure_backoff_not_the_interval(
+        tmp_path, monkeypatch):
+    """A failure backs off BACKUP_RETRY_BASE_S, doubling per consecutive
+    failure, never past the interval -- not a whole day (live 2026-10-15..18:
+    four daily attempts lost on a flaky link, five days without a backup)."""
     import mcpbrain.daemon as daemon_module
+    from mcpbrain.daemon import BACKUP_RETRY_BASE_S
     monkeypatch.setattr(daemon_module, "_mac_user_is_active", lambda: True)
     monkeypatch.setattr(daemon_module, "app_dir", lambda: tmp_path)
+    monkeypatch.setattr(daemon_module, "_build_drive_service",
+                        lambda: (_ for _ in ()).throw(RuntimeError("no creds")))
     store = _store_with_chunk(tmp_path)
-    cfg = _backup_config(tmp_path, _RaisingFiles(list_response={"files": []}))
+    files = _RaisingFiles(list_response={"files": []})
+    cfg = _backup_config(tmp_path, files)
     mono = _Clock(1000.0)
     wall = _Clock(1_790_000_000.0)
     daemon = Daemon(store, FakeEmbedder(), services={},
@@ -1313,9 +1320,76 @@ def test_failed_attempt_still_advances_the_cadence_on_both_clocks(tmp_path, monk
                     backup=cfg, backup_interval_s=86400.0, clock=mono,
                     wall_clock=wall)
     assert daemon.maybe_backup()["backed_up"] is False
-    mono.advance(3600)
-    wall.advance(3600)
-    assert daemon.maybe_backup() is None, "a failed attempt is retried early"
+    mono.advance(BACKUP_RETRY_BASE_S - 1)
+    wall.advance(BACKUP_RETRY_BASE_S - 1)
+    assert daemon.maybe_backup() is None, "still backing off"
+    mono.advance(1)
+    wall.advance(1)
+    assert daemon.maybe_backup()["backed_up"] is False, "retried after the backoff"
+    # Second failure: the backoff doubles.
+    mono.advance(BACKUP_RETRY_BASE_S)
+    wall.advance(BACKUP_RETRY_BASE_S)
+    assert daemon.maybe_backup() is None
+    mono.advance(BACKUP_RETRY_BASE_S)
+    wall.advance(BACKUP_RETRY_BASE_S)
+    files.heal()
+    assert daemon.maybe_backup()["backed_up"] is True
+    # Success restores the full interval.
+    mono.advance(BACKUP_RETRY_BASE_S * 4)
+    wall.advance(BACKUP_RETRY_BASE_S * 4)
+    assert daemon.maybe_backup() is None
+
+
+def test_failure_backoff_survives_a_restart(tmp_path, monkeypatch):
+    """Seeded from backup_state.json, so a restart keeps the short retry."""
+    import mcpbrain.daemon as daemon_module
+    from mcpbrain.daemon import BACKUP_RETRY_BASE_S, backup_failures
+    monkeypatch.setattr(daemon_module, "_mac_user_is_active", lambda: True)
+    monkeypatch.setattr(daemon_module, "app_dir", lambda: tmp_path)
+    assert backup_failures(str(tmp_path)) == 0  # no file yet
+    (tmp_path / "backup_state.json").write_text(json.dumps({
+        "last_attempt": 1_790_000_000.0, "last_success": 1_789_000_000.0,
+        "consecutive_failures": 1, "last_error": "timed out"}))
+    assert backup_failures(str(tmp_path)) == 1
+    store = _store_with_chunk(tmp_path)
+    cfg = _backup_config(tmp_path, FakeFiles(list_response={"files": []}))
+    wall = _Clock(1_790_000_000.0 + BACKUP_RETRY_BASE_S)
+    daemon = Daemon(store, FakeEmbedder(), services={},
+                    lock=SingleWriterLock(tmp_path / "d.lock"),
+                    backup=cfg, backup_interval_s=86400.0, clock=_Clock(5.0),
+                    wall_clock=wall, last_backup_attempt_epoch=1_790_000_000.0,
+                    backup_failures=backup_failures(str(tmp_path)))
+    assert daemon.maybe_backup()["backed_up"] is True
+
+
+def test_request_backup_runs_now_past_interval_and_dark_wake(tmp_path, monkeypatch):
+    """`mcpbrain backup`: due immediately, even mid-interval and even when the
+    dark-wake check would defer (a person just asked for it)."""
+    import mcpbrain.daemon as daemon_module
+    monkeypatch.setattr(daemon_module, "_mac_user_is_active", lambda: False)
+    monkeypatch.setattr(daemon_module, "app_dir", lambda: tmp_path)
+    store = _store_with_chunk(tmp_path)
+    cfg = _backup_config(tmp_path, FakeFiles(list_response={"files": []}))
+    mono = _Clock(1000.0)
+    daemon = Daemon(store, FakeEmbedder(), services={},
+                    lock=SingleWriterLock(tmp_path / "d.lock"),
+                    backup=cfg, backup_interval_s=86400.0, clock=mono,
+                    wall_clock=_Clock(1_790_000_000.0),
+                    last_backup_attempt_epoch=1_790_000_000.0 - 60)
+    assert daemon.maybe_backup() is None  # not due
+    assert daemon.request_backup() is True
+    assert daemon.status()["backup_requested"] is True
+    assert daemon.maybe_backup()["backed_up"] is True
+    assert daemon.status()["backup_requested"] is False
+    assert daemon.status()["backup_running"] is None
+    assert daemon.maybe_backup() is None, "one request, one backup"
+
+
+def test_request_backup_without_backup_configured_is_refused(tmp_path):
+    store = _store_with_chunk(tmp_path)
+    daemon = Daemon(store, FakeEmbedder(), services={},
+                    lock=SingleWriterLock(tmp_path / "d.lock"))
+    assert daemon.request_backup() is False
 
 
 def test_last_backup_attempt_epoch_reads_the_state_file(tmp_path):
