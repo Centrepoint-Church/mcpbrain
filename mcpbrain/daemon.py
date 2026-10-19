@@ -49,6 +49,7 @@ from pathlib import Path
 from mcpbrain import auth, backup, config, control_api, drain, graph_write, prepare
 from mcpbrain.agents import win_supervised
 from mcpbrain.backup import make_encrypted_snapshot, upload_snapshot
+from mcpbrain.backup_state import write_backup_state  # noqa: F401 — re-exported; moved there
 from mcpbrain.budget import Budget
 from mcpbrain.config import app_dir
 from mcpbrain.retrieval import FUSION_DEPTH, hybrid_search
@@ -5092,74 +5093,6 @@ def backup_failures(home) -> int:
         return max(0, int(state.get("consecutive_failures") or 0))
     except (OSError, ValueError, TypeError, AttributeError):
         return 0
-
-
-def write_backup_state(home, *, ok: bool, error: str | None = None) -> dict:
-    """Record the outcome of a backup ATTEMPT to ``backup_state.json``.
-
-    The encrypted artifact is written locally BEFORE the upload, so
-    ``snapshot.enc``'s mtime is refreshed by every failed run and cannot
-    distinguish "backed up" from "encrypted, then failed to upload". Uploads
-    fail intermittently rather than outright (97 failures / 52 successes,
-    2026-06-25 -> 2026-08-04, arriving in storms of dozens), which is exactly
-    the shape an mtime check cannot see: the probe read "Backup: On" straight
-    through the 2026-08-03 storm when nothing was reaching Drive. This file is
-    the only durable record of whether a backup actually LANDED;
-    ``probes.probe_backup`` keys off it.
-
-    Wall-clock, not the injected monotonic clock: the value is persisted and
-    compared across restarts, where a monotonic epoch is meaningless (same
-    reasoning as ``_recent_watchdog_exits``). Best-effort — a write failure must
-    never fail an otherwise-good backup.
-
-    Returns:
-        The ``state`` dict just written (``last_attempt``, ``last_success``,
-        ``consecutive_failures``, ``last_error``) — even when the write to
-        disk itself failed (best-effort covers persistence, not the return).
-        This lets a caller such as ``maybe_backup`` read e.g.
-        ``consecutive_failures`` off the return value directly, without a
-        second read of ``backup_state.json`` through another module's
-        private helper.
-    """
-    path = Path(home) / "backup_state.json"
-    try:
-        prev = json.loads(path.read_text())
-    except (OSError, ValueError):
-        prev = {}
-    now = time.time()
-    try:
-        prev_failures = int(prev.get("consecutive_failures") or 0)
-    except (TypeError, ValueError):
-        prev_failures = 0
-    state = {
-        "last_attempt": now,
-        "last_success": now if ok else prev.get("last_success"),
-        "consecutive_failures": 0 if ok else prev_failures + 1,
-        "last_error": None if ok else error,
-    }
-    # Atomic write (temp file in the same dir + os.replace): a reader
-    # (probes._read_backup_state, last_backup_attempt_epoch) must never see a
-    # truncated or half-written file -- a crash or concurrent read mid-write
-    # over an in-place write_text would otherwise corrupt the ONLY durable
-    # record of whether a backup actually landed, and probes.py's own
-    # corrupt-file handling would then read it as "no recent backup" (see
-    # `_read_backup_state`).
-    try:
-        fd, tmp = tempfile.mkstemp(dir=str(path.parent), prefix=".backup_state.",
-                                   suffix=".tmp")
-        try:
-            with os.fdopen(fd, "w") as f:
-                f.write(json.dumps(state))
-            os.replace(tmp, path)
-        except OSError:
-            try:
-                os.unlink(tmp)
-            except OSError:
-                pass
-            raise
-    except OSError as exc:
-        log.warning("backup state write failed (continuing): %s", exc)
-    return state
 
 
 def write_daemon_heartbeat(home) -> None:
