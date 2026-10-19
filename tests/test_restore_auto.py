@@ -278,3 +278,36 @@ def test_partial_restore_is_reported_not_failed(tmp_path, monkeypatch, capsys):
     assert ex.value.code == 1
     err = capsys.readouterr().err
     assert "partly" in err.lower() and "No space left" in err
+
+
+class _ListFails:
+    def files(self):
+        raise OSError(49, "Can't assign requested address")
+
+
+def test_escrow_key_download_failure_raises_but_absent_is_none(monkeypatch):
+    """R27c: "no key on Drive" (None) and "could not fetch it" (raise) differ."""
+    from mcpbrain import backup
+    with pytest.raises(restore.EscrowKeyUnavailable) as e:
+        restore._download_escrow_key(_ListFails(), "ESC", "j@x.com")
+    assert isinstance(e.value.__cause__, OSError)       # the cause stays classifiable
+    monkeypatch.setattr(backup, "_list_in_drives", lambda svc, q, **kw: [])
+    assert restore._download_escrow_key(object(), "ESC", "j@x.com") is None
+    monkeypatch.setattr(backup, "_list_in_drives", lambda svc, q, **kw: [{"id": "K"}])
+
+    def dl_fails(svc, fid, dest, **kw):
+        raise TimeoutError("read timed out")
+    monkeypatch.setattr(backup, "download_snapshot", dl_fails)
+    with pytest.raises(restore.EscrowKeyUnavailable):
+        restore._download_escrow_key(object(), "ESC", "j@x.com")
+
+
+def test_detect_reports_a_key_fetch_failure_as_a_reason(tmp_path, monkeypatch):
+    monkeypatch.setenv("MCPBRAIN_HOME", str(tmp_path))
+    _cfg(tmp_path, fleet={"escrow_folder_id": "ESC"})
+
+    def boom(svc, folder, email):
+        raise restore.EscrowKeyUnavailable("could not look up the escrow key")
+    monkeypatch.setattr(restore, "_download_escrow_key", boom)
+    out = restore.detect_restorable(str(tmp_path), drive_service=object())
+    assert out["available"] is False and "could not look up" in out["reason"]

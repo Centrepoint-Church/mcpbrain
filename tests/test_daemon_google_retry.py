@@ -1069,3 +1069,14 @@ def test_probe_5xx_widening_does_not_touch_reflow_classifier():
     wrapped = RuntimeError("lookup failed")
     wrapped.__cause__ = _http_error(500)
     assert dmod._is_transient_probe_error(wrapped) is True
+
+
+def test_note_restore_error_reaches_status_and_doctor(home):
+    """The wizard's partial restore (R24) is recorded where the start-up
+    path's restore errors go: /api/status `restore_error`, and so doctor."""
+    from mcpbrain import doctor
+    d = _daemon(home, Clock())
+    d.note_restore_error("store restored, but the records repo / config.json were not: x")
+    st = d.status()
+    assert st["restore_error"].startswith("store restored")
+    assert doctor.restore_error_line(st).startswith("❌")

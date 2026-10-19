@@ -1684,6 +1684,11 @@ class Daemon:
         daemon's restoring gate (the wizard's /api/backup/auto path)."""
         backup.swap_in_store(stage, self._store.path, gate=self._restore_gate)
 
+    def note_restore_error(self, msg: str) -> None:
+        """Record a restore problem for /api/status (`restore_error`) and doctor
+        -- the wizard's partial restore (R24), as the start-up path does."""
+        self._restore_error = str(msg)[:200]
+
     def is_restoring(self) -> bool:
         return bool(getattr(self, "_restoring", False))
 

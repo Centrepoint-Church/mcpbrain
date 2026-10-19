@@ -80,3 +80,11 @@ def test_wizard_does_not_hardcode_a_tenant_name():
     assert prof.display_name not in html
     assert "Josh Kemp" not in html
     assert "fleet-tenant-name" in html   # the element the JS fills in
+
+
+def test_partial_restore_has_its_own_message():
+    # /api/backup/auto answers {"action": "restored", "partial": true} when the
+    # store came back but the records repo / settings did not: the wizard must
+    # not show plain success, and must say what to do.
+    assert "j.partial" in _HTML
+    assert "mcpbrain restore --auto --force" in _HTML

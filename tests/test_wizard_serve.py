@@ -90,23 +90,34 @@ def test_backup_auto_restores_over_schema_only_store(tmp_path, monkeypatch):
     finally: srv.stop()
 
 
+class RecordingDaemon(FakeDaemon):
+    def __init__(self):
+        super().__init__()
+        self.restore_errors = []
+
+    def note_restore_error(self, msg):
+        self.restore_errors.append(msg)
+
+
 def test_backup_auto_reports_restore_point_and_partial_restore(tmp_path, monkeypatch):
     # The response names the restore point used; a restore whose store swapped
     # but whose records/config could not be placed is reported as partial (200),
-    # not as a failure the wizard would retry over a store that now has content.
+    # not as a failure the wizard would retry over a store that now has content,
+    # and the daemon records it for /api/status + doctor.
     from mcpbrain import config, restore, auth
     monkeypatch.setattr(config, "owner_email", lambda home: "me@example.com")
     monkeypatch.setattr(config, "store_path", lambda: str(tmp_path / "missing.sqlite3"))
     monkeypatch.setattr(auth, "load_credentials", lambda: object())
     monkeypatch.setattr(auth, "build_service", lambda *a, **k: object())
     monkeypatch.setattr(restore, "detect_restorable", lambda home, svc: {
-        "available": True, "snapshot_id": "snap1",
+        "available": True, "snapshot_id": "snap1", "has_key": True,
         "restore_point": "2026-10-19T07:13:00Z", "source": "chain"})
 
     def partial(home, **k):
         raise restore.PartialRestore("store restored, records not: disk full")
     monkeypatch.setattr(restore, "run_restore_auto", partial)
-    srv = ControlServer(FakeDaemon(), home=str(tmp_path)); srv.start()
+    d = RecordingDaemon()
+    srv = ControlServer(d, home=str(tmp_path)); srv.start()
     try:
         resp = _authed_post(srv, "/api/backup/auto")
         body = json.loads(resp.read())
@@ -115,6 +126,57 @@ def test_backup_auto_reports_restore_point_and_partial_restore(tmp_path, monkeyp
         assert "disk full" in body["error"]
         assert body["restore_point"] == "2026-10-19T07:13:00Z"
         assert body["source"] == "chain"
+        assert len(d.restore_errors) == 1 and "disk full" in d.restore_errors[0]
+    finally: srv.stop()
+
+
+def test_backup_auto_reports_the_point_actually_used_after_a_fallback(tmp_path, monkeypatch):
+    from mcpbrain import config, restore, auth, backup_restore
+    monkeypatch.setattr(config, "owner_email", lambda home: "me@example.com")
+    monkeypatch.setattr(config, "store_path", lambda: str(tmp_path / "missing.sqlite3"))
+    monkeypatch.setattr(auth, "load_credentials", lambda: object())
+    monkeypatch.setattr(auth, "build_service", lambda *a, **k: object())
+    monkeypatch.setattr(restore, "detect_restorable", lambda home, svc: {
+        "available": True, "snapshot_id": "M1", "has_key": True,
+        "restore_point": "2026-10-19T07:13:00Z", "source": "chain"})
+    used = backup_restore.Candidate("legacy", 1_780_000_000.0, "L1", "LEGF", "old.enc")
+    monkeypatch.setattr(restore, "run_restore_auto",
+                        lambda home, **k: backup_restore.RestoreResult(used, [], None))
+    srv = ControlServer(FakeDaemon(), home=str(tmp_path)); srv.start()
+    try:
+        body = json.loads(_authed_post(srv, "/api/backup/auto").read())
+        assert body["snapshot_id"] == "L1"
+        assert body["source"].startswith("legacy:")                 # not "chain"
+        assert body["restore_point"] == restore.point_info(object(), used)["restore_point"]
+    finally: srv.stop()
+
+
+@pytest.mark.parametrize("info", [
+    {"available": False, "has_key": False, "reason": "could not look up the escrow key"},
+    {"available": False, "has_key": True},
+])
+def test_backup_auto_inconclusive_detection_is_503_and_never_enables(tmp_path, monkeypatch,
+                                                                     info):
+    """R27b: a transient detection failure (or a key with no restore point
+    found) must not turn on a NEW backup -- that path rotated the escrow key
+    and made every existing backup unrestorable. 503 retry; Drive untouched."""
+    from mcpbrain import config, restore, auth, backup_setup
+    monkeypatch.setattr(config, "owner_email", lambda home: "me@example.com")
+    monkeypatch.setattr(config, "store_path", lambda: str(tmp_path / "missing.sqlite3"))
+    monkeypatch.setattr(auth, "load_credentials", lambda: object())
+    monkeypatch.setattr(auth, "build_service", lambda *a, **k: object())
+    monkeypatch.setattr(restore, "detect_restorable", lambda home, svc: dict(info))
+    monkeypatch.setattr(backup_setup, "enable_backup",
+                        lambda *a, **k: pytest.fail("must not enable backup"))
+    monkeypatch.setattr(backup_setup, "_escrow_key_to_drive",
+                        lambda *a, **k: pytest.fail("escrow key must stay untouched"))
+    srv = ControlServer(FakeDaemon(), home=str(tmp_path)); srv.start()
+    try:
+        with pytest.raises(urllib.error.HTTPError) as e:
+            _authed_post(srv, "/api/backup/auto")
+        assert e.value.code == 503
+        body = json.loads(e.value.read())
+        assert body["retry"] is True and body["reason"]
     finally: srv.stop()
 
 

@@ -155,13 +155,24 @@ def run_restore(home: str, *, key: bytes | None = None, force: bool = False,
     return _restore_newest(home, drive_service, key, swap)
 
 
+class EscrowKeyUnavailable(RuntimeError):
+    """The escrow key's lookup or download FAILED (network, Drive error). Not
+    the same as "absent": a caller that treated it as absent would generate a
+    new key and, before R27, overwrite the one every existing backup needs."""
+
+
 def _download_escrow_key(drive_service, escrow_folder_id: str, user_email: str) -> bytes | None:
-    """Download <user_email>.key from the escrow folder, or None if absent.
+    """<user_email>.key from the escrow folder: its bytes, or None when Drive
+    definitively has no such file. Any failure to list or download it raises
+    EscrowKeyUnavailable (chained to the original error, so the transient
+    classifier still sees the cause) -- never None.
 
     The key is uploaded by backup_setup at enable time. Fetching it from the
     Shared Drive (which the user already has access to) means recovery needs no
     manually-entered key — the user just signs in with Google.
     """
+    import tempfile
+
     from mcpbrain import backup as _backup
     name = f"{user_email}.key"
     try:
@@ -171,21 +182,25 @@ def _download_escrow_key(drive_service, escrow_folder_id: str, user_email: str) 
             drive_service,
             f"name = '{name}' and trashed = false and '{escrow_folder_id}' in parents",
             fields="files(id, name)")
-    except Exception:  # noqa: BLE001 — best-effort detection; treat errors as "no key"
-        return None
+    except Exception as exc:
+        raise EscrowKeyUnavailable(
+            f"could not look up the escrow key {name}: {type(exc).__name__}: {exc}") from exc
     if not files:
         return None
-    import tempfile
     fd, tmp = tempfile.mkstemp(prefix=".escrowkey-")
     os.close(fd)
     tmp_path = Path(tmp)
     try:
         _backup.download_snapshot(drive_service, files[0]["id"], tmp_path)
-        return tmp_path.read_bytes()
-    except Exception:  # noqa: BLE001
-        return None
+        key = tmp_path.read_bytes()
+    except Exception as exc:
+        raise EscrowKeyUnavailable(
+            f"could not download the escrow key {name}: {type(exc).__name__}: {exc}") from exc
     finally:
         tmp_path.unlink(missing_ok=True)
+    if not key.strip():
+        raise EscrowKeyUnavailable(f"the escrow key {name} downloaded empty")
+    return key
 
 
 def _escrow_folder(home: str) -> str | None:
@@ -293,6 +308,13 @@ def _source(drive_service, cand, names: dict) -> str:
     return f"legacy:{names[fid]}"
 
 
+def point_info(drive_service, cand) -> dict:
+    """{"restore_point": ISO-8601 UTC capture time, "source": "chain" |
+    "legacy:<folder>"} for one restore point (a backup_restore.Candidate)."""
+    return {"restore_point": _iso(cand.captured_at),
+            "source": _source(drive_service, cand, {})}
+
+
 def _describe(drive_service, cands, limit: int) -> list[dict]:
     names: dict = {}
     return [{"restore_point": _iso(c.captured_at), "captured_at": c.captured_at,
@@ -322,10 +344,16 @@ def detect_restorable(home: str, drive_service) -> dict:
     folder = _escrow_folder(home)
     if not folder:
         return {"available": False, "reason": "no escrow folder configured"}
-    key = _download_escrow_key(drive_service, folder, user_email)
-    out = {"available": False, "snapshot_id": None, "has_key": bool(key),
+    out = {"available": False, "snapshot_id": None, "has_key": False,
            "user_email": user_email, "escrow_folder_id": folder,
            "restore_point": None, "source": None, "candidates": []}
+    try:
+        key = _download_escrow_key(drive_service, folder, user_email)
+    except EscrowKeyUnavailable as exc:
+        log.warning("restore detection: %s", exc)
+        out["reason"] = str(exc)
+        return out
+    out["has_key"] = bool(key)
     if not key:
         return out
     try:

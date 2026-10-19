@@ -633,6 +633,19 @@ class ControlServer:
                     svc = _auth.build_service("drive", "v3", creds,
                                               timeout_s=_auth.DEFAULT_HTTP_TIMEOUT_S)
                     info = _restore.detect_restorable(str(self.home), svc)
+                    # Detection could not tell (a transient lookup failure), or
+                    # the account HAS an escrow key yet no restore point showed
+                    # up: never fall through to enable_backup on that -- a
+                    # backup may well exist, and enabling would start a new one
+                    # over an empty store. The wizard retries on 503 (R27b).
+                    if info.get("reason") or (info.get("has_key") and not info.get("available")):
+                        reason = info.get("reason") or (
+                            "an escrow key exists for this account but no restore point "
+                            "was found yet")
+                        log.warning("backup/auto: restore detection inconclusive, "
+                                    "not enabling backup: %s", reason)
+                        return h_json(h, 503, {"error": reason, "reason": reason,
+                                               "retry": True})
                     # The daemon initializes brain.sqlite3 (schema only) before the
                     # wizard runs, so file size can't distinguish a fresh install
                     # from a populated brain — check for real content (chunks rows).
@@ -657,14 +670,20 @@ class ControlServer:
                         except _restore.PartialRestore as exc:
                             # The store is restored (it has content now); only the
                             # records/config were not placed. Not a failure to
-                            # retry: the empty-store rule would refuse it.
+                            # retry: the empty-store rule would refuse it. Record
+                            # it where /api/status and doctor see it.
                             log.error("backup/auto: restore partly done: %s", exc)
+                            note = getattr(d, "note_restore_error", None)
+                            if note is not None:
+                                note(f"store restored, but the records repo / "
+                                     f"config.json were not: {exc}")
                             return h_json(h, 200, {**body_out, "partial": True,
                                                    "error": str(exc)})
                         used = getattr(result, "used", None)
                         if used is not None:
+                            # The point actually restored (after any fallback).
                             body_out.update(snapshot_id=used.file_id,
-                                            restore_point=_restore._iso(used.captured_at))
+                                            **_restore.point_info(svc, used))
                         # The restored bundle carries the escrow key + backup config,
                         # so backup is already on after a restore.
                         return h_json(h, 200, body_out)

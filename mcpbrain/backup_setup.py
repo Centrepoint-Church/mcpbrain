@@ -1,4 +1,4 @@
-"""Backup enable flow: generate escrow key, write to config, escrow copy to Drive."""
+"""Backup enable flow: adopt or create the escrow key (Drive is canonical), write config."""
 from __future__ import annotations
 
 from mcpbrain import backup, config
@@ -12,30 +12,51 @@ from mcpbrain import backup, config
 _NUM_RETRIES = 5
 
 
+class EscrowKeyMismatch(RuntimeError):
+    """The escrow key on Drive differs from this install's local key. Backup
+    stays off: the Drive key is the one every existing backup is encrypted
+    with, and it is never overwritten (R27)."""
+
+
 def enable_backup(home: str, *, drive_service, user_id: str) -> dict:
-    """Enable backup for the user.
+    """Enable backup for the user. Returns the updated config dict.
 
-    Generates a Fernet escrow key if not already set, writes it to config,
-    and uploads a copy to the shared Drive folder for admin recovery.
-
-    Idempotent: a second call with the same user_id keeps the existing key.
-    Returns the updated config dict.
+    The escrow key on Drive (<escrow folder>/<email>.key) is CANONICAL and is
+    never overwritten -- every existing backup is encrypted with it:
+      - Drive has a key, no local key   -> adopt it (written to config);
+      - Drive has a key equal to local  -> no-op;
+      - Drive has a key, local differs  -> EscrowKeyMismatch, nothing changed;
+      - Drive definitively has no key   -> upload the local key, or a new one
+        (create, never update).
+    A key lookup/download that FAILS raises (restore.EscrowKeyUnavailable,
+    chained to the cause) -- it is never read as "no key", which would
+    generate a new one. Idempotent.
     """
+    from mcpbrain.restore import _download_escrow_key, account_email
     cur = config.read_config(home)
-    existing_key = (cur.get("backup") or {}).get("escrow_key")
+    existing = (cur.get("backup") or {}).get("escrow_key")
+    local_key = existing.encode() if isinstance(existing, str) and existing else None
 
-    if existing_key:
-        # Key is already a urlsafe-base64 string; re-encode to bytes for escrow.
-        key_bytes = existing_key.encode()
-    else:
-        key_bytes = backup.generate_escrow_key()
-
-    from mcpbrain.restore import account_email
     escrow_folder = _resolve_shared_drive(drive_service, home=home)
     # restore reads <escrow folder>/<email>.key, so name the key by email
     # (user_id only when no email is known yet).
     person = (account_email(home) or user_id).strip().lower()
-    _escrow_key_to_drive(drive_service, person, key_bytes, folder_id=escrow_folder)
+    drive_key = _download_escrow_key(drive_service, escrow_folder, person)
+    if drive_key is not None:
+        drive_key = drive_key.strip()
+        if local_key is None:
+            key_bytes = drive_key            # adopt the canonical key
+        elif local_key.strip() == drive_key:
+            key_bytes = local_key.strip()
+        else:
+            raise EscrowKeyMismatch(
+                f"the escrow key on Drive ({person}.key) differs from this "
+                "install's backup key. Backup was left off and nothing was changed: "
+                "every existing backup needs the Drive key. Ask an admin before "
+                "replacing either key.")
+    else:
+        key_bytes = local_key or backup.generate_escrow_key()
+        _escrow_key_to_drive(drive_service, person, key_bytes, folder_id=escrow_folder)
     # backup.shared_drive_id must be a Shared Drive id; the escrow folder id is
     # not one (Drive rejects it as driveId), so store the folder's drive.
     shared_drive_id = _drive_id_of(drive_service, escrow_folder)
@@ -91,7 +112,8 @@ def _resolve_shared_drive(drive_service, *, home: str) -> str:
 
 def _escrow_key_to_drive(drive_service, user_id: str, key: bytes,
                          *, folder_id: str) -> None:
-    """Upload <user_id>.key to the Shared-Drive escrow folder (idempotent)."""
+    """Create <user_id>.key in the Shared-Drive escrow folder. Never updates
+    an existing one: raises EscrowKeyMismatch if it already exists."""
     from googleapiclient.http import MediaInMemoryUpload
 
     name = f"{user_id}.key"
@@ -110,13 +132,15 @@ def _escrow_key_to_drive(drive_service, user_id: str, key: bytes,
         page_token = resp.get("nextPageToken")
         if not page_token:
             break
-    media = MediaInMemoryUpload(key, mimetype="application/octet-stream")
     if existing:
-        drive_service.files().update(
-            fileId=existing[0]["id"], media_body=media,
-            supportsAllDrives=True).execute(num_retries=_NUM_RETRIES)
-    else:
-        meta = {"name": name, "parents": [folder_id]}
-        drive_service.files().create(
-            body=meta, media_body=media, fields="id",
-            supportsAllDrives=True).execute(num_retries=_NUM_RETRIES)
+        # Never overwrite an escrowed key (R27): every existing backup is
+        # encrypted with it. enable_backup only gets here when Drive had none,
+        # so this is a race with another install -- refuse.
+        raise EscrowKeyMismatch(
+            f"an escrow key {name} appeared on Drive while enabling backup; "
+            "it was not overwritten. Try again.")
+    media = MediaInMemoryUpload(key, mimetype="application/octet-stream")
+    meta = {"name": name, "parents": [folder_id]}
+    drive_service.files().create(
+        body=meta, media_body=media, fields="id",
+        supportsAllDrives=True).execute(num_retries=_NUM_RETRIES)

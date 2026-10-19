@@ -405,7 +405,12 @@ async function autoBackup(){
   try {
     const r = await fetch("/api/backup/auto", {method:"POST", headers:{...H.headers, "Content-Type":"application/json"}, body:"{}"});
     const j = await r.json();
-    if (j.action === "restored") {
+    if (j.action === "restored" && j.partial) {
+      // The store came back, but the records repo and settings did not.
+      badge("backup-status", "Brain restored, but your records and settings were not. "
+            + "Quit mcpbrain and run `mcpbrain restore --auto --force` in a terminal to "
+            + "restore them.", "wait");
+    } else if (j.action === "restored") {
       badge("backup-status", "Brain restored from backup", "ok");
     } else if (j.action === "backup_enabled") {
       badge("backup-status", "Encrypted backup on", "ok");
@@ -413,8 +418,11 @@ async function autoBackup(){
       _autoBackupDone = false;   // no account yet — let a later poll retry
       badge("backup-status", "Waiting for Google sign-in…", "idle");
     } else {
+      // 503 {retry:true}: detection was inconclusive (e.g. Drive unreachable);
+      // anything else failed. Either way a later status poll tries again.
       _autoBackupDone = false;
-      badge("backup-status", "Could not set up backup — retrying", "wait");
+      badge("backup-status", "Could not set up backup — retrying"
+            + (j.error ? " (" + j.error + ")" : ""), "wait");
     }
   } catch(e) {
     _autoBackupDone = false;
