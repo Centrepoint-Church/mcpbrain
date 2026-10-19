@@ -25,8 +25,6 @@ from mcpbrain.daemon import (
 from mcpbrain.store import Store
 from mcpbrain.backup import generate_escrow_key
 
-# Reuse the Drive fake shape from test_backup.py.
-from tests.test_backup import FakeFiles, FakeService
 
 
 @pytest.fixture(autouse=True)
@@ -816,27 +814,27 @@ def test_is_stopped_true_after_stop(tmp_path):
 
 
 # ---------------------------------------------------------------------------
-# periodic encrypted backup in the loop (Task H2)
+# incremental backup in the loop: capture (maybe_backup) + upload step
+# (upload_backup_step). Capture writes page deltas into the local outbox;
+# the upload ships them to Drive outside the bulk lock. Every test here runs
+# with MCPBRAIN_HOME = a tmp dir (the `bk` fixture), a real tiny Store, the
+# real backup_outbox.capture, and the uploader's fake Drive + transport.
 # ---------------------------------------------------------------------------
 
+from dataclasses import replace  # noqa: E402
+from pathlib import Path  # noqa: E402
+
+from mcpbrain import backup_outbox as _bo  # noqa: E402
+from mcpbrain import backup_uploader as _bu  # noqa: E402
+from tests.test_backup_uploader import Server as _UpServer, Service as _UpService  # noqa: E402
+from tests.test_drive_resumable import FakeTransport as _UpTransport  # noqa: E402
+
+# The real capture, held before any test patches backup_outbox.capture
+# (daemon_module.backup_outbox IS _bo, so a patch there replaces _bo.capture).
+_REAL_CAPTURE = _bo.capture
+
+
 SQLITE_MAGIC = b"SQLite format 3\x00"
-
-
-class _RaisingFiles(FakeFiles):
-    """A Drive files() fake whose create() raises, so maybe_backup hits the
-    upload failure path. After heal() is called, create() behaves normally."""
-
-    def __init__(self, *args, **kwargs):
-        super().__init__(*args, **kwargs)
-        self._raise = True
-
-    def heal(self):
-        self._raise = False
-
-    def create(self, **kw):
-        if self._raise:
-            raise RuntimeError("simulated Drive error")
-        return super().create(**kw)
 
 
 class _Clock:
@@ -852,6 +850,24 @@ class _Clock:
         self._value += by
 
 
+@pytest.fixture
+def bk(tmp_path, monkeypatch):
+    """Isolated home for backup tests: backup_state.json, the outbox and the
+    journal all land under tmp_path/home, never the real app dir."""
+    home = tmp_path / "home"
+    home.mkdir()
+    monkeypatch.setenv("MCPBRAIN_HOME", str(home))
+    from mcpbrain.config import write_config
+    write_config(str(home), {
+        "owner_email": "owner@example.org",
+        "backup": {"shared_drive_id": "0Adrive", "user_id": "owner"},
+        "fleet": {"escrow_folder_id": "ESC"},
+    })
+    # Never consult pmset from a test unless the test opts in.
+    monkeypatch.setattr(daemon_module, "_mac_user_is_active", lambda: True)
+    return home
+
+
 def _store_with_chunk(tmp_path, name="backup.sqlite3"):
     store = Store(tmp_path / name, dim=4)
     store.init()
@@ -859,50 +875,127 @@ def _store_with_chunk(tmp_path, name="backup.sqlite3"):
     return store
 
 
-def _backup_config(tmp_path, files, *, out_name="snapshot.enc", key=None):
+def _backup_config(server=None, *, key=None, settings=None, transport="fake"):
+    server = server or _UpServer()
+    if transport == "fake":
+        transport = _UpTransport(server)
     return BackupConfig(
         key=key or generate_escrow_key(),
-        drive_service=FakeService(files),
-        shared_drive_id="drive-XYZ",
-        user_id="sam",
-        out_path=tmp_path / out_name,
+        drive_service=_UpService(server),
+        shared_drive_id="0Adrive",
+        user_id="owner",
+        settings=settings or _bo.Settings(),
+        transport=transport,
     )
 
 
-def test_unconfigured_daemon_never_backs_up(tmp_path):
+def _daemon(tmp_path, cfg, *, interval=3600.0, clock=None, wall=None, store=None, **kw):
+    store = store or _store_with_chunk(tmp_path)
+    extra = {"wall_clock": wall} if wall is not None else {}
+    return Daemon(store, FakeEmbedder(), services={},
+                  lock=SingleWriterLock(tmp_path / "d.lock"),
+                  backup=cfg, backup_interval_s=interval,
+                  clock=clock or _Clock(), **extra, **kw)
+
+
+def _spy_capture(monkeypatch):
+    """Wrap the real backup_outbox.capture, recording each call's kwargs."""
+    calls = []
+    real = _REAL_CAPTURE
+
+    def spy(*a, **kw):
+        calls.append(kw)
+        return real(*a, **kw)
+    monkeypatch.setattr(daemon_module.backup_outbox, "capture", spy)
+    return calls
+
+
+class _FlakyCapture:
+    """capture() stand-in that raises until heal(), then runs the real one."""
+
+    def __init__(self, exc=None):
+        self.exc = exc or OSError("simulated disk error")
+        self.healed = False
+        self.calls = 0
+
+    def heal(self):
+        self.healed = True
+
+    def __call__(self, *a, **kw):
+        self.calls += 1
+        if not self.healed:
+            raise self.exc
+        return _REAL_CAPTURE(*a, **kw)
+
+
+def _attempted(result):
+    """A capture ran to completion (an item, or nothing changed)."""
+    return (result is not None and "error" not in result
+            and "skipped" not in result and "deferred" not in result)
+
+
+def _backup_state(home):
+    p = Path(home) / "backup_state.json"
+    return json.loads(p.read_text()) if p.exists() else None
+
+
+def test_unconfigured_daemon_never_backs_up(tmp_path, bk):
     store = _store_with_chunk(tmp_path)
     daemon = Daemon(store, FakeEmbedder(), services={},
                     lock=SingleWriterLock(tmp_path / "d.lock"))
 
     assert daemon.maybe_backup() is None
+    assert daemon.upload_backup_step() is None
+    assert _bo.pending_items(bk) == []
 
 
-def test_configured_first_call_snapshots_and_uploads(tmp_path):
-    store = _store_with_chunk(tmp_path)
-    files = FakeFiles(list_response={"files": []})
-    cfg = _backup_config(tmp_path, files)
-    daemon = Daemon(store, FakeEmbedder(), services={},
-                    lock=SingleWriterLock(tmp_path / "d.lock"),
-                    backup=cfg, backup_interval_s=3600.0, clock=_Clock())
+def test_first_capture_is_a_base_item_in_the_outbox_not_an_upload(tmp_path, bk):
+    server = _UpServer()
+    cfg = _backup_config(server)
+    daemon = _daemon(tmp_path, cfg)
 
     summary = daemon.maybe_backup()
 
-    assert summary is not None
-    assert summary["backed_up"] is True
-    assert summary["file_id"] == "file-123"
+    assert summary["captured"] is True and summary["item"]
+    [item] = _bo.pending_items(bk)
+    assert item.kind == "base" and item.name == summary["item"]
+    # Capture is local: nothing went to Drive, no snapshot.enc was written.
+    assert server.files == {} and server.sessions == {}
+    assert not (bk / "snapshot.enc").exists()
+    # The outbox is ciphertext, not a plaintext store.
+    for f in item.files():
+        assert not (_bo.outbox_dir(bk) / f).read_bytes().startswith(SQLITE_MAGIC)
+    # A capture alone is not a backup that landed.
+    assert _backup_state(bk) is None
 
-    # The Drive fake received a file-upload create.
-    file_creates = [
-        c for c in files.create_calls
-        if c["body"].get("mimeType") != FakeFiles.FOLDER_MIME
-    ]
-    assert len(file_creates) == 1
 
-    # The local encrypted artifact exists and is NOT plaintext sqlite.
-    out = cfg.out_path
-    assert out.exists()
-    head = out.read_bytes()[: len(SQLITE_MAGIC)]
-    assert head != SQLITE_MAGIC, "artifact looks like plaintext sqlite — mail in clear"
+def test_capture_then_upload_step_commits_and_records_restore_point(tmp_path, bk):
+    server = _UpServer()
+    cfg = _backup_config(server)
+    daemon = _daemon(tmp_path, cfg, wall=_Clock(1_790_000_000.0))
+
+    item = daemon.maybe_backup()["item"]
+    step = daemon.upload_backup_step()
+
+    assert step["error"] is None and step["committed"] == [item]
+    assert step["pending"] == 0
+    state = _backup_state(bk)
+    assert state["consecutive_failures"] == 0 and state["last_success"]
+    assert state["restore_point"] == 1_790_000_000.0
+    assert any(n.startswith("manifest-") for n in
+               (m["name"] for m in cfg.drive_service._all().values()))
+    assert daemon.status()["backup"]["restore_point"] == 1_790_000_000.0
+
+
+def test_unchanged_store_captures_nothing(tmp_path, bk):
+    cfg = _backup_config()
+    daemon = _daemon(tmp_path, cfg, interval=0.0)
+    assert daemon.maybe_backup()["captured"] is True
+    again = daemon.maybe_backup()
+    assert _attempted(again) and again == {"captured": False, "item": None}
+    assert len(_bo.pending_items(bk)) == 1
+
+
 
 
 def test_mac_user_is_active_parses_pmset_assertions(monkeypatch):
@@ -952,440 +1045,270 @@ def test_mac_user_is_active_fails_open_on_error(monkeypatch):
     assert daemon_module._mac_user_is_active() is True
 
 
-def test_maybe_backup_defers_without_consuming_cadence_when_dark_waking(
-        tmp_path, monkeypatch):
-    """The actual fix: a DUE backup on a dark-waking Mac must defer rather
-    than attempt (attempting is what produced the live Errno 49 failures --
-    the network interface hasn't finished re-establishing yet). Deferring
-    must NOT stamp _last_backup, so the very next check (not the next full
-    interval) retries -- picking the backup up within about a maintenance
-    tick of the user actually opening the lid, not on the next scheduled
-    24h slot that might land in the same overnight window again."""
-    store = _store_with_chunk(tmp_path)
-    files = FakeFiles(list_response={"files": []})
-    cfg = _backup_config(tmp_path, files)
-    clock = _Clock()
-    daemon = Daemon(store, FakeEmbedder(), services={},
-                    lock=SingleWriterLock(tmp_path / "d.lock"),
-                    backup=cfg, backup_interval_s=100.0, clock=clock)
 
+def test_maybe_backup_defers_without_consuming_cadence_when_dark_waking(
+        tmp_path, bk, monkeypatch):
+    """A DUE capture on a dark-waking Mac defers rather than attempts, and
+    does NOT stamp _last_backup, so the very next check (not the next full
+    interval) retries once the lid is really open."""
+    calls = _spy_capture(monkeypatch)
+    daemon = _daemon(tmp_path, _backup_config(), interval=100.0)
     monkeypatch.setattr(daemon_module.sys, "platform", "darwin")
     monkeypatch.setattr(daemon_module, "_mac_user_is_active", lambda: False)
 
     result = daemon.maybe_backup()
 
-    assert result is not None and result.get("backed_up") is False
-    assert result.get("deferred") is True
-    file_creates = [c for c in files.create_calls
-                   if c["body"].get("mimeType") != FakeFiles.FOLDER_MIME]
-    assert file_creates == [], "a dark-waking Mac must never attempt the upload"
+    assert result == {"captured": False, "deferred": True}
+    assert calls == [], "a dark-waking Mac must never attempt the capture"
 
-    # The cadence clock must be UNTOUCHED: without advancing it at all, the
-    # backup is still due (this is what makes the retry near-immediate once
-    # the Mac wakes for real, rather than waiting out the full interval).
     monkeypatch.setattr(daemon_module, "_mac_user_is_active", lambda: True)
-    woken = daemon.maybe_backup()
-    assert woken is not None and woken["backed_up"] is True
-    file_creates = [c for c in files.create_calls
-                   if c["body"].get("mimeType") != FakeFiles.FOLDER_MIME]
-    assert len(file_creates) == 1
+    assert _attempted(daemon.maybe_backup())
+    assert len(calls) == 1
 
 
-def test_maybe_backup_ignores_the_check_on_non_mac(tmp_path, monkeypatch):
-    """The fix is scoped to a diagnosed macOS dark-wake pattern -- on any
-    other platform, behavior is unchanged from before this fix."""
-    store = _store_with_chunk(tmp_path)
-    files = FakeFiles(list_response={"files": []})
-    cfg = _backup_config(tmp_path, files)
-    daemon = Daemon(store, FakeEmbedder(), services={},
-                    lock=SingleWriterLock(tmp_path / "d.lock"),
-                    backup=cfg, backup_interval_s=3600.0, clock=_Clock())
-
+def test_maybe_backup_ignores_the_check_on_non_mac(tmp_path, bk, monkeypatch):
+    daemon = _daemon(tmp_path, _backup_config())
     monkeypatch.setattr(daemon_module.sys, "platform", "win32")
     monkeypatch.setattr(daemon_module, "_mac_user_is_active", lambda: False)
-
-    result = daemon.maybe_backup()
-    assert result is not None and result["backed_up"] is True
+    assert daemon.maybe_backup()["captured"] is True
 
 
-def test_not_due_skips_second_backup_then_due_backs_up_again(tmp_path):
-    store = _store_with_chunk(tmp_path)
-    files = FakeFiles(list_response={"files": []})
-    cfg = _backup_config(tmp_path, files)
+def test_not_due_skips_second_capture_then_due_captures_again(tmp_path, bk, monkeypatch):
+    calls = _spy_capture(monkeypatch)
     clock = _Clock()
-    daemon = Daemon(store, FakeEmbedder(), services={},
-                    lock=SingleWriterLock(tmp_path / "d.lock"),
-                    backup=cfg, backup_interval_s=100.0, clock=clock)
+    daemon = _daemon(tmp_path, _backup_config(), interval=100.0, clock=clock,
+                     wall=_Clock(1_790_000_000.0))
 
-    first = daemon.maybe_backup()
-    assert first is not None and first["backed_up"] is True
+    assert _attempted(daemon.maybe_backup())
+    assert len(calls) == 1
 
-    def _file_create_count():
-        return len([
-            c for c in files.create_calls
-            if c["body"].get("mimeType") != FakeFiles.FOLDER_MIME
-        ])
-
-    assert _file_create_count() == 1
-
-    # Advance less than the interval: not due, no new upload.
     clock.advance(50.0)
     assert daemon.maybe_backup() is None
-    assert _file_create_count() == 1
+    assert len(calls) == 1
 
-    # Advance past the interval: due again, a second upload happens.
     clock.advance(60.0)  # total 110 >= 100
-    second = daemon.maybe_backup()
-    assert second is not None and second["backed_up"] is True
-    assert _file_create_count() == 2
+    assert _attempted(daemon.maybe_backup())
+    assert len(calls) == 2
 
 
-def test_backup_failure_does_not_crash_and_loop_continues(tmp_path):
-    store = _store_with_chunk(tmp_path)
-    files = _RaisingFiles(list_response={"files": []})
-    cfg = _backup_config(tmp_path, files)
-    daemon = Daemon(store, FakeEmbedder(), services={},
-                    lock=SingleWriterLock(tmp_path / "d.lock"),
-                    backup=cfg, backup_interval_s=0.0, clock=_Clock())
+def test_capture_interval_comes_from_settings(tmp_path, bk, monkeypatch):
+    """`interval_s` no longer drives capture; `capture_interval_s` does."""
+    from mcpbrain.config import write_config
+    write_config(str(bk), {"backup": {
+        "escrow_key": "k" * 44, "shared_drive_id": "0Adrive", "user_id": "owner",
+        "interval_s": 86400, "capture_interval_s": 1800}})
+    monkeypatch.setattr(daemon_module.auth, "build_google_services",
+                        lambda **kw: {"drive_service": "DRIVE"})
+    bc, interval = daemon_module._backup_from_config(str(bk))
+    assert interval == 1800.0 and bc.settings.capture_interval_s == 1800.0
+
+
+def test_capture_failure_does_not_crash_and_loop_continues(tmp_path, bk, monkeypatch):
+    flaky = _FlakyCapture()
+    monkeypatch.setattr(daemon_module.backup_outbox, "capture", flaky)
+    daemon = _daemon(tmp_path, _backup_config(), interval=0.0)
 
     failed = daemon.maybe_backup()
-    assert failed is not None
-    assert failed["backed_up"] is False
-    assert "error" in failed
+    assert failed["captured"] is False and "simulated disk error" in failed["error"]
 
-    # The daemon is still usable: heal the Drive fake and back up successfully.
-    files.heal()
+    flaky.heal()
     ok = daemon.maybe_backup()  # interval 0 -> always due
-    assert ok is not None and ok["backed_up"] is True
-    assert ok["file_id"] == "file-123"
+    assert ok["captured"] is True
 
 
-def test_failed_backup_backs_off_for_the_full_interval(tmp_path):
-    """A FAILED backup must wait interval_s before retrying, not retry at once.
-
-    Regression (live incident 2026-08-04): the cadence clock advanced only on
-    SUCCESS, so a backup that could never succeed was "due" on every cycle. The
-    daemon re-snapshotted the 11.9GB store every ~60s -- filling /var/folders
-    until ENOSPC, exhausting swap, and wedging the cycle thread so no heartbeat
-    or maintenance pass ran for an hour. Backing off on ATTEMPT bounds the cost
-    of a persistently broken backup to one attempt per interval.
-    """
-    store = _store_with_chunk(tmp_path)
-    files = _RaisingFiles(list_response={"files": []})
-    cfg = _backup_config(tmp_path, files)
+def test_failed_capture_backs_off_for_the_full_interval(tmp_path, bk, monkeypatch):
+    """A FAILED capture waits before retrying, not every cycle (2026-08-04:
+    a backup that could never succeed was "due" on every cycle and filled the
+    disk). The interval here is under BACKUP_RETRY_BASE_S, so it binds."""
+    flaky = _FlakyCapture()
+    monkeypatch.setattr(daemon_module.backup_outbox, "capture", flaky)
     clock = _Clock()
-    daemon = Daemon(store, FakeEmbedder(), services={},
-                    lock=SingleWriterLock(tmp_path / "d.lock"),
-                    backup=cfg, backup_interval_s=100.0, clock=clock)
+    daemon = _daemon(tmp_path, _backup_config(), interval=100.0, clock=clock,
+                     wall=_Clock(1_790_000_000.0))
 
-    first = daemon.maybe_backup()
-    assert first is not None and first["backed_up"] is False
-
-    # Well inside the interval: the failed attempt must NOT be retried.
+    assert daemon.maybe_backup()["captured"] is False
     clock.advance(50.0)
-    assert daemon.maybe_backup() is None, "failed backup hot-looped instead of backing off"
-
-    # Past the interval: it is due again.
-    clock.advance(60.0)  # total 110 >= 100
-    files.heal()
-    retried = daemon.maybe_backup()
-    assert retried is not None and retried["backed_up"] is True
+    assert daemon.maybe_backup() is None, "failed capture hot-looped instead of backing off"
+    clock.advance(60.0)
+    flaky.heal()
+    assert daemon.maybe_backup()["captured"] is True
 
 
-def test_slow_successful_backup_is_spaced_from_completion(tmp_path, monkeypatch):
-    """A backup slower than the interval must NOT restart the instant it ends.
-
-    The cadence clock was stamped only at the START of a run, so effective
-    spacing was max(interval, duration) measured from start — i.e. `interval`
-    from START, not from COMPLETION. DEFAULT_BACKUP_INTERVAL_S is 3600 and
-    backup_setup writes interval_s: 3600 for new installs, while the live store
-    is ~11.9GB (~4.2GB artifact). Any install whose snapshot+upload exceeds an
-    hour saw elapsed > interval the moment it finished and immediately started
-    again: back-to-back multi-GB uploads, continuously holding the bulk lock.
-    The start stamp still has to stay (it is what bounds a FAILING backup to one
-    attempt per interval) — success must ADDITIONALLY re-stamp.
-    """
-    from mcpbrain import daemon as dm
-
-    store = _store_with_chunk(tmp_path)
-    files = FakeFiles(list_response={"files": []})
-    cfg = _backup_config(tmp_path, files)
+def test_slow_capture_is_spaced_from_completion(tmp_path, bk, monkeypatch):
     clock = _Clock()
-    daemon = Daemon(store, FakeEmbedder(), services={},
-                    lock=SingleWriterLock(tmp_path / "d.lock"),
-                    backup=cfg, backup_interval_s=100.0, clock=clock)
 
-    real_upload = dm.upload_snapshot
+    def slow(*a, **kw):
+        clock.advance(250.0)
+        return _REAL_CAPTURE(*a, **kw)
+    monkeypatch.setattr(daemon_module.backup_outbox, "capture", slow)
+    daemon = _daemon(tmp_path, _backup_config(), interval=100.0, clock=clock,
+                     wall=_Clock(1_790_000_000.0))
 
-    def _slow_upload(*a, **kw):
-        clock.advance(250.0)  # the upload alone outlasts the interval 2.5x
-        return real_upload(*a, **kw)
-
-    monkeypatch.setattr(dm, "upload_snapshot", _slow_upload)
-
-    first = daemon.maybe_backup()
-    assert first is not None and first["backed_up"] is True
-
-    def _file_create_count():
-        return len([c for c in files.create_calls
-                    if c["body"].get("mimeType") != FakeFiles.FOLDER_MIME])
-
-    assert _file_create_count() == 1
-
-    # No time has passed since the backup COMPLETED, so it is not due.
-    assert daemon.maybe_backup() is None, (
-        "a slow backup restarted immediately — spacing measured from start, "
-        "not completion")
-    assert _file_create_count() == 1
-
-    # A full interval after completion, it is due again.
+    assert _attempted(daemon.maybe_backup())
+    assert daemon.maybe_backup() is None, "spacing measured from start, not completion"
     clock.advance(100.0)
-    again = daemon.maybe_backup()
-    assert again is not None and again["backed_up"] is True
-
-
-def _backup_state(home):
-    from pathlib import Path
-    p = Path(home) / "backup_state.json"
-    return json.loads(p.read_text()) if p.exists() else None
+    assert _attempted(daemon.maybe_backup())
 
 
 # ---------------------------------------------------------------------------
-# the backup cadence must survive a restart
-#
-# _last_backup lived only in memory, so every daemon start looked like a first
-# run and triggered a full snapshot+upload regardless of interval_s. On
-# 2026-08-04 that meant 9 starts and 12.75GB uploaded where the configured
-# daily cadence calls for 4.25GB -- plus three more attempts that copied and
-# encrypted the whole 11.9GB store before failing at the upload.
+# the capture cadence survives a restart and counts sleep
 # ---------------------------------------------------------------------------
 
 
-def test_recent_recorded_attempt_is_not_due_after_a_restart(tmp_path):
-    store = _store_with_chunk(tmp_path)
-    files = FakeFiles(list_response={"files": []})
-    cfg = _backup_config(tmp_path, files)
-    daemon = Daemon(store, FakeEmbedder(), services={},
-                    lock=SingleWriterLock(tmp_path / "d.lock"),
-                    backup=cfg, backup_interval_s=3600.0, clock=_Clock(),
-                    last_backup_attempt_epoch=time.time() - 60)  # 1 min ago
-
-    assert daemon.maybe_backup() is None, "a restart re-armed a full backup"
+def test_recent_recorded_attempt_is_not_due_after_a_restart(tmp_path, bk):
+    daemon = _daemon(tmp_path, _backup_config(),
+                     last_backup_attempt_epoch=time.time() - 60)
+    assert daemon.maybe_backup() is None, "a restart re-armed a capture"
 
 
-def test_stale_recorded_attempt_is_still_due_after_a_restart(tmp_path):
-    store = _store_with_chunk(tmp_path)
-    files = FakeFiles(list_response={"files": []})
-    cfg = _backup_config(tmp_path, files)
-    daemon = Daemon(store, FakeEmbedder(), services={},
-                    lock=SingleWriterLock(tmp_path / "d.lock"),
-                    backup=cfg, backup_interval_s=3600.0, clock=_Clock(),
-                    last_backup_attempt_epoch=time.time() - 7200)  # 2h ago
-
-    summary = daemon.maybe_backup()
-    assert summary is not None and summary["backed_up"] is True
+def test_stale_recorded_attempt_is_still_due_after_a_restart(tmp_path, bk):
+    daemon = _daemon(tmp_path, _backup_config(),
+                     last_backup_attempt_epoch=time.time() - 7200)
+    assert daemon.maybe_backup()["captured"] is True
 
 
-def test_no_recorded_attempt_still_backs_up_immediately(tmp_path):
-    """A fresh install must not wait a whole interval for its first backup."""
-    store = _store_with_chunk(tmp_path)
-    files = FakeFiles(list_response={"files": []})
-    cfg = _backup_config(tmp_path, files)
-    daemon = Daemon(store, FakeEmbedder(), services={},
-                    lock=SingleWriterLock(tmp_path / "d.lock"),
-                    backup=cfg, backup_interval_s=3600.0, clock=_Clock(),
-                    last_backup_attempt_epoch=None)
-
-    summary = daemon.maybe_backup()
-    assert summary is not None and summary["backed_up"] is True
+def test_no_recorded_attempt_still_captures_immediately(tmp_path, bk):
+    daemon = _daemon(tmp_path, _backup_config(), last_backup_attempt_epoch=None)
+    assert daemon.maybe_backup()["captured"] is True
 
 
-def test_recorded_attempt_in_the_future_does_not_wedge_the_cadence(tmp_path):
-    """Clock skew must not park backups forever.
-
-    The persisted stamp is wall-clock while _last_backup is monotonic; a
-    backwards system-clock adjustment can make the recorded attempt look like
-    it is in the future. Clamp rather than compute a negative elapsed.
-    """
-    store = _store_with_chunk(tmp_path)
-    files = FakeFiles(list_response={"files": []})
-    cfg = _backup_config(tmp_path, files)
-    daemon = Daemon(store, FakeEmbedder(), services={},
-                    lock=SingleWriterLock(tmp_path / "d.lock"),
-                    backup=cfg, backup_interval_s=3600.0, clock=_Clock(),
-                    last_backup_attempt_epoch=time.time() + 86400)
-
-    # Treated as "just attempted": not due now, and never further than one
-    # interval away.
+def test_recorded_attempt_in_the_future_does_not_wedge_the_cadence(tmp_path, bk):
+    daemon = _daemon(tmp_path, _backup_config(),
+                     last_backup_attempt_epoch=time.time() + 86400)
     assert daemon.maybe_backup() is None
 
 
-# ---------------------------------------------------------------------------
-# the backup cadence must count SLEEP, not just awake time
-#
-# On macOS time.monotonic() (mach_absolute_time) does not advance while the
-# machine sleeps, so a monotonic-only "daily" backup needed 24h of AWAKE time.
-# Live 2026-10-05: last_attempt == last_success 49.6h old, 0 failures -- no
-# backup ATTEMPTED for ~2 days across a slept weekend; a restart (which
-# re-seeds from the wall clock) ran it immediately. Elapsed is now
-# max(monotonic, wall-clock): sleep makes a backup MORE due, never less.
-# ---------------------------------------------------------------------------
-
-
-def test_backup_due_after_sleep_when_monotonic_clock_is_frozen(tmp_path, monkeypatch):
-    import mcpbrain.daemon as daemon_module
-    monkeypatch.setattr(daemon_module, "_mac_user_is_active", lambda: True)
-    store = _store_with_chunk(tmp_path)
-    files = FakeFiles(list_response={"files": []})
-    cfg = _backup_config(tmp_path, files)
-    mono = _Clock(1000.0)
-    wall = _Clock(1_790_000_000.0)
-    daemon = Daemon(store, FakeEmbedder(), services={},
-                    lock=SingleWriterLock(tmp_path / "d.lock"),
-                    backup=cfg, backup_interval_s=86400.0, clock=mono,
-                    wall_clock=wall)
-
-    first = daemon.maybe_backup()
-    assert first is not None and first["backed_up"] is True
-    assert daemon.maybe_backup() is None  # just ran
-
-    # The machine sleeps for 25h: monotonic does not move, wall clock does.
-    wall.advance(25 * 3600)
-    again = daemon.maybe_backup()
-    assert again is not None and again["backed_up"] is True, (
-        "a slept day did not count toward the daily backup cadence")
-
-
-def test_backup_due_after_sleep_when_seeded_from_persisted_attempt(tmp_path, monkeypatch):
-    """The restart-seeded path too: seed 1h ago, then sleep 24h."""
-    import mcpbrain.daemon as daemon_module
-    monkeypatch.setattr(daemon_module, "_mac_user_is_active", lambda: True)
-    store = _store_with_chunk(tmp_path)
-    files = FakeFiles(list_response={"files": []})
-    cfg = _backup_config(tmp_path, files)
-    mono = _Clock(1000.0)
-    wall = _Clock(1_790_000_000.0)
-    daemon = Daemon(store, FakeEmbedder(), services={},
-                    lock=SingleWriterLock(tmp_path / "d.lock"),
-                    backup=cfg, backup_interval_s=86400.0, clock=mono,
-                    wall_clock=wall,
-                    last_backup_attempt_epoch=wall() - 3600)
+def test_backup_due_after_sleep_when_monotonic_clock_is_frozen(tmp_path, bk):
+    mono, wall = _Clock(1000.0), _Clock(1_790_000_000.0)
+    daemon = _daemon(tmp_path, _backup_config(), interval=86400.0, clock=mono,
+                     wall=wall)
+    assert _attempted(daemon.maybe_backup())
     assert daemon.maybe_backup() is None
-
-    wall.advance(24 * 3600)  # asleep; monotonic frozen
-    summary = daemon.maybe_backup()
-    assert summary is not None and summary["backed_up"] is True
+    wall.advance(25 * 3600)  # asleep: monotonic frozen
+    assert _attempted(daemon.maybe_backup()), "a slept day did not count"
 
 
-def test_backwards_wall_clock_jump_does_not_suppress_a_due_backup(tmp_path, monkeypatch):
-    import mcpbrain.daemon as daemon_module
-    monkeypatch.setattr(daemon_module, "_mac_user_is_active", lambda: True)
-    store = _store_with_chunk(tmp_path)
-    files = FakeFiles(list_response={"files": []})
-    cfg = _backup_config(tmp_path, files)
-    mono = _Clock(1000.0)
-    wall = _Clock(1_790_000_000.0)
-    daemon = Daemon(store, FakeEmbedder(), services={},
-                    lock=SingleWriterLock(tmp_path / "d.lock"),
-                    backup=cfg, backup_interval_s=86400.0, clock=mono,
-                    wall_clock=wall)
-    assert daemon.maybe_backup()["backed_up"] is True
+def test_backup_due_after_sleep_when_seeded_from_persisted_attempt(tmp_path, bk):
+    mono, wall = _Clock(1000.0), _Clock(1_790_000_000.0)
+    daemon = _daemon(tmp_path, _backup_config(), interval=86400.0, clock=mono,
+                     wall=wall, last_backup_attempt_epoch=wall() - 3600)
+    assert daemon.maybe_backup() is None
+    wall.advance(24 * 3600)
+    assert _attempted(daemon.maybe_backup())
 
-    # 25h awake, but the wall clock is set back two days meanwhile.
+
+def test_backwards_wall_clock_jump_does_not_suppress_a_due_backup(tmp_path, bk):
+    mono, wall = _Clock(1000.0), _Clock(1_790_000_000.0)
+    daemon = _daemon(tmp_path, _backup_config(), interval=86400.0, clock=mono,
+                     wall=wall)
+    assert _attempted(daemon.maybe_backup())
     mono.advance(25 * 3600)
     wall.advance(25 * 3600 - 2 * 86400)
-    summary = daemon.maybe_backup()
-    assert summary is not None and summary["backed_up"] is True, (
-        "a backwards wall-clock jump suppressed a backup monotonic says is due")
+    assert _attempted(daemon.maybe_backup()), (
+        "a backwards wall-clock jump suppressed a capture monotonic says is due")
 
 
 def test_failed_attempt_retries_after_the_failure_backoff_not_the_interval(
-        tmp_path, monkeypatch):
+        tmp_path, bk, monkeypatch):
     """A failure backs off BACKUP_RETRY_BASE_S, doubling per consecutive
-    failure, never past the interval -- not a whole day (live 2026-10-15..18:
-    four daily attempts lost on a flaky link, five days without a backup)."""
-    import mcpbrain.daemon as daemon_module
+    failure, never past the interval."""
     from mcpbrain.daemon import BACKUP_RETRY_BASE_S
-    monkeypatch.setattr(daemon_module, "_mac_user_is_active", lambda: True)
-    monkeypatch.setattr(daemon_module, "app_dir", lambda: tmp_path)
-    monkeypatch.setattr(daemon_module, "_build_drive_service",
-                        lambda: (_ for _ in ()).throw(RuntimeError("no creds")))
-    store = _store_with_chunk(tmp_path)
-    files = _RaisingFiles(list_response={"files": []})
-    cfg = _backup_config(tmp_path, files)
-    mono = _Clock(1000.0)
-    wall = _Clock(1_790_000_000.0)
-    daemon = Daemon(store, FakeEmbedder(), services={},
-                    lock=SingleWriterLock(tmp_path / "d.lock"),
-                    backup=cfg, backup_interval_s=86400.0, clock=mono,
-                    wall_clock=wall)
-    assert daemon.maybe_backup()["backed_up"] is False
-    mono.advance(BACKUP_RETRY_BASE_S - 1)
-    wall.advance(BACKUP_RETRY_BASE_S - 1)
+    flaky = _FlakyCapture()
+    monkeypatch.setattr(daemon_module.backup_outbox, "capture", flaky)
+    mono, wall = _Clock(1000.0), _Clock(1_790_000_000.0)
+    daemon = _daemon(tmp_path, _backup_config(), interval=86400.0, clock=mono,
+                     wall=wall)
+
+    def tick(s):
+        mono.advance(s)
+        wall.advance(s)
+    assert daemon.maybe_backup()["captured"] is False
+    tick(BACKUP_RETRY_BASE_S - 1)
     assert daemon.maybe_backup() is None, "still backing off"
-    mono.advance(1)
-    wall.advance(1)
-    assert daemon.maybe_backup()["backed_up"] is False, "retried after the backoff"
-    # Second failure: the backoff doubles.
-    mono.advance(BACKUP_RETRY_BASE_S)
-    wall.advance(BACKUP_RETRY_BASE_S)
-    assert daemon.maybe_backup() is None
-    mono.advance(BACKUP_RETRY_BASE_S)
-    wall.advance(BACKUP_RETRY_BASE_S)
-    files.heal()
-    assert daemon.maybe_backup()["backed_up"] is True
-    # Success restores the full interval.
-    mono.advance(BACKUP_RETRY_BASE_S * 4)
-    wall.advance(BACKUP_RETRY_BASE_S * 4)
-    assert daemon.maybe_backup() is None
+    tick(1)
+    assert daemon.maybe_backup()["captured"] is False, "retried after the backoff"
+    tick(BACKUP_RETRY_BASE_S)
+    assert daemon.maybe_backup() is None   # second failure: doubled
+    tick(BACKUP_RETRY_BASE_S)
+    flaky.heal()
+    assert daemon.maybe_backup()["captured"] is True
+    tick(BACKUP_RETRY_BASE_S * 4)
+    assert daemon.maybe_backup() is None   # success restores the full interval
 
 
-def test_failure_backoff_survives_a_restart(tmp_path, monkeypatch):
-    """Seeded from backup_state.json, so a restart keeps the short retry."""
-    import mcpbrain.daemon as daemon_module
+def test_failure_backoff_survives_a_restart(tmp_path, bk):
     from mcpbrain.daemon import BACKUP_RETRY_BASE_S, backup_failures
-    monkeypatch.setattr(daemon_module, "_mac_user_is_active", lambda: True)
-    monkeypatch.setattr(daemon_module, "app_dir", lambda: tmp_path)
-    assert backup_failures(str(tmp_path)) == 0  # no file yet
-    (tmp_path / "backup_state.json").write_text(json.dumps({
+    assert backup_failures(str(bk)) == 0
+    (bk / "backup_state.json").write_text(json.dumps({
         "last_attempt": 1_790_000_000.0, "last_success": 1_789_000_000.0,
         "consecutive_failures": 1, "last_error": "timed out"}))
-    assert backup_failures(str(tmp_path)) == 1
-    store = _store_with_chunk(tmp_path)
-    cfg = _backup_config(tmp_path, FakeFiles(list_response={"files": []}))
-    wall = _Clock(1_790_000_000.0 + BACKUP_RETRY_BASE_S)
-    daemon = Daemon(store, FakeEmbedder(), services={},
-                    lock=SingleWriterLock(tmp_path / "d.lock"),
-                    backup=cfg, backup_interval_s=86400.0, clock=_Clock(5.0),
-                    wall_clock=wall, last_backup_attempt_epoch=1_790_000_000.0,
-                    backup_failures=backup_failures(str(tmp_path)))
-    assert daemon.maybe_backup()["backed_up"] is True
+    assert backup_failures(str(bk)) == 1
+    daemon = _daemon(tmp_path, _backup_config(), interval=86400.0,
+                     clock=_Clock(5.0),
+                     wall=_Clock(1_790_000_000.0 + BACKUP_RETRY_BASE_S),
+                     last_backup_attempt_epoch=1_790_000_000.0,
+                     backup_failures=backup_failures(str(bk)))
+    assert daemon.maybe_backup()["captured"] is True
 
 
-def test_request_backup_runs_now_past_interval_and_dark_wake(tmp_path, monkeypatch):
-    """`mcpbrain backup`: due immediately, even mid-interval and even when the
-    dark-wake check would defer (a person just asked for it)."""
-    import mcpbrain.daemon as daemon_module
+# ---------------------------------------------------------------------------
+# request_backup: capture now and upload until the outbox is empty
+# ---------------------------------------------------------------------------
+
+
+def test_request_backup_captures_now_and_uploads_until_committed(tmp_path, bk, monkeypatch):
+    """`mcpbrain backup`: the capture is due immediately (mid-interval, past
+    the dark-wake deferral), and uploads keep running on a dark-waking Mac
+    until the outbox is empty; `backup_requested` stays true until the
+    requested capture has been taken."""
+    monkeypatch.setattr(daemon_module.sys, "platform", "darwin")
     monkeypatch.setattr(daemon_module, "_mac_user_is_active", lambda: False)
-    monkeypatch.setattr(daemon_module, "app_dir", lambda: tmp_path)
-    store = _store_with_chunk(tmp_path)
-    cfg = _backup_config(tmp_path, FakeFiles(list_response={"files": []}))
-    mono = _Clock(1000.0)
-    daemon = Daemon(store, FakeEmbedder(), services={},
-                    lock=SingleWriterLock(tmp_path / "d.lock"),
-                    backup=cfg, backup_interval_s=86400.0, clock=mono,
-                    wall_clock=_Clock(1_790_000_000.0),
-                    last_backup_attempt_epoch=1_790_000_000.0 - 60)
+    server = _UpServer()
+    cfg = _backup_config(server)
+    wall = _Clock(1_790_000_000.0)
+    daemon = _daemon(tmp_path, cfg, interval=86400.0, clock=_Clock(1000.0),
+                     wall=wall, last_backup_attempt_epoch=wall() - 60)
     assert daemon.maybe_backup() is None  # not due
+
     assert daemon.request_backup() is True
     assert daemon.status()["backup_requested"] is True
-    assert daemon.maybe_backup()["backed_up"] is True
+    out = daemon.maybe_backup()
+    assert out["captured"] is True
     assert daemon.status()["backup_requested"] is False
     assert daemon.status()["backup_running"] is None
-    assert daemon.maybe_backup() is None, "one request, one backup"
+    assert daemon.status()["backup"]["pending"] == 1
+
+    step = daemon.upload_backup_step()
+    assert step["committed"] == [out["item"]] and step["pending"] == 0
+    assert daemon.status()["backup"]["pending"] == 0
+    assert _backup_state(bk)["restore_point"] == 1_790_000_000.0
+    assert daemon.maybe_backup() is None, "one request, one capture"
+
+    # The drain request is answered: a later dark-wake upload is deferred.
+    daemon._store.upsert_chunk("d-2", "another", "h2", {})
+    daemon.request_backup()
+    daemon.maybe_backup()
+    daemon._backup_drain_requested.clear()
+    assert daemon.upload_backup_step() is None, "dark-wake upload ran with no request"
+    assert daemon.status()["backup"]["pending"] == 1
 
 
-def test_request_backup_without_backup_configured_is_refused(tmp_path):
+def test_request_backup_kept_while_the_lock_is_busy(tmp_path, bk):
+    daemon = _daemon(tmp_path, _backup_config(), interval=86400.0,
+                     last_backup_attempt_epoch=time.time() - 60)
+    daemon._bulk_lock_wait_s = 0.05
+    daemon.request_backup()
+    with daemon._bulk_lock:
+        r = threading.Thread(target=lambda: setattr(daemon, "_r", daemon.maybe_backup()))
+        r.start()
+        r.join(5.0)
+    assert daemon._r == {"captured": False, "skipped": "lock_busy"}
+    assert daemon.status()["backup_requested"] is True
+    assert daemon.maybe_backup()["captured"] is True
+    assert daemon.status()["backup_requested"] is False
+
+
+def test_request_backup_without_backup_configured_is_refused(tmp_path, bk):
     store = _store_with_chunk(tmp_path)
     daemon = Daemon(store, FakeEmbedder(), services={},
                     lock=SingleWriterLock(tmp_path / "d.lock"))
@@ -1442,232 +1365,398 @@ def test_write_backup_state_leaves_no_temp_file_on_success(tmp_path):
     assert not list(tmp_path.glob(".backup_state.*.tmp"))
 
 
-def test_maybe_backup_records_a_failed_upload(tmp_path, monkeypatch):
-    """A failing backup must leave a durable, countable trace.
 
-    Nothing recorded upload outcomes, so repeated failure was invisible to
-    doctor/status (probe_backup only saw a freshly-written local snapshot.enc,
-    which a FAILED run leaves behind too). The consecutive count is what makes
-    a failure storm legible -- 57 uploads failed on 2026-08-03 and the status
-    line read "Backup: On" throughout.
-    """
-    monkeypatch.setenv("MCPBRAIN_HOME", str(tmp_path))
-    store = _store_with_chunk(tmp_path)
-    cfg = _backup_config(tmp_path, _RaisingFiles(list_response={"files": []}))
-    daemon = Daemon(store, FakeEmbedder(), services={},
-                    lock=SingleWriterLock(tmp_path / "d.lock"),
-                    backup=cfg, backup_interval_s=0.0, clock=_Clock())
+# ---------------------------------------------------------------------------
+# capture skips that are NOT failures: busy lock (R3), empty store (R28);
+# a full outbox is recorded but never advances the cadence
+# ---------------------------------------------------------------------------
 
+
+def test_lock_busy_skips_capture_without_failure_or_cadence(tmp_path, bk):
+    """R3: capture's bulk-lock acquire is bounded; on timeout the capture is
+    skipped this cycle -- not a failure, cadence untouched -- and nothing is
+    written to the outbox."""
+    daemon = _daemon(tmp_path, _backup_config())
+    daemon._bulk_lock_wait_s = 0.1
+    acquired, release = threading.Event(), threading.Event()
+
+    def hold():
+        with daemon._bulk_lock:
+            acquired.set()
+            release.wait(5.0)
+    holder = threading.Thread(target=hold, daemon=True)
+    holder.start()
+    assert acquired.wait(2.0)
+    try:
+        started = time.monotonic()
+        out = daemon.maybe_backup()
+        elapsed = time.monotonic() - started
+    finally:
+        release.set()
+        holder.join(2.0)
+
+    assert out == {"captured": False, "skipped": "lock_busy"}
+    assert elapsed < 2.0, "capture blocked on a held bulk lock"
+    assert daemon._last_backup is None, "a skipped capture advanced the cadence"
+    assert daemon._backup_failures == 0
+    assert _backup_state(bk) is None
+    assert _bo.pending_items(bk) == []
+    assert not daemon._backup_in_progress.is_set()
+    assert daemon.maybe_backup()["captured"] is True, "retried next cycle"
+
+
+def test_empty_store_is_never_captured(tmp_path, bk, monkeypatch):
+    """R28: a store with 0 chunks must never become the newest restore point
+    (a reinstall that has not restored yet). Not a failure; cadence untouched."""
+    calls = _spy_capture(monkeypatch)
+    store = Store(tmp_path / "empty.sqlite3", dim=4)
+    store.init()
+    daemon = _daemon(tmp_path, _backup_config(), store=store)
+
+    assert daemon.maybe_backup() == {"captured": False, "skipped": "empty_store"}
+    assert calls == []
+    assert daemon._last_backup is None and daemon._backup_failures == 0
+    assert _backup_state(bk) is None
+
+    store.upsert_chunk("d-1", "now there is content", "h1", {})
+    assert daemon.maybe_backup()["captured"] is True
+
+
+def test_outbox_full_records_a_clear_error_and_keeps_uploading(tmp_path, bk, monkeypatch):
+    """A full outbox pauses capture with a clear backup_state error, never
+    advances the cadence past it, and the upload step keeps draining; once
+    drained the next capture runs."""
+    server = _UpServer()
+    cfg = _backup_config(server)
+    daemon = _daemon(tmp_path, cfg, interval=86400.0)
+    first = daemon.maybe_backup()["item"]
+    daemon._last_backup = None   # due again
+    daemon._backup = replace(cfg, settings=_bo.Settings(outbox_max_bytes=1))
+
+    out = daemon.maybe_backup()
+
+    assert out["captured"] is False and out["skipped"] == "outbox_full"
+    state = _backup_state(bk)
+    assert state["consecutive_failures"] == 1
+    assert state["last_error"].startswith("outbox full: ")
+    assert "MB waiting to upload" in state["last_error"]
+    assert daemon._last_backup is None, "a full outbox advanced the cadence"
+
+    step = daemon.upload_backup_step()
+    assert step["committed"] == [first]
+    daemon._store.upsert_chunk("d-2", "more", "h2", {})
+    assert daemon.maybe_backup()["captured"] is True
+
+
+def test_upload_discard_is_recorded_as_last_discard(tmp_path, bk):
+    """R14: an item the uploader throws away (here: a local file that no
+    longer matches its sidecar) is recorded in backup_state.json, so a person
+    can see that a restore point was discarded."""
+    cfg = _backup_config()
+    wall = _Clock(1_790_000_000.0)
+    daemon = _daemon(tmp_path, cfg, wall=wall)
+    item_name = daemon.maybe_backup()["item"]
+    [item] = _bo.pending_items(bk)
+    seg = _bo.outbox_dir(bk) / item.segments[0]["file"]
+    data = bytearray(seg.read_bytes())
+    data[100] ^= 0xFF
+    seg.write_bytes(bytes(data))
+
+    daemon.upload_backup_step()
+
+    disc = _backup_state(bk)["last_discard"]
+    assert disc["item"] == item_name and disc["at"] == 1_790_000_000.0
+    assert "sha256" in disc["reason"]
+    assert daemon.status()["backup"]["last_discard"]["item"] == item_name
+    # Carried through later attempts.
+    from mcpbrain.daemon import write_backup_state
+    write_backup_state(str(bk), ok=False, error="x")
+    assert _backup_state(bk)["last_discard"]["item"] == item_name
+
+
+# ---------------------------------------------------------------------------
+# the bulk lock: held for the copy only; upload never holds it
+# ---------------------------------------------------------------------------
+
+
+def test_capture_takes_bulk_lock_only_for_copy(tmp_path, bk, monkeypatch):
+    """Capture holds _bulk_lock for the backup() copy and nothing else; a
+    second thread can take _bulk_lock while upload_backup_step runs."""
+    held_during_copy = []
+    real_copy = _bo._copy_store
+
+    def copy(src, dst):
+        held_during_copy.append(daemon._bulk_lock.locked())
+        return real_copy(src, dst)
+    monkeypatch.setattr(_bo, "_copy_store", copy)
+    real_pages = _bo._write_pages
+
+    def write_pages(*a, **kw):
+        held_during_copy.append(("write", daemon._bulk_lock.locked()))
+        return real_pages(*a, **kw)
+    monkeypatch.setattr(_bo, "_write_pages", write_pages)
+
+    server = _UpServer()
+    cfg = _backup_config(server)
+    daemon = _daemon(tmp_path, cfg)
+    assert daemon.maybe_backup()["captured"] is True
+    assert held_during_copy[0] is True, "the copy ran without the bulk lock"
+    assert ("write", False) in held_during_copy, "page writing held the bulk lock"
+    assert not daemon._bulk_lock.locked()
+
+    other_got_lock = []
+    real_upload = _bu.upload_step
+
+    def upload(*a, **kw):
+        def grab():
+            ok = daemon._bulk_lock.acquire(timeout=2.0)
+            other_got_lock.append(ok)
+            if ok:
+                daemon._bulk_lock.release()
+        t = threading.Thread(target=grab)
+        t.start()
+        t.join(5.0)
+        assert not daemon._backup_in_progress.is_set()
+        return real_upload(*a, **kw)
+    monkeypatch.setattr(daemon_module.backup_uploader, "upload_step", upload)
+
+    assert daemon.upload_backup_step()["committed"]
+    assert other_got_lock == [True], "upload_backup_step held the bulk lock"
+
+
+def test_backup_in_progress_is_set_only_around_the_capture(tmp_path, bk, monkeypatch):
+    seen = []
+    real = _REAL_CAPTURE
+
+    def spy(*a, **kw):
+        seen.append(daemon._backup_in_progress.is_set())
+        seen.append(dict(daemon._backup_progress))
+        return real(*a, **kw)
+    monkeypatch.setattr(daemon_module.backup_outbox, "capture", spy)
+    daemon = _daemon(tmp_path, _backup_config())
     daemon.maybe_backup()
+    assert seen[0] is True and seen[1]["phase"] == "capture"
+    assert not daemon._backup_in_progress.is_set()
+    assert daemon._backup_progress is None
+
+
+def test_upload_step_runs_every_iteration_even_when_capture_not_due(tmp_path, bk, monkeypatch):
+    """The loop's backup step uploads every iteration while items wait, with
+    the configured budget, whether or not a capture was due; progress is
+    stamped for the watchdog and surfaced as backup_running."""
+    server = _UpServer()
+    cfg = _backup_config(server, settings=_bo.Settings(upload_budget_s=42))
+    clock = _Clock()
+    daemon = _daemon(tmp_path, cfg, interval=3600.0, clock=clock,
+                     wall=_Clock(1_790_000_000.0))
+    assert daemon.maybe_backup()["captured"] is True
+
+    steps, running, stamped = [], [], []
+    real_upload = _bu.upload_step
+
+    def upload(home, **kw):
+        steps.append(kw["budget_s"])
+        if len(steps) == 1:
+            # First iteration: Drive unreachable, nothing moves.
+            return _bu.StepResult(committed=[], progress=None, error="offline",
+                                  pending=1, pending_bytes=1)
+
+        def on_progress(p):
+            kw_on(p)
+            running.append(daemon.status()["backup_running"])
+            stamped.append(daemon._progress.get("backup"))
+        kw_on = kw["on_progress"]
+        kw["on_progress"] = on_progress
+        return real_upload(home, **kw)
+    monkeypatch.setattr(daemon_module.backup_uploader, "upload_step", upload)
+
+    capture_calls = _spy_capture(monkeypatch)
+    for _ in range(2):
+        clock.advance(10.0)   # capture not due
+        daemon._backup_under_bulk_lock()
+    assert capture_calls == [], "capture ran although it was not due"
+    assert steps == [42.0, 42.0], "upload did not run every iteration"
+    assert running and running[0]["phase"] == "upload"
+    assert {"sent", "total", "item"} <= set(running[0])
+    assert stamped and all(s is not None for s in stamped)
+    assert daemon.status()["backup"]["pending"] == 0
+    assert daemon.status()["backup_running"] is None
+
+    # Outbox empty: the next iteration makes no Drive call at all.
+    daemon._backup_under_bulk_lock()
+    assert len(steps) == 2
+
+
+def test_upload_and_capture_skipped_while_restore_pending(tmp_path, bk, monkeypatch):
+    cfg = _backup_config()
+    daemon = _daemon(tmp_path, cfg)
     daemon.maybe_backup()
+    daemon._restore_pending = True
+    called = []
+    monkeypatch.setattr(daemon_module.backup_uploader, "upload_step",
+                        lambda *a, **k: called.append(1))
+    assert daemon.maybe_backup() == {"captured": False, "skipped": "restore_pending"}
+    assert daemon.upload_backup_step() is None
+    assert called == []
 
-    state = _backup_state(tmp_path)
-    assert state is not None, "no backup_state.json written"
-    assert state["consecutive_failures"] == 2
-    assert "simulated Drive error" in state["last_error"]
 
-
-def test_maybe_backup_records_success_and_clears_the_failure_run(tmp_path, monkeypatch):
-    monkeypatch.setenv("MCPBRAIN_HOME", str(tmp_path))
-    store = _store_with_chunk(tmp_path)
-    files = _RaisingFiles(list_response={"files": []})
-    cfg = _backup_config(tmp_path, files)
-    daemon = Daemon(store, FakeEmbedder(), services={},
-                    lock=SingleWriterLock(tmp_path / "d.lock"),
-                    backup=cfg, backup_interval_s=0.0, clock=_Clock())
-
+def test_failed_upload_steps_count_and_rebuild_clients_after_two(tmp_path, bk, monkeypatch):
+    """Each failed upload step counts as a failure; at two in a row the Drive
+    service and the upload transport are rebuilt (a fresh BackupConfig)."""
+    cfg = _backup_config()
+    daemon = _daemon(tmp_path, cfg)
     daemon.maybe_backup()
-    assert _backup_state(tmp_path)["consecutive_failures"] == 1
+    monkeypatch.setattr(daemon_module.backup_uploader, "upload_step",
+                        lambda home, **kw: _bu.StepResult(
+                            [], None, "boom", 1, 1))
+    write = daemon_module.write_backup_state
+    write(str(bk), ok=False, error="boom")   # what upload_step records itself
+    rebuilt = {"drive": 0, "transport": 0}
 
-    files.heal()
-    daemon.maybe_backup()
-
-    state = _backup_state(tmp_path)
-    assert state["consecutive_failures"] == 0
-    assert state["last_success"] is not None
-
-
-def test_maybe_backup_rebuilds_drive_service_after_two_consecutive_failures(tmp_path, monkeypatch):
-    monkeypatch.setenv("MCPBRAIN_HOME", str(tmp_path))
-    store = _store_with_chunk(tmp_path)
-    cfg = _backup_config(tmp_path, _RaisingFiles(list_response={"files": []}))
-    daemon = Daemon(store, FakeEmbedder(), services={},
-                    lock=SingleWriterLock(tmp_path / "d.lock"),
-                    backup=cfg, backup_interval_s=0.0, clock=_Clock())
-
-    rebuilt = {"count": 0}
-
-    def _fake_build():
-        rebuilt["count"] += 1
+    def build_drive():
+        rebuilt["drive"] += 1
         return object()
 
-    monkeypatch.setattr("mcpbrain.daemon._build_drive_service", _fake_build)
+    def build_transport(*a, **k):
+        rebuilt["transport"] += 1
+        return object()
+    monkeypatch.setattr(daemon_module, "_build_drive_service", build_drive)
+    monkeypatch.setattr(daemon_module, "_build_backup_transport", build_transport)
 
-    daemon.maybe_backup()  # 1st failure: consecutive_failures becomes 1, no rebuild
-    assert rebuilt["count"] == 0
-
-    daemon.maybe_backup()  # 2nd failure: consecutive_failures becomes 2, rebuild fires
-    assert rebuilt["count"] == 1
+    daemon.upload_backup_step()
+    assert rebuilt == {"drive": 0, "transport": 0}
+    assert daemon._backup_failures == 1
+    daemon.upload_backup_step()
+    assert rebuilt == {"drive": 1, "transport": 1}
     assert daemon._backup.drive_service is not cfg.drive_service
+    assert daemon._backup.transport is not cfg.transport
+    assert cfg.transport is not None, "the caller's BackupConfig was mutated"
 
 
-def test_backup_artifact_decrypts_to_a_valid_store(tmp_path, monkeypatch):
-    # Isolate the home so the bundle reflects this test's data, not the dev box.
-    monkeypatch.setenv("MCPBRAIN_HOME", str(tmp_path))
-    store = _store_with_chunk(tmp_path)
-    store.upsert_entity("dana-okafor", "Dana Okafor", "person", org="Acme")
-    store.set_cursor("gmail", "cursor-42")
-
-    files = FakeFiles(list_response={"files": []})
-    key = generate_escrow_key()
-    cfg = _backup_config(tmp_path, files, key=key)
-    daemon = Daemon(store, FakeEmbedder(), services={},
-                    lock=SingleWriterLock(tmp_path / "d.lock"),
-                    backup=cfg, backup_interval_s=3600.0, clock=_Clock())
-
-    summary = daemon.maybe_backup()
-    assert summary["backed_up"] is True
-
-    # Recover via the real restore path — handles either a bare-store or a
-    # bundled (store + records + config) artifact transparently.
-    from mcpbrain import backup as _bk
-    _bk.restore(cfg.out_path, tmp_path / "restored.sqlite3", key)
-    loaded = Store(tmp_path / "restored.sqlite3", dim=4)
-    assert loaded.get_chunk("d-budget") is not None
-    assert loaded.get_entity("dana-okafor") is not None
-    assert loaded.get_cursor("gmail") == "cursor-42"
+def test_transport_built_lazily_when_missing(tmp_path, bk, monkeypatch):
+    server = _UpServer()
+    cfg = _backup_config(server, transport=None)
+    daemon = _daemon(tmp_path, cfg)
+    daemon.maybe_backup()
+    monkeypatch.setattr(daemon_module, "_build_backup_transport",
+                        lambda *a, **k: _UpTransport(server))
+    assert daemon.upload_backup_step()["committed"]
+    assert daemon._backup.transport is not None
 
 
-def test_run_loop_runs_a_backup_within_the_loop(tmp_path):
-    """run() should call maybe_backup() each iteration; with interval 0 the first
-    loop pass backs up. Proves the loop wiring, not just maybe_backup in isolation."""
+def test_transport_unavailable_is_a_recorded_failure(tmp_path, bk, monkeypatch):
+    cfg = _backup_config(transport=None)
+    daemon = _daemon(tmp_path, cfg)
+    daemon.maybe_backup()
+
+    def no_creds(*a, **k):
+        raise FileNotFoundError("google_token.json")
+    monkeypatch.setattr(daemon_module, "_build_backup_transport", no_creds)
+    out = daemon.upload_backup_step()
+    assert "transport unavailable" in out["error"]
+    assert "transport unavailable" in _backup_state(bk)["last_error"]
+    assert out["pending"] == 1
+
+
+def test_prune_runs_after_a_commit_and_surfaces_hold(tmp_path, bk, monkeypatch):
+    pruned = []
+
+    def prune(home, **kw):
+        pruned.append(kw)
+        return {"deleted": [], "held": {"newest": {"chain": "c2", "base_bytes": 10},
+                                        "previous": {"chain": "c1", "base_bytes": 1000}}}
+    monkeypatch.setattr(daemon_module.backup_prune, "prune_step", prune)
+    cfg = _backup_config(settings=_bo.Settings(retain_days=3))
+    daemon = _daemon(tmp_path, cfg)
+    daemon.upload_backup_step()
+    assert pruned == [], "an idle iteration pruned"
+    daemon.maybe_backup()
+    daemon.upload_backup_step()
+    assert len(pruned) == 1 and pruned[0]["retain_days"] == 3
+    assert 0 < pruned[0]["budget_s"] <= 60
+    held = daemon.status()["prune_held"]
+    assert held["newest_bytes"] == 10 and held["largest_kept_bytes"] == 1000
+
+
+def test_status_backup_block_shape(tmp_path, bk):
+    cfg = _backup_config()
+    daemon = _daemon(tmp_path, cfg)
+    want = {"restore_point", "pending", "pending_bytes", "uploading", "chain",
+            "delta_ratio", "last_error", "last_discard"}
+    empty = daemon.status()["backup"]
+    assert set(empty) == want
+    assert empty["pending"] == 0 and empty["chain"] is None
+
+    item = daemon.maybe_backup()["item"]
+    blk = daemon.status()["backup"]
+    assert blk["pending"] == 1 and blk["pending_bytes"] > 0
+    assert blk["chain"] == item.rsplit("-", 1)[0]
+    assert blk["delta_ratio"] == 0.0
+    assert blk["uploading"] is None and blk["restore_point"] is None
+
+    daemon._backup_progress = {"phase": "upload", "started": 1.0, "sent": 5,
+                               "total": 10, "item": item}
+    assert daemon.status()["backup"]["uploading"]["sent"] == 5
+    daemon._backup_progress = None
+    daemon.upload_backup_step()
+    blk = daemon.status()["backup"]
+    assert blk["pending"] == 0 and blk["restore_point"] is not None
+    assert blk["last_error"] is None
+
+
+# ---------------------------------------------------------------------------
+# the run loop
+# ---------------------------------------------------------------------------
+
+
+def test_run_loop_captures_and_uploads_within_the_loop(tmp_path, bk):
+    """run() calls the backup step each iteration: with interval 0 the first
+    pass captures and the upload commits it."""
     store = _make_store(tmp_path)
     store.upsert_chunk("d-budget", "the annual budget review", "h1", {})
-    files = FakeFiles(list_response={"files": []})
-    cfg = _backup_config(tmp_path, files)
-    daemon = Daemon(store, FakeEmbedder(), services={},
-                    interval_s=0.01,
+    server = _UpServer()
+    cfg = _backup_config(server)
+    daemon = Daemon(store, FakeEmbedder(), services={}, interval_s=0.01,
                     lock=SingleWriterLock(tmp_path / "d.lock"),
                     backup=cfg, backup_interval_s=0.0, clock=_Clock())
 
     t = threading.Thread(target=daemon.run)
     t.start()
-    poll = threading.Event()  # never set; bounded sleep
-    deadline = time.monotonic() + 5.0
-    while not cfg.out_path.exists():
+    deadline = time.monotonic() + 10.0
+    while (_backup_state(bk) or {}).get("restore_point") is None:
         if time.monotonic() >= deadline or not t.is_alive():
             break
-        poll.wait(0.01)
+        threading.Event().wait(0.02)
     daemon.stop()
     t.join(timeout=5.0)
 
     assert not t.is_alive(), "run() did not return promptly after stop()"
-    assert cfg.out_path.exists(), "loop did not produce a backup artifact"
+    assert (_backup_state(bk) or {}).get("restore_point"), "loop did not commit a backup"
 
 
-def test_run_loop_holds_the_bulk_lock_across_the_backup(tmp_path):
-    """maybe_backup must run under _bulk_lock, exactly as run_one() does.
-
-    The original reason (a busy wal_checkpoint aborting, or a racing write
-    tripping wal_autocheckpoint mid-copy2 and tearing the snapshot) no longer
-    applies — snapshot() uses VACUUM INTO and does neither. The lock is still
-    required because that rebuild pins a read transaction for minutes, during
-    which no checkpoint can advance and the WAL grows; holding the
-    chunk-writing passes off bounds it.
-    """
+def test_backup_step_does_not_hold_the_bulk_lock(tmp_path):
+    """The loop's backup step no longer runs under _bulk_lock: capture takes
+    it inside, for the copy only, and the upload never holds it."""
     store = _make_store(tmp_path)
     daemon = Daemon(store, FakeEmbedder(), services={}, interval_s=0.01,
                     lock=SingleWriterLock(tmp_path / "d.lock"))
-    locked_during_backup = []
-    daemon.maybe_backup = lambda: locked_during_backup.append(daemon._bulk_lock.locked())
+    seen = []
+    daemon.maybe_backup = lambda: seen.append(("capture", daemon._bulk_lock.locked()))
+    daemon.upload_backup_step = lambda: seen.append(("upload", daemon._bulk_lock.locked()))
 
-    t = threading.Thread(target=daemon.run)
-    t.start()
-    deadline = time.monotonic() + 5.0
-    while not locked_during_backup and time.monotonic() < deadline:
-        threading.Event().wait(0.01)
-    daemon.stop()
-    t.join(timeout=5.0)
+    daemon._backup_under_bulk_lock()
 
-    assert locked_during_backup, "maybe_backup was never called from the loop"
-    assert all(locked_during_backup), "maybe_backup ran without holding _bulk_lock"
+    assert seen == [("capture", False), ("upload", False)]
 
 
-def test_backup_skips_rather_than_blocking_when_bulk_lock_is_held(tmp_path):
-    """The other side of test_run_loop_holds_the_bulk_lock_across_the_backup: the
-    cycle thread's acquire of _bulk_lock around maybe_backup() must be BOUNDED,
-    the same shape (BULK_LOCK_ACQUIRE_S) as the four gated maintenance passes'
-    own acquire on the other side of this lock (see
-    test_maintenance_scheduler.test_dispatch_skips_a_lock_gated_pass_rather_than_blocking_forever).
-
-    A gated pass's own execution time is not bounded by that plan -- only its
-    acquire is -- so a pass like _run_salience_score's `while rounds < 500` loop
-    or stale_reextract's network-touching sweep can legitimately hold
-    _bulk_lock past one maintenance tick. Before this fix, run()'s backup call
-    did a plain `with self._bulk_lock:`, which would park the cycle thread for
-    that pass's whole duration -- a new, narrower echo of the same
-    unbounded-lock-blocks-the-other-side problem the bounded gated-pass acquire
-    already solved. Real thread, real lock -- no mocked locks.
-    """
-    store = _make_store(tmp_path)
-    daemon = Daemon(store, FakeEmbedder(), services={}, interval_s=0.01,
-                    lock=SingleWriterLock(tmp_path / "d.lock"))
-    daemon._bulk_lock_wait_s = 0.15
-    backup_calls = []
-    daemon.maybe_backup = lambda: backup_calls.append(1)
-    daemon._last_backup = None  # sentinel: a skip must not falsely advance this
-
-    release_lock = threading.Event()
-    acquired = threading.Event()
-
-    def _hold():
-        with daemon._bulk_lock:
-            acquired.set()
-            release_lock.wait(timeout=5.0)
-
-    holder = threading.Thread(target=_hold, daemon=True)
-    holder.start()
-    assert acquired.wait(timeout=2.0), "lock holder never acquired _bulk_lock"
-
-    try:
-        started = time.monotonic()
-        daemon._backup_under_bulk_lock()  # must RETURN promptly, lock still held
-        elapsed = time.monotonic() - started
-    finally:
-        release_lock.set()
-        holder.join(timeout=2.0)
-
-    assert not holder.is_alive()
-    assert elapsed < 2.0, f"backup blocked {elapsed:.1f}s on a held bulk lock"
-    assert backup_calls == [], "maybe_backup ran while the bulk lock was held elsewhere"
-    assert daemon._last_backup is None, "a skipped backup must not advance _last_backup"
-
-
-# ---------------------------------------------------------------------------
-# construction-time validation: backup_interval_s is required when backup is on
-# ---------------------------------------------------------------------------
-
-def test_daemon_raises_if_backup_configured_without_interval(tmp_path):
-    """Daemon(backup=<cfg>, backup_interval_s=None) must raise ValueError immediately.
-
-    Without this guard the first maybe_backup() call succeeds (self._last_backup
-    is None), but the second call does ``elapsed < None`` which raises TypeError
-    and is swallowed by the broad except, causing a silent perpetual-failure loop.
-    Fail loud at construction time instead.
-    """
-    store = _store_with_chunk(tmp_path)
-    files = FakeFiles(list_response={"files": []})
-    cfg = _backup_config(tmp_path, files)
-
+def test_daemon_raises_if_backup_configured_without_interval(tmp_path, bk):
     with pytest.raises(ValueError, match="backup_interval_s"):
-        Daemon(store, FakeEmbedder(), services={},
+        Daemon(_store_with_chunk(tmp_path), FakeEmbedder(), services={},
                lock=SingleWriterLock(tmp_path / "d.lock"),
-               backup=cfg, backup_interval_s=None)
+               backup=_backup_config(), backup_interval_s=None)
 
 
-def test_daemon_constructs_fine_when_backup_is_not_configured(tmp_path):
-    """backup=None, backup_interval_s=None is the normal unconfigured case and
-    must not raise."""
+def test_daemon_constructs_fine_when_backup_is_not_configured(tmp_path, bk):
     store = _store_with_chunk(tmp_path)
     daemon = Daemon(store, FakeEmbedder(), services={},
                     lock=SingleWriterLock(tmp_path / "d.lock"))

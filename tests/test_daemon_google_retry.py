@@ -184,8 +184,11 @@ def test_backoff_doubles_and_caps_at_900s():
 
 def _configure_backup(home):
     from mcpbrain import config
+    from mcpbrain.backup import generate_escrow_key
+    # A real Fernet key: capture encrypts the outbox with it.
     config.write_config(str(home), {"backup": {
-        "escrow_key": "k" * 44, "shared_drive_id": "SD", "user_id": "u1"}})
+        "escrow_key": generate_escrow_key().decode(), "shared_drive_id": "SD",
+        "user_id": "u1"}})
 
 
 def test_backup_transient_build_failure_rebuilds_later_and_backs_up(home, monkeypatch):
@@ -213,16 +216,20 @@ def test_backup_transient_build_failure_rebuilds_later_and_backs_up(home, monkey
     assert d._backup_interval_s == dmod.DEFAULT_BACKUP_INTERVAL_S
     assert d.google_unavailable() is None
 
-    # ... and a backup is now actually possible.
+    # ... and a backup is now actually possible: a capture, then an upload
+    # through the rebuilt Drive service.
     uploaded = []
     monkeypatch.setattr(dmod, "_mac_user_is_active", lambda: True)
-    monkeypatch.setattr(dmod, "make_encrypted_snapshot", lambda *a, **k: home / "snap.enc")
-    monkeypatch.setattr(dmod, "upload_snapshot",
-                        lambda svc, path, sd, uid, **kw: uploaded.append(svc) or "FILE1")
-    monkeypatch.setattr("mcpbrain.backup.prune_snapshots", lambda *a, **k: None)
+    monkeypatch.setattr(dmod, "_build_backup_transport", lambda *a, **k: "TRANSPORT")
+    monkeypatch.setattr(dmod.backup_uploader, "upload_step",
+                        lambda h, **kw: uploaded.append((kw["drive_service"],
+                                                         kw["transport"]))
+                        or dmod.backup_uploader.StepResult([], None, None, 0, 0))
+    d._store.upsert_chunk("d-1", "content", "h1", {})
     out = d.maybe_backup()
-    assert out["backed_up"] is True
-    assert uploaded == [drive]
+    assert out["captured"] is True
+    d.upload_backup_step()
+    assert uploaded == [(drive, "TRANSPORT")]
 
 
 def test_backup_permanent_build_failure_stays_disabled(home, monkeypatch):
@@ -350,7 +357,7 @@ def _restore_rig(home, monkeypatch, *, snapshot="SNAP1", find_errors=(), build_e
                  restore_error=None):
     """Backup config + Drive stand-ins. Returns a dict of call records."""
     _configure_backup(home)
-    rec = {"restored": [], "uploaded": [], "pruned": [], "gates": []}
+    rec = {"restored": [], "captured": [], "uploaded": [], "pruned": [], "gates": []}
     build = FlakyBuild(*build_errors, result={"drive_service": "DRIVE"})
     monkeypatch.setattr(auth, "build_google_services", build)
     rec["build"] = build
@@ -378,10 +385,11 @@ def _restore_rig(home, monkeypatch, *, snapshot="SNAP1", find_errors=(), build_e
     monkeypatch.setattr(dmod.backup_restore, "candidates", candidates)
     monkeypatch.setattr(dmod.backup_restore, "restore_latest", restore_latest)
     monkeypatch.setattr(dmod, "_mac_user_is_active", lambda: True)
-    monkeypatch.setattr(dmod, "make_encrypted_snapshot", lambda *a, **k: home / "snap.enc")
-    monkeypatch.setattr(dmod, "upload_snapshot",
-                        lambda svc, path, sd, uid, **kw: rec["uploaded"].append(path) or "F")
-    monkeypatch.setattr("mcpbrain.backup.prune_snapshots",
+    monkeypatch.setattr(dmod.backup_outbox, "capture",
+                        lambda *a, **k: rec["captured"].append(1))
+    monkeypatch.setattr(dmod.backup_uploader, "upload_step",
+                        lambda *a, **k: rec["uploaded"].append(1))
+    monkeypatch.setattr(dmod.backup_prune, "prune_step",
                         lambda *a, **k: rec["pruned"].append(1))
     return rec
 
@@ -421,9 +429,10 @@ def test_hold_blocks_sync_passes_and_backup(home, monkeypatch):
     monkeypatch.setattr(d, "_run_auto_update", lambda: ran.append("auto_update"))
     d._run_periodic_passes()
     assert "auto_update" in ran and "feedback" not in ran
-    # ... and nothing is uploaded or pruned.
-    assert d.maybe_backup() == {"backed_up": False, "skipped": "restore_pending"}
-    assert rec["uploaded"] == [] and rec["pruned"] == []
+    # ... and nothing is captured, uploaded or pruned.
+    assert d.maybe_backup() == {"captured": False, "skipped": "restore_pending"}
+    assert d.upload_backup_step() is None
+    assert rec["captured"] == [] and rec["uploaded"] == [] and rec["pruned"] == []
     assert d._store.chunk_count() == 0
     st = d.status()["restore_pending"]
     assert st["since"] and st["restart_budget_spent"] is False
@@ -549,7 +558,7 @@ def test_n3_marker_write_failure_holds_in_memory(home, monkeypatch):
     assert dmod._read_restore_pending(str(home)) is None
     assert d._restore_pending is True
     d._backup, d._backup_interval_s = object(), 3600.0
-    assert d.maybe_backup() == {"backed_up": False, "skipped": "restore_pending"}
+    assert d.maybe_backup() == {"captured": False, "skipped": "restore_pending"}
 
 
 def test_n4_marker_with_backup_unconfigured_is_cleared(home, monkeypatch):
@@ -577,17 +586,23 @@ def test_prune_held_is_surfaced_in_status(home, monkeypatch):
     monkeypatch.setattr(auth, "build_google_services",
                         FlakyBuild(result={"drive_service": object()}))
     monkeypatch.setattr(dmod, "_mac_user_is_active", lambda: True)
-    monkeypatch.setattr(dmod, "make_encrypted_snapshot", lambda *a, **k: home / "s.enc")
-    monkeypatch.setattr(dmod, "upload_snapshot", lambda *a, **kw: "F")
+    monkeypatch.setattr(dmod, "_build_backup_transport", lambda *a, **k: "T")
+    monkeypatch.setattr(dmod.backup_uploader, "upload_step",
+                        lambda *a, **kw: dmod.backup_uploader.StepResult(
+                            ["chain-x-000001"], None, None, 0, 0))
 
-    def prune(*a, held=None, **k):
-        held.update(newest_bytes=10, largest_kept_bytes=1000)
-        return 0
-    monkeypatch.setattr("mcpbrain.backup.prune_snapshots", prune)
+    def prune(home_, **k):
+        return {"deleted": [], "held": {
+            "newest": {"chain": "chain-b", "base_bytes": 10},
+            "previous": {"chain": "chain-a", "base_bytes": 1000}}}
+    monkeypatch.setattr(dmod.backup_prune, "prune_step", prune)
     d = _daemon(home, Clock())
+    d._store.upsert_chunk("d-1", "content", "h1", {})
     d.apply_config({})
-    assert d.maybe_backup()["backed_up"] is True
-    assert d.status()["prune_held"] == {"newest_bytes": 10, "largest_kept_bytes": 1000}
+    assert d.maybe_backup()["captured"] is True
+    d.upload_backup_step()
+    held = d.status()["prune_held"]
+    assert held["newest_bytes"] == 10 and held["largest_kept_bytes"] == 1000
 
 
 # -- the restoring gate + the busy-checked swap (real sqlite) -----------------

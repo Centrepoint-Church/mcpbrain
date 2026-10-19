@@ -96,3 +96,71 @@ def test_credentials_unavailable_disables_backup(tmp_path, monkeypatch):
     monkeypatch.setattr(dmod.auth, "build_google_services", _boom)
     # Graceful degradation: no exception propagates.
     assert dmod._backup_from_config(str(tmp_path)) == (None, None)
+
+
+# -- incremental backup: settings + upload transport (Task 9) -----------------
+
+def _cfg(tmp_path, **extra):
+    write_config(str(tmp_path), {"backup": {"escrow_key": "k" * 44, "shared_drive_id": "D",
+                                            "user_id": "sam", **extra}})
+
+
+def test_settings_come_from_the_backup_block(tmp_path, monkeypatch):
+    _cfg(tmp_path, capture_interval_s=1800, retain=5, base_threshold=0.25,
+         upload_budget_s=30, outbox_max_bytes=1000)
+    monkeypatch.setattr(dmod.auth, "build_google_services",
+        lambda **kw: {"drive_service": "DRIVE"})
+    bc, interval = dmod._backup_from_config(str(tmp_path))
+    s = bc.settings
+    assert interval == 1800.0 and s.capture_interval_s == 1800.0
+    assert s.retain_days == 5.0          # old `retain` count read as days
+    assert s.base_threshold == 0.25 and s.upload_budget_s == 30.0
+    assert s.outbox_max_bytes == 1000
+    assert not hasattr(bc, "out_path")
+
+
+@pytest.mark.parametrize("key,bad", [("capture_interval_s", "hourly"),
+                                     ("upload_budget_s", 0), ("retain_days", -1),
+                                     ("outbox_max_bytes", None)])
+def test_invalid_setting_falls_back_to_its_default(tmp_path, monkeypatch, key, bad):
+    from mcpbrain import backup_outbox
+    _cfg(tmp_path, **{key: bad})
+    monkeypatch.setattr(dmod.auth, "build_google_services",
+        lambda **kw: {"drive_service": "DRIVE"})
+    bc, _ = dmod._backup_from_config(str(tmp_path))
+    assert bc is not None
+    assert bc.settings == backup_outbox.Settings()
+
+
+def test_transport_is_none_without_a_token_and_backup_stays_on(tmp_path, monkeypatch):
+    _cfg(tmp_path)
+    monkeypatch.setattr(dmod.auth, "build_google_services",
+        lambda **kw: {"drive_service": "DRIVE"})
+
+    def no_token(*a, **k):
+        raise FileNotFoundError("google_token.json")
+    monkeypatch.setattr(dmod.auth, "load_credentials", no_token)
+    bc, _ = dmod._backup_from_config(str(tmp_path))
+    assert bc is not None and bc.transport is None
+
+
+def test_transport_built_from_the_same_token_with_the_upload_timeout(tmp_path, monkeypatch):
+    _cfg(tmp_path)
+    monkeypatch.setattr(dmod.auth, "build_google_services",
+        lambda **kw: {"drive_service": "DRIVE"})
+    creds = object()
+    seen = {}
+
+    def load(*a, token_file=None, **k):
+        seen["token_file"] = token_file
+        return creds
+
+    def transport(c, timeout_s):
+        seen["creds"], seen["timeout"] = c, timeout_s
+        return "TRANSPORT"
+    monkeypatch.setattr(dmod.auth, "load_credentials", load)
+    monkeypatch.setattr(dmod.drive_resumable, "authorized_transport", transport)
+    bc, _ = dmod._backup_from_config(str(tmp_path))
+    assert bc.transport == "TRANSPORT"
+    assert seen == {"token_file": tmp_path / "google_token.json", "creds": creds,
+                    "timeout": dmod.auth.DEFAULT_HTTP_TIMEOUT_S}

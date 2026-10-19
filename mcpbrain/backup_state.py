@@ -69,14 +69,29 @@ def write_backup_state(home, *, ok: bool, error: str | None = None,
         "last_error": None if ok else error,
         "restore_point": (restore_point if restore_point is not None
                           else prev.get("restore_point")),
+        # Carried forward: record_discard writes it, every attempt keeps it.
+        "last_discard": prev.get("last_discard"),
     }
-    # Atomic write (temp file in the same dir + os.replace): a reader
-    # (probes._read_backup_state, last_backup_attempt_epoch) must never see a
-    # truncated or half-written file -- a crash or concurrent read mid-write
-    # over an in-place write_text would otherwise corrupt the ONLY durable
-    # record of whether a backup actually landed, and probes.py's own
-    # corrupt-file handling would then read it as "no recent backup" (see
-    # `_read_backup_state`).
+    _write(path, state)
+    return state
+
+
+def _read(path: Path) -> dict:
+    try:
+        prev = json.loads(path.read_text())
+    except (OSError, ValueError):
+        return {}
+    return prev if isinstance(prev, dict) else {}
+
+
+def _write(path: Path, state: dict) -> None:
+    """Atomic write (temp file in the same dir + os.replace): a reader
+    (probes._read_backup_state, last_backup_attempt_epoch) must never see a
+    truncated or half-written file -- a crash or concurrent read mid-write
+    over an in-place write_text would otherwise corrupt the ONLY durable
+    record of whether a backup actually landed, and probes.py's own
+    corrupt-file handling would then read it as "no recent backup" (see
+    `_read_backup_state`). Best-effort: a failure is logged, never raised."""
     try:
         fd, tmp = tempfile.mkstemp(dir=str(path.parent), prefix=".backup_state.",
                                    suffix=".tmp")
@@ -92,4 +107,18 @@ def write_backup_state(home, *, ok: bool, error: str | None = None,
             raise
     except OSError as exc:
         log.warning("backup state write failed (continuing): %s", exc)
+
+
+def record_discard(home, *, item: str, reason: str, at: float | None = None) -> dict:
+    """Record that the uploader DISCARDED a local outbox item (a corrupt or
+    broken item, or a chain gap: the item and the rest of its chain are
+    dropped and the next capture is a base). Stored as `last_discard`
+    {at, item, reason} beside the attempt fields, which it leaves untouched --
+    a discard is neither a success nor a failure of the attempt, but a person
+    must be able to see that a restore point was thrown away. Best-effort."""
+    path = Path(home) / "backup_state.json"
+    state = _read(path)
+    state["last_discard"] = {"at": time.time() if at is None else at,
+                             "item": item, "reason": reason}
+    _write(path, state)
     return state

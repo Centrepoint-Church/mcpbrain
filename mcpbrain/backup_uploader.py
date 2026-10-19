@@ -50,7 +50,7 @@ import json
 import logging
 import os
 import time
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Callable
 
 from googleapiclient.http import MediaInMemoryUpload
@@ -90,6 +90,10 @@ class StepResult:
     error: str | None
     pending: int
     pending_bytes: int
+    # Items this step discarded locally (corrupt / broken / chain gap), each
+    # {"item", "reason"}: a restore point thrown away, which the daemon
+    # records as backup_state `last_discard` so a person can see it.
+    discarded: list[dict] = field(default_factory=list)
 
 
 def journal_path(home):
@@ -267,8 +271,10 @@ def _delete_local(home, item: bo.Item) -> None:
     (ob / f"{item.name}.json").unlink(missing_ok=True)
 
 
-def _discard_from(home, j: dict, item: bo.Item, why: str) -> int:
-    """Discard `item` and every later item of its chain; next capture = base."""
+def _discard_from(home, j: dict, item: bo.Item, why: str,
+                  sink: list | None = None) -> int:
+    """Discard `item` and every later item of its chain; next capture = base.
+    Appends {"item", "reason"} to `sink` (the step's report) when given."""
     victims = [it for it in bo.pending_items(home)
                if it.chain == item.chain and it.seq >= item.seq]
     for it in victims:
@@ -286,6 +292,8 @@ def _discard_from(home, j: dict, item: bo.Item, why: str) -> int:
     log.warning("backup chain %s: discarded %s and %d later item(s) (%s); "
                 "the next capture starts a new base", item.chain, item.name,
                 len(victims) - 1, why)
+    if sink is not None:
+        sink.append({"item": item.name, "reason": why})
     return len(victims)
 
 
@@ -365,16 +373,17 @@ def upload_step(home, *, drive_service, transport, key, budget_s,
     """
     deadline = clock() + budget_s
     committed: list[str] = []
+    discarded: list[dict] = []
     state = {"progress": None, "moved": False, "stalled": None}
 
     if not bo.pending_items(home):
-        return _result(home, committed, None, None)
+        return _result(home, committed, None, None, discarded)
 
     j = load_journal(home)
     error: str | None = None
     try:
         committed += _finish_committed(home, j)
-        _coalesce(home, key, j, deadline=deadline, clock=clock)
+        _coalesce(home, key, j, deadline=deadline, clock=clock, sink=discarded)
         loc = None
         while clock() < deadline:
             items = bo.pending_items(home)
@@ -388,10 +397,11 @@ def upload_step(home, *, drive_service, transport, key, budget_s,
             if not _continuous(j, item):
                 _discard_from(home, j, item,
                               f"gap: follows seq {item.prev_seq}, chain has "
-                              f"{_committed_seq(j, item.chain)} committed")
+                              f"{_committed_seq(j, item.chain)} committed",
+                              sink=discarded)
                 continue
             if not _locally_complete(home, j, item):
-                _discard_from(home, j, item, "local files missing")
+                _discard_from(home, j, item, "local files missing", sink=discarded)
                 continue
             if loc is None:
                 loc = backup_location.resolve(home, drive_service, create=True)
@@ -400,7 +410,7 @@ def upload_step(home, *, drive_service, transport, key, budget_s,
                                   deadline=deadline, clock=clock, sleep=sleep,
                                   wall=wall, on_progress=on_progress, state=state)
             except _Discard as d:
-                _discard_from(home, j, d.item, d.why)
+                _discard_from(home, j, d.item, d.why, sink=discarded)
                 continue
             if not ok:
                 break
@@ -419,10 +429,10 @@ def upload_step(home, *, drive_service, transport, key, budget_s,
         except OSError as exc:
             log.warning("backup journal write failed: %s", exc)
         write_backup_state(home, ok=False, error=error)
-    return _result(home, committed, state["progress"], error)
+    return _result(home, committed, state["progress"], error, discarded)
 
 
-def _coalesce(home, key, j: dict, *, deadline, clock) -> None:
+def _coalesce(home, key, j: dict, *, deadline, clock, sink=None) -> None:
     """Merge runs of not-started deltas within the step's budget. A failure
     never blocks uploads: a corrupt local file is pinned on its item, which is
     discarded (new base); anything else is logged and merging is skipped."""
@@ -446,7 +456,8 @@ def _coalesce(home, key, j: dict, *, deadline, clock) -> None:
                 log.warning("backup: merging pending deltas failed (%s); uploading "
                             "them unmerged", exc)
                 return
-            _discard_from(home, j, bad, f"corrupt local file found while merging: {exc}")
+            _discard_from(home, j, bad, f"corrupt local file found while merging: {exc}",
+                          sink=sink)
 
 
 def _upload_item(home, svc, transport, key, j, loc, item: bo.Item, *, deadline,
@@ -575,7 +586,7 @@ def _commit(home, svc, key, j: dict, item: bo.Item, folder: str, wall) -> None:
     _finish_local(home, item)
 
 
-def _result(home, committed, progress, error) -> StepResult:
+def _result(home, committed, progress, error, discarded=None) -> StepResult:
     items = bo.pending_items(home)
     ob = bo.outbox_dir(home)
     pending_bytes = 0
@@ -586,4 +597,5 @@ def _result(home, committed, progress, error) -> StepResult:
             except OSError:
                 pass
     return StepResult(committed=committed, progress=progress, error=error,
-                      pending=len(items), pending_bytes=pending_bytes)
+                      pending=len(items), pending_bytes=pending_bytes,
+                      discarded=list(discarded or []))

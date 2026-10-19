@@ -414,6 +414,9 @@ def test_gap_in_chain_forces_new_base(env, caplog):
         res = env.step()
     assert res.committed == [base.name]
     assert res.error is None
+    # R14: the discard is reported to the caller, not only logged.
+    assert [d["item"] for d in res.discarded] == [d3.name]
+    assert "gap" in res.discarded[0]["reason"]
     assert bo.pending_items(env.home) == []
     assert not (bo.backup_dir(env.home) / "capture.json").exists()
     gap_logs = [r for r in caplog.records if "gap" in r.getMessage()]
@@ -668,6 +671,7 @@ def test_local_file_not_matching_sidecar_is_never_uploaded(env):
     t = FakeTransport(env.server)
     res = env.step(transport=t)
     assert res.committed == []
+    assert [d["item"] for d in res.discarded] == [base.name]
     assert not [s for s in env.server.sessions.values()
                 if s["meta"]["name"] == bad["name"]]
     assert not [n for m in env.svc._all().values()

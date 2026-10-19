@@ -16,8 +16,9 @@ Carry-forwards (out of scope for Task 3.1):
 - Backup-in-loop: wired in Task H2. maybe_backup() runs each loop iteration and
   self-gates: OFF unless a BackupConfig is supplied (escrow key + injected Drive
   service + Shared Drive id + user_id), then time-based via an injected clock. It
-  reuses make_encrypted_snapshot/upload_snapshot; a backup failure is logged and
-  swallowed so it never crashes the loop.
+  captures page deltas into the local outbox (backup_outbox); upload_backup_step
+  ships them each iteration (backup_uploader, backup_prune). A backup failure is
+  logged and swallowed so it never crashes the loop.
 - Windows lock: SingleWriterLock uses msvcrt.locking on Windows (Task H3).
   The Windows branch is marked # pragma: no cover and verified at Phase 6
   packaging on a Windows box.
@@ -43,13 +44,13 @@ import tempfile
 import threading
 import time
 from contextlib import contextmanager, nullcontext
-from dataclasses import dataclass, replace
+from dataclasses import dataclass, field, replace
 from pathlib import Path
 
 from mcpbrain import auth, backup, backup_restore, config, control_api, drain, graph_write, prepare
+from mcpbrain import backup_outbox, backup_prune, backup_uploader, drive_resumable
 from mcpbrain.agents import win_supervised
-from mcpbrain.backup import make_encrypted_snapshot, upload_snapshot
-from mcpbrain.backup_state import write_backup_state  # noqa: F401 — re-exported; moved there
+from mcpbrain.backup_state import record_discard, write_backup_state  # noqa: F401 — re-exported; moved there
 from mcpbrain.budget import Budget
 from mcpbrain.config import app_dir
 from mcpbrain.retrieval import FUSION_DEPTH, hybrid_search
@@ -406,29 +407,27 @@ def run_ocr_setup(home: str) -> dict:
 
 @dataclass
 class BackupConfig:
-    """Config for the daemon's periodic encrypted backup (Task H2).
+    """Config for the daemon's incremental encrypted backup.
 
     Supplying a BackupConfig is what TURNS BACKUP ON — the daemon never backs up
     when backup is None. Holds the escrow key, an INJECTED Drive service (so
     tests mock it; no real network), the Shared Drive id and per-user folder
-    name, and the local encrypted artifact path. out_path defaults to
-    app_dir()/"snapshot.enc" — a stable local encrypted artifact that is also
-    uploaded. __post_init__ resolves a None out_path to that default, so the
-    field is always a Path after construction.
+    name (`user_id` now only names a legacy folder), the `backup` config block
+    as `backup_outbox.Settings`, and the resumable-upload `transport` built
+    from the same credentials as `drive_service`. `transport` may be None: the
+    daemon then builds it on first use (`_build_backup_transport`).
+
+    Capture writes page deltas into the local outbox (`backup_outbox`); the
+    uploader ships them (`backup_uploader`); nothing is written to a single
+    `snapshot.enc` any more.
     """
 
     key: bytes
     drive_service: object
     shared_drive_id: str
     user_id: str
-    out_path: Path | None = None
-    retain: int = 7   # keep the newest N uploaded snapshots; older are pruned
-
-    def __post_init__(self):
-        self.out_path = (
-            Path(self.out_path) if self.out_path is not None
-            else app_dir() / "snapshot.enc"
-        )
+    settings: backup_outbox.Settings = field(default_factory=backup_outbox.Settings)
+    transport: object | None = None
 
 
 @dataclass
@@ -1138,11 +1137,12 @@ class Daemon:
             elapsed = max(0.0, now_wall - float(last_backup_attempt_epoch))
             self._last_backup = self._clock() - elapsed
             self._last_backup_wall = now_wall - elapsed
-        # Set for the duration of _backup_under_bulk_lock's maybe_backup() call
-        # (Task 3). The watchdog's _recover_from_stall checks this and defers
-        # recovery while it is set: os._exit bypasses `finally`, so firing mid
-        # snapshot orphans the temp dir under construction -- the mechanism that
-        # left ~24GB of mcpbrain-snap-* on disk and froze the host on 2026-07-27.
+        # Set for the duration of maybe_backup()'s capture (copy + local
+        # outbox write), never the upload. The watchdog's _recover_from_stall
+        # checks this and defers recovery while it is set: os._exit bypasses
+        # `finally`, so firing mid-capture leaves a half-written work copy --
+        # the old full-snapshot form of this left ~24GB of mcpbrain-snap-* on
+        # disk and froze the host on 2026-07-27.
         self._backup_in_progress = threading.Event()
         # Consecutive failed backups (seeded from backup_state.json at start-up
         # so a restart keeps the short retry); shortens the interval -- see
@@ -1152,6 +1152,12 @@ class Daemon:
         self._backup_requested = threading.Event()
         # Non-null while a backup runs: what it is doing, for /api/status.
         self._backup_progress: dict | None = None
+        # Set by request_backup(), cleared once the outbox is empty: upload
+        # even while a Mac is dark-waking (a person asked for it).
+        self._backup_drain_requested = threading.Event()
+        # Consecutive failed upload steps in THIS process: at 2 the Drive
+        # service and upload transport are rebuilt (see upload_backup_step).
+        self._upload_failures = 0
         # Periodic community detection is OFF unless communities_interval_s is set.
         # Tiered like resolve: OFF by default; time-based cadence via self._clock.
         self._communities_interval_s: float | None = communities_interval_s
@@ -1330,8 +1336,8 @@ class Daemon:
         # reassigns both post-construction from the `tuning` config block).
         self._bulk_lock_yield_s = BULK_LOCK_YIELD_S
         # Count of threads currently waiting to acquire _bulk_lock (the
-        # maintenance thread's _run_periodic_passes, and the cycle thread's own
-        # _backup_under_bulk_lock -- TWO independent call sites can be waiting
+        # maintenance thread's _run_periodic_passes, and the cycle thread's
+        # backup capture (_bounded_bulk_lock) -- TWO independent call sites can be waiting
         # at once). CPython locks are not FIFO-fair, so without an explicit
         # hand-off the cycle thread -- which re-acquires ~1s after releasing --
         # wins nearly every race and the four gated passes never run at all.
@@ -1340,8 +1346,8 @@ class Daemon:
         # A single threading.Event was tried first and is WRONG: one waiter's
         # cleanup (Event.clear() in its own finally) can erase another waiter's
         # still-pending "I'm waiting" signal -- e.g. maintenance sets the flag
-        # and blocks on acquire(); the cycle thread's own _backup_under_bulk_lock
-        # (same call, on the CYCLE thread) also sets the flag, wins the race,
+        # and blocks on acquire(); the cycle thread's backup capture
+        # (_bounded_bulk_lock, on the CYCLE thread) also sets the flag, wins the race,
         # runs, and clears the flag in ITS finally even though maintenance is
         # STILL genuinely waiting. The next _cycle_bulk_section release then
         # sees no intent and skips the yield pause, right when it's needed. A
@@ -1978,14 +1984,53 @@ class Daemon:
             "restore_pending": self.restore_status(),
             # Non-null after a NON-transient restore failure (not held).
             "restore_error": getattr(self, "_restore_error", None),
-            # Non-null while the snapshot prune is holding off (see backup.py).
+            # Non-null while the backup prune is holding off (backup_prune).
             "prune_held": getattr(self, "_prune_held", None),
-            # Non-null while a backup runs (phase, bytes sent) -- `mcpbrain
+            # Non-null while a backup runs: {"phase": "capture" | "upload",
+            # "started", and for upload "sent", "total", "item"} -- `mcpbrain
             # backup` polls this.
             "backup_running": getattr(self, "_backup_progress", None),
+            "backup": self._backup_status(),
             "backup_requested": bool(getattr(self, "_backup_requested", None)
                                      and self._backup_requested.is_set()),
         }
+
+    def _backup_status(self) -> dict | None:
+        """The incremental backup at a glance (spec §6): the newest committed
+        restore point (capture time), the outbox (items / bytes waiting to
+        upload), the upload in flight, the chain being captured and its delta
+        ratio (committed delta bytes / base bytes; a new base is cut past
+        settings.base_threshold), and the last error. Local reads only --
+        never a Drive call; never raises (a degraded field is None)."""
+        home = str(app_dir())
+        out = {"restore_point": None, "pending": None, "pending_bytes": None,
+               "uploading": None, "chain": None, "delta_ratio": None,
+               "last_error": None, "last_discard": None}
+        try:
+            state = json.loads((Path(home) / "backup_state.json").read_text())
+            if isinstance(state, dict):
+                out["restore_point"] = state.get("restore_point")
+                out["last_error"] = state.get("last_error")
+                out["last_discard"] = state.get("last_discard")
+        except (OSError, ValueError):
+            pass
+        try:
+            out["pending"] = len(backup_outbox.pending_items(home))
+            out["pending_bytes"] = backup_outbox.outbox_bytes(home)
+        except Exception as exc:  # noqa: BLE001 — status must never raise
+            log.debug("status: backup outbox unreadable: %s", exc)
+        try:
+            cs = backup_outbox._load_state(home)
+            if cs is not None:
+                out["chain"] = cs.chain
+                out["delta_ratio"] = (round(cs.delta_bytes / cs.base_bytes, 4)
+                                      if cs.base_bytes else None)
+        except Exception as exc:  # noqa: BLE001 — status must never raise
+            log.debug("status: backup capture state unreadable: %s", exc)
+        running = getattr(self, "_backup_progress", None)
+        if running and running.get("phase") == "upload":
+            out["uploading"] = dict(running)
+        return out
 
     def config_profile(self) -> dict:
         """Saved profile for the settings form — never includes the ClickUp secret."""
@@ -2543,13 +2588,19 @@ class Daemon:
         self._wake.set()
 
     def request_backup(self) -> bool:
-        """Make the next maybe_backup due now, regardless of the interval or the
-        failure backoff, and wake the loop. Returns False when backup is not
-        configured (nothing will run)."""
+        """Capture now and upload until the outbox is empty: makes the next
+        maybe_backup due regardless of the interval, the failure backoff and
+        the dark-wake deferral, lets uploads run on a dark-waking Mac until
+        the outbox drains, and wakes the loop. `backup_requested` (status)
+        stays true until the requested capture has been taken, found nothing
+        to capture, or failed (the error is in backup_state.json); a capture
+        skipped for a busy lock or a full outbox keeps it set. Returns False
+        when backup is not configured (nothing will run)."""
         with self._config_lock:
             if self._backup is None:
                 return False
         self._backup_requested.set()
+        self._backup_drain_requested.set()
         self._wake.set()
         return True
 
@@ -2601,7 +2652,7 @@ class Daemon:
         legitimately-long pass. Making the failure loud (rather than blocking
         longer) matches how the rest of this file treats a lock hold that can
         legitimately outlast one tick's bound (`BULK_LOCK_ACQUIRE_S`,
-        `_backup_under_bulk_lock`'s acquire): skip/log, don't block forever.
+        the backup capture's `_bounded_bulk_lock`): skip/log, don't block forever.
         """
         self._stop.set()
         t = getattr(self, "_maintenance_thread", None)
@@ -2844,47 +2895,50 @@ class Daemon:
     # -- periodic backup ----------------------------------------------------
 
     def maybe_backup(self) -> dict | None:
-        """Take an encrypted snapshot and upload it, if backup is due.
+        """CAPTURE a backup restore point into the local outbox, if one is due.
+
+        Incremental backup (spec 2026-10-19 §2): capture copies the live store
+        with SQLite's online backup API and writes only the pages that changed
+        since the last capture (plus records/config when they changed) into
+        `backup/outbox/` -- local work, seconds. Shipping it to Drive is
+        `upload_backup_step`'s job, every loop iteration, outside the bulk lock.
 
         OFF unless a BackupConfig was supplied: returns None when self._backup
-        is None (never backs up an unconfigured daemon). Otherwise gates on a
-        time-based cadence using the injected clock — due on the first call
-        (self._last_backup is None) or once backup_interval_s has elapsed since
-        the last backup. Not due -> returns None and does nothing.
+        is None. Otherwise gates on a time-based cadence using the injected
+        clock -- due on the first call (self._last_backup is None) or once
+        `backup_interval_s` (settings.capture_interval_s) has elapsed, counting
+        sleep (max of monotonic and wall-clock elapsed). After a failure the
+        interval shrinks to BACKUP_RETRY_BASE_S doubling per consecutive
+        failure. `request_backup()` makes it due now and bypasses the interval,
+        the failure backoff and the dark-wake deferral. Not due -> None.
 
-        When due, on macOS: first checks `_mac_user_is_active()` — if the
-        system is merely dark-waking (not genuinely awake), DEFERS instead of
-        attempting (returns {"backed_up": False, "deferred": True} and does
-        NOT advance the cadence clock, so the very next check retries rather
-        than waiting out the full interval). See that function's docstring
-        for the live Errno 49 incident this closes. Non-mac platforms skip
-        this check entirely.
+        When due, on macOS: defers while the system is merely dark-waking
+        (`_mac_user_is_active`), without stamping the cadence clock.
 
-        When due and (not on macOS, or the system is genuinely awake): reuses
-        backup.py's primitives — make_encrypted_snapshot produces the
-        encrypted artifact (the only artifact; no cleartext leaves the
-        machine) and upload_snapshot ships it to the per-user Shared Drive
-        folder. Returns a summary dict.
+        Skips WITHOUT stamping the cadence clock or counting a failure (so the
+        next iteration retries) when:
+        - a restore is pending (a capture of a near-empty store must never
+          become the newest restore point),
+        - the live store holds no chunks (R28: same reason),
+        - the bulk lock could not be acquired in `_bulk_lock_wait_s` (R3:
+          `backup_outbox.LockBusy`),
+        - the outbox is full (`OutboxFull`: recorded in backup_state.json as a
+          failed attempt with a clear error; uploads keep draining it).
 
-        A backup failure (e.g. a Drive error) is logged and swallowed so the
-        daemon loop keeps running — it returns {"backed_up": False, "error": ...}
-        rather than propagating. The cadence clock (_last_backup) advances on
-        every ATTEMPT, success or failure, so a failing backup retries once per
-        interval rather than on every cycle, and is advanced AGAIN on success so
-        the interval is spacing from completion rather than from start.
+        The lock passed to capture is the bulk lock with the bounded acquire
+        (`_bounded_bulk_lock`): capture holds it for the `backup()` copy only;
+        hashing, compression and encryption run on the private copy outside
+        it. `_backup_in_progress` is set around the capture only.
 
-        Layer-2 safety net: on a failure, once write_backup_state reports
-        consecutive_failures >= 2 (i.e. this is the SECOND failure in a row,
-        not the first), self._backup.drive_service is rebuilt from scratch
-        via _build_drive_service() and swapped in under _config_lock. This is
-        deliberately a higher bar than the per-call num_retries added across
-        the codebase in Tasks 1-5: that layer already retries a single flaky
-        call, so a failure that survives it and repeats is more likely a
-        persistently broken client/session (e.g. a stale OAuth token) than a
-        one-off transient blip — exactly the case a per-call retry can't fix
-        but a fresh service object can. The rebuild is itself best-effort: a
-        failure to rebuild is logged and swallowed, never raised, and never
-        blocks returning the original backup error.
+        Any other capture failure is logged and swallowed (the loop keeps
+        running), recorded via write_backup_state(ok=False), and counts toward
+        the failure backoff. The cadence clock is stamped on ATTEMPT (bounds a
+        failing capture to one attempt per backoff step) and again on success.
+        A successful capture records nothing in backup_state.json: only a
+        COMMIT (the uploader's manifest upload) is a backup that landed.
+
+        Returns {"captured": bool, ...}: "item" (the new item's name, None when
+        nothing changed), or "skipped"/"deferred"/"error".
         """
         if self._backfill_active.is_set():
             return None  # single-writer: yield to the backfill
@@ -2892,17 +2946,17 @@ class Daemon:
         # concurrent apply_config can't hand us a new config with the old
         # interval. Use the locals for the rest of the method.
         with self._config_lock:
-            backup, interval = self._backup, self._backup_interval_s
+            backup_cfg, interval = self._backup, self._backup_interval_s
 
-        if backup is None:
+        if backup_cfg is None:
             return None
 
-        # A restore that a transient outage skipped is still pending: uploading
-        # now would put a near-empty snapshot at the head of the history and the
-        # prune would rotate the good ones out. Never upload or prune until the
-        # restore has run (see RESTORE_STARTUP_WAIT_S).
+        # A restore that a transient outage skipped is still pending: capturing
+        # now would put a near-empty store at the head of the history and the
+        # prune would rotate the good ones out. Never capture, upload or prune
+        # until the restore has run (see RESTORE_STARTUP_WAIT_S).
         if getattr(self, "_restore_pending", False):
-            return {"backed_up": False, "skipped": "restore_pending"}
+            return {"captured": False, "skipped": "restore_pending"}
 
         # getattr: an instance built without __init__ has neither (same
         # convention as _last_backup_wall below).
@@ -2928,104 +2982,264 @@ class Daemon:
             if elapsed < interval:
                 return None
 
-        # A backup IS due. Before touching the cadence clock or doing any
+        # A capture IS due. Before touching the cadence clock or doing any
         # work: on macOS, defer rather than attempt if the system is merely
         # dark-waking (see _mac_user_is_active's docstring for the live
-        # incident this closes). Deliberately does NOT stamp _last_backup —
-        # the whole point is that the NEXT check (the next maintenance tick,
-        # ~60s away) re-evaluates, rather than waiting out the full interval
-        # and risking landing in the same overnight window again.
+        # incident this closes). Deliberately does NOT stamp _last_backup.
         if (not requested and sys.platform == "darwin"
                 and not _mac_user_is_active()):
-            log.info("periodic backup due, but system is dark-waking "
+            log.info("backup capture due, but system is dark-waking "
                      "(not user-active) — deferring to next check")
-            return {"backed_up": False, "deferred": True}
+            return {"captured": False, "deferred": True}
 
-        cfg = backup
-        # Stamp the cadence clock on ATTEMPT, before the work, not on success
-        # after it. A backup that can never succeed (artifact too large for the
-        # upload path, Drive persistently erroring, disk full) would otherwise
-        # stay permanently "due" and be retried on EVERY cycle. Live incident
-        # 2026-08-04: that re-snapshotted the 11.9GB store roughly every 60s,
-        # filling the temp filesystem until ENOSPC, exhausting swap, and parking
-        # the cycle thread so no heartbeat or maintenance pass ran for an hour.
-        # Backing off on attempt bounds a broken backup to one attempt/interval.
-        self._last_backup = self._clock()
-        self._last_backup_wall = self._wall_clock()
-        if requested_ev is not None:
-            requested_ev.clear()
+        # R28: an empty store must never become the newest restore point (a
+        # reinstall before its restore ran, a store swapped mid-restore). Not
+        # a failure and not an attempt: the cadence is untouched.
+        try:
+            empty = self._store.chunk_count() == 0
+        except Exception as exc:  # noqa: BLE001 — unknown is not "empty"
+            log.warning("backup capture: chunk count unavailable (%s)", exc)
+            empty = False
+        if empty:
+            if requested_ev is not None:
+                requested_ev.clear()   # nothing to capture: the request is answered
+            log.info("backup capture skipped: the store holds no chunks")
+            return {"captured": False, "skipped": "empty_store"}
+
         home = str(app_dir())
         started = self._wall_clock()
-        self._backup_progress = {"phase": "snapshot", "started": started}
-
-        def _uploaded(sent, total):
-            self._backup_progress = {"phase": "upload", "started": started,
-                                     "sent": sent, "total": total}
+        attempt_mono, attempt_wall = self._clock(), self._wall_clock()
+        self._backup_progress = {"phase": "capture", "started": started}
+        # Set around the capture only (copy + local write), never the upload:
+        # the watchdog defers recovery while it is set.
+        self._backup_in_progress.set()
         try:
-            # Bundle the whole system: store + the local records repo (world-model,
-            # continuity, memory — its only off-machine copy) + config.json.
-            path = make_encrypted_snapshot(
-                self._store.path, cfg.out_path, cfg.key,
-                records_dir=config.records_dir(home),
-                config_path=str(Path(home) / "config.json"))
-            self._backup_progress = {"phase": "upload", "started": started,
-                                     "sent": 0, "total": None}
-            file_id = upload_snapshot(
-                cfg.drive_service, path, cfg.shared_drive_id, cfg.user_id,
-                on_progress=_uploaded,
-            )
-            # Bound history: keep the newest `retain` snapshots, prune older.
-            # Best-effort — a prune failure must not fail the (successful) backup.
-            from mcpbrain.backup import prune_snapshots
-            held: dict = {}
-            prune_snapshots(cfg.drive_service, cfg.shared_drive_id, cfg.user_id,
-                            keep=cfg.retain, held=held)
-            # Surfaced on /api/status: the prune is holding off because the
-            # newest snapshot is drastically smaller than the ones it keeps.
-            self._prune_held = held or None
+            item = backup_outbox.capture(
+                home, self._store.path, backup_cfg.key,
+                lock=self._bounded_bulk_lock(),
+                settings=backup_cfg.settings, clock=self._wall_clock)
+        except backup_outbox.LockBusy as exc:
+            log.warning("backup capture skipped this cycle: %s; will retry next "
+                        "cycle", exc)
+            return {"captured": False, "skipped": "lock_busy"}
+        except backup_outbox.OutboxFull:
+            mb = backup_outbox.outbox_bytes(home) / 1_000_000
+            err = (f"outbox full: {mb:,.0f} MB waiting to upload; capture "
+                   "paused until the upload drains it")
+            log.warning("backup capture: %s", err)
+            write_backup_state(home, ok=False, error=err)
+            return {"captured": False, "error": err, "skipped": "outbox_full"}
         except Exception as exc:  # noqa: BLE001 — backup must never crash the loop
-            log.warning("periodic backup failed: %s", exc, exc_info=True)
-            bstate = write_backup_state(home, ok=False, error=str(exc))
-            # write_backup_state always sets this to prev_failures + 1 (>= 1)
-            # on the failure branch, so it's never missing/0/None here.
-            failures = bstate["consecutive_failures"]
-            self._backup_failures = failures
+            log.warning("backup capture failed: %s", exc, exc_info=True)
+            # Stamped on ATTEMPT: a capture that can never succeed (disk full)
+            # retries once per backoff step, not every cycle (2026-08-04).
+            self._last_backup, self._last_backup_wall = attempt_mono, attempt_wall
+            if requested_ev is not None:
+                requested_ev.clear()   # the request got its attempt; error is surfaced
+            bstate = write_backup_state(home, ok=False, error=f"capture failed: {exc}")
+            self._backup_failures = bstate["consecutive_failures"]
+            return {"captured": False, "error": str(exc)}
+        finally:
+            self._backup_in_progress.clear()
             self._backup_progress = None
-            if failures >= 2:
-                log.warning(
-                    "periodic backup: %d consecutive failures, rebuilding "
-                    "drive_service", failures)
-                try:
-                    fresh = _build_drive_service()
-                    with self._config_lock:
-                        if self._backup is not None:
-                            # Build a new BackupConfig rather than mutating
-                            # the caller-supplied one in place: the caller
-                            # (or a test) may still hold a reference to the
-                            # original object and shouldn't see it change
-                            # out from under them.
-                            self._backup = replace(
-                                self._backup, drive_service=fresh)
-                except Exception as rebuild_exc:  # noqa: BLE001 — best-effort
-                    log.warning("periodic backup: drive_service rebuild "
-                               "failed: %s", rebuild_exc)
-            return {"backed_up": False, "error": str(exc)}
 
-        # Re-stamp on SUCCESS as well, so the interval is measured from
-        # COMPLETION. The attempt stamp above is a floor, not the spacing: with
-        # only that stamp, effective spacing was max(interval, duration) from
-        # START, so a snapshot+upload slower than interval_s (3600s default; the
-        # live store is ~11.9GB / ~4.2GB compressed) saw elapsed > interval the
-        # instant it finished and immediately began another — back-to-back
-        # multi-GB uploads, continuously holding the bulk lock. Both stamps are
-        # needed: the attempt one bounds a FAILING backup, this one spaces a
-        # SUCCEEDING but slow one.
+        # Stamped again on completion so the interval spaces from the end.
         self._last_backup = self._clock()
         self._last_backup_wall = self._wall_clock()
         self._backup_failures = 0
-        self._backup_progress = None
-        write_backup_state(home, ok=True)
-        return {"backed_up": True, "file_id": file_id, "path": str(path)}
+        if requested_ev is not None:
+            requested_ev.clear()
+        return {"captured": item is not None,
+                "item": item.name if item is not None else None}
+
+    @contextmanager
+    def _bounded_bulk_lock(self):
+        """The bulk lock with the bounded, intent-marked acquire every other
+        cycle-thread waiter uses (see _bulk_lock_intent, BULK_LOCK_ACQUIRE_S):
+        a maintenance pass legitimately holding _bulk_lock longer than one
+        tick must not park the cycle thread. Raises backup_outbox.LockBusy on
+        timeout, which capture() lets propagate before writing anything."""
+        with self._bulk_lock_intent():
+            acquired = self._bulk_lock.acquire(timeout=self._bulk_lock_wait_s)
+        if not acquired:
+            raise backup_outbox.LockBusy(
+                f"bulk lock held for more than {self._bulk_lock_wait_s:.1f}s "
+                "(maintenance pass busy)")
+        try:
+            yield
+        finally:
+            self._bulk_lock.release()
+
+    def upload_backup_step(self) -> dict | None:
+        """Ship outbox items to Drive for at most settings.upload_budget_s,
+        then prune -- every loop iteration while backup is configured, whether
+        or not a capture was due, and OUTSIDE the bulk lock (network I/O never
+        holds it; spec §3).
+
+        Returns None when there is nothing to do (backup off, restore pending,
+        empty outbox, a dark-waking Mac with no outstanding request).
+        Otherwise {"committed", "error", "pending", "pending_bytes"}.
+
+        `backup_uploader.upload_step` records its own failure in
+        backup_state.json (ok=False) and each commit (ok=True with the
+        restore point); this method counts a failed step toward the failure
+        backoff and, at two failed steps in a row, rebuilds the Drive service
+        and the upload transport (same Layer-2 safety net as before). Items the
+        step discarded are recorded as backup_state `last_discard`. Progress is
+        stamped via _note_progress("backup") so the watchdog never reads a
+        long upload as a stall; `_backup_progress` carries the upload's
+        position for `/api/status` (`backup_running`).
+
+        Prune (`backup_prune.prune_step`) runs with the remaining budget after
+        a step that committed, or while the journal holds pending deletions
+        (an interrupted prune continues); never on an idle iteration, so an
+        empty outbox costs no Drive calls.
+        """
+        # One attribute read (atomic); the interval it is paired with is not
+        # used here. getattr: a Daemon built without __init__ has none.
+        cfg = getattr(self, "_backup", None)
+        if cfg is None or getattr(self, "_restore_pending", False):
+            return None
+        home = str(app_dir())
+        drain_ev = getattr(self, "_backup_drain_requested", None)
+        try:
+            pending = backup_outbox.pending_items(home)
+        except Exception as exc:  # noqa: BLE001 — an unreadable outbox must not crash the loop
+            log.warning("backup upload: outbox unreadable: %s", exc)
+            return None
+        journal_deletes = False
+        if not pending:
+            if drain_ev is not None:
+                drain_ev.clear()
+            try:
+                journal_deletes = bool(backup_uploader.load_journal(home)["pending_deletes"])
+            except Exception:  # noqa: BLE001 — best-effort
+                journal_deletes = False
+            if not journal_deletes:
+                return None
+        requested = bool(drain_ev is not None and drain_ev.is_set())
+        if (not requested and sys.platform == "darwin"
+                and not _mac_user_is_active()):
+            log.info("backup upload deferred: system is dark-waking")
+            return None
+
+        transport = self._backup_transport(cfg)
+        budget = float(cfg.settings.upload_budget_s)
+        clock = getattr(self, "_upload_clock", time.monotonic)
+        start = clock()
+        started = self._wall_clock()
+
+        def _progress(p):
+            self._backup_progress = {"phase": "upload", "started": started,
+                                     "sent": p.get("sent"), "total": p.get("total"),
+                                     "item": p.get("item")}
+            self._note_progress("backup")
+
+        self._note_progress("backup")
+        try:
+            if pending and transport is None:
+                err = "upload transport unavailable (Google credentials)"
+                write_backup_state(home, ok=False, error=err)
+                result = backup_uploader.StepResult(
+                    committed=[], progress=None, error=err,
+                    pending=len(pending), pending_bytes=backup_outbox.outbox_bytes(home))
+            elif pending:
+                result = backup_uploader.upload_step(
+                    home, drive_service=cfg.drive_service, transport=transport,
+                    key=cfg.key, budget_s=budget, clock=clock,
+                    wall=self._wall_clock, on_progress=_progress)
+            else:
+                result = None
+        except Exception as exc:  # noqa: BLE001 — upload_step should not raise; belt and braces
+            log.warning("backup upload step raised: %s", exc, exc_info=True)
+            write_backup_state(home, ok=False, error=f"{type(exc).__name__}: {exc}")
+            result = backup_uploader.StepResult(
+                committed=[], progress=None, error=str(exc), pending=len(pending),
+                pending_bytes=0)
+        finally:
+            self._backup_progress = None
+            self._note_progress("backup")
+
+        for d in (getattr(result, "discarded", None) or []):
+            record_discard(home, item=d.get("item"), reason=d.get("reason"),
+                           at=self._wall_clock())
+
+        if result is not None and result.error:
+            self._upload_failures = getattr(self, "_upload_failures", 0) + 1
+            self._backup_failures = backup_failures(home) or self._backup_failures + 1
+            if self._upload_failures >= 2:
+                self._rebuild_backup_clients(self._upload_failures)
+        elif result is not None:
+            self._upload_failures = 0
+            if result.committed:
+                self._backup_failures = 0
+
+        if (result is not None and result.committed) or journal_deletes:
+            remaining = budget - (clock() - start)
+            if remaining > 0:
+                try:
+                    pr = backup_prune.prune_step(
+                        home, drive_service=cfg.drive_service,
+                        retain_days=cfg.settings.retain_days,
+                        now=self._wall_clock(), budget_s=remaining)
+                    held = pr.get("held")
+                    # The doctor line's shape (newest vs largest kept bytes),
+                    # plus the chains, for /api/status.
+                    self._prune_held = ({
+                        "newest_bytes": held["newest"]["base_bytes"],
+                        "largest_kept_bytes": held["previous"]["base_bytes"],
+                        "newest_chain": held["newest"]["chain"],
+                        "previous_chain": held["previous"]["chain"],
+                    } if held else None)
+                except Exception as exc:  # noqa: BLE001 — prune is best-effort
+                    log.warning("backup prune failed: %s", exc)
+            self._note_progress("backup")
+
+        if result is None:
+            return None
+        if drain_ev is not None and result.pending == 0:
+            drain_ev.clear()
+        return {"committed": list(result.committed), "error": result.error,
+                "pending": result.pending, "pending_bytes": result.pending_bytes}
+
+    def _backup_transport(self, cfg):
+        """cfg.transport, building it (and storing it on a new BackupConfig)
+        when the startup build could not. None when credentials are missing."""
+        if cfg.transport is not None:
+            return cfg.transport
+        try:
+            transport = _build_backup_transport()
+        except Exception as exc:  # noqa: BLE001 — reported by the caller
+            log.warning("backup upload transport unavailable: %s", exc)
+            return None
+        with self._config_lock:
+            if self._backup is cfg:
+                self._backup = replace(cfg, transport=transport)
+        return transport
+
+    def _rebuild_backup_clients(self, failures: int) -> None:
+        """Layer-2 safety net: after repeated failed upload steps, build a
+        fresh Drive service AND upload transport. Per-call retries already
+        cover a flaky call; a failure that survives them and repeats is more
+        likely a persistently broken client (a stale token) than a blip.
+        Best-effort: a rebuild failure is logged, never raised. Swaps in a NEW
+        BackupConfig (never mutates the caller-supplied one)."""
+        log.warning("backup upload: %d consecutive failures, rebuilding the "
+                    "Drive service and upload transport", failures)
+        try:
+            fresh = _build_drive_service()
+        except Exception as exc:  # noqa: BLE001 — best-effort
+            log.warning("backup upload: drive_service rebuild failed: %s", exc)
+            return
+        try:
+            transport = _build_backup_transport()
+        except Exception as exc:  # noqa: BLE001 — best-effort
+            log.warning("backup upload: transport rebuild failed: %s", exc)
+            transport = None
+        with self._config_lock:
+            if self._backup is not None:
+                self._backup = replace(self._backup, drive_service=fresh,
+                                       transport=transport)
 
     @contextmanager
     def _bulk_lock_intent(self):
@@ -3035,8 +3249,8 @@ class Daemon:
         Backed by a plain counter (`_bulk_lock_waiters`, guarded by
         `_bulk_lock_waiters_lock`) rather than a single `threading.Event`: TWO
         independent call sites can be waiting on `_bulk_lock` at once
-        (`_run_periodic_passes` on the maintenance thread, and
-        `_backup_under_bulk_lock` on the cycle thread itself), and an Event
+        (`_run_periodic_passes` on the maintenance thread, and the backup
+        capture's `_bounded_bulk_lock` on the cycle thread itself), and an Event
         would let one waiter's cleanup (`.clear()` in its own `finally`) erase
         the other's still-pending signal. The counter only reads "nobody is
         waiting" once every waiter that incremented it has also decremented.
@@ -3098,7 +3312,7 @@ class Daemon:
         silent removal). See that file's module docstring for the measurements.
 
         The acquire here is deliberately UNBOUNDED (unlike
-        _backup_under_bulk_lock's bounded, skip-on-timeout acquire): the
+        the backup capture's bounded, skip-on-timeout `_bounded_bulk_lock`): the
         caller's chunk-mutating unit of work still needs to run, so there is
         nothing safe to skip to. A bounded-retry-with-progress-stamp variant
         was tried (Task 3 review) to address a related but DIFFERENT known
@@ -3124,102 +3338,39 @@ class Daemon:
                 self._stop.wait(timeout=getattr(self, "_bulk_lock_yield_s", BULK_LOCK_YIELD_S))
 
     def _backup_under_bulk_lock(self) -> None:
-        """Run maybe_backup() under _bulk_lock, with the SAME bounded-acquire-
-        and-skip shape the four gated maintenance passes use in
-        _run_periodic_passes (see BULK_LOCK_ACQUIRE_S).
+        """The run loop's backup step: capture if due, then one time-boxed
+        upload + prune step. Despite the (historical) name it no longer holds
+        _bulk_lock itself: capture takes it inside, for the `backup()` copy
+        only, through `_bounded_bulk_lock` (bounded acquire; a timeout skips
+        the capture this cycle with the cadence untouched), and the upload and
+        prune run with no lock at all -- network I/O never holds the lock the
+        chunk-writing passes need (spec §2/§3).
 
-        The cycle thread now holds _bulk_lock only around each individual
-        chunk-mutating phase (_cycle_bulk_section), not the whole of run_one(),
-        but a gated maintenance pass that has already acquired the lock is not
-        itself time-bounded (e.g. _run_salience_score's `while rounds < 500`
-        loop, or stale_reextract's network-touching sweep) -- either side can
-        legitimately hold the lock longer than one tick. An unbounded
-        `with self._bulk_lock:` around maybe_backup() would let a long-running
-        gated pass on the OTHER side of the lock park the cycle thread for that
-        pass's whole duration. That's the same "unbounded lock hold blocks the
-        other side" problem BULK_LOCK_ACQUIRE_S already solves for the
-        maintenance thread -- so this bounds the acquire the same way and skips
-        the backup for this cycle rather than blocking indefinitely.
+        _note_progress("backup") is stamped UNCONDITIONALLY first (Task 3
+        review fix): "we are here, trying" counts as liveness whether or not a
+        capture or upload happens, so a skipped acquire never ages "backup"
+        into a false stall.
 
-        Skipping is safe: maybe_backup() only advances self._last_backup after a
-        clean run (see its docstring), so a skipped acquire leaves the backup
-        cadence untouched and it is retried on the next cycle where this is
-        called again -- never lost, at worst delayed.
+        Re-stamps EVERY tracked progress key once the step returns
+        (final-whole-branch-review Critical B): stamping only "backup" let
+        "cycle"/"sync" age for the whole duration of a long backup and read as
+        a stall on the next tick. In the `finally`, so it fires whether the
+        step succeeded, failed internally (both swallow their own errors), or
+        raised.
 
-        Marks intent via `_bulk_lock_intent` around the acquire, same as
-        _run_periodic_passes, so a cycle thread between _cycle_bulk_section
-        units actually yields to this wait instead of winning the unfair-lock
-        race. This runs on the CYCLE thread itself (called from run()'s loop,
-        not the maintenance thread) -- see _bulk_lock_intent's docstring for
-        why that means a plain counter, not a single Event, is required here.
-
-        _note_progress("backup") is stamped UNCONDITIONALLY first, before the
-        acquire attempt (Task 3 review fix, reproduced directly): the
-        acquire-timeout skip path below used to leave "backup" untouched, so
-        if a gated maintenance pass legitimately held _bulk_lock continuously
-        past STALL_S, "backup" aged out on its own every cycle this method
-        skipped -- a false stall on a completely idle, healthy daemon, same
-        shape as the cycle_error bug this same task fixed elsewhere. Stamping
-        first means "we are here, trying" counts as liveness regardless of
-        whether the acquire succeeds.
-
-        Also re-sweeps orphaned mcpbrain-snap-* work dirs (Task 7 review
-        fix), not just once at Daemon.run() startup. The startup-only sweep
-        can't clean the very orphan it exists for: a watchdog os._exit
-        mid-snapshot triggers an IMMEDIATE restart, so the fresh orphan is
-        only minutes old when the successor's startup sweep runs, gets
-        spared for being younger than SNAPSHOT_ORPHAN_MAX_AGE_S, and then
-        never gets swept again for that successor's entire lifetime (up to a
-        day, until the next auto-update restart) -- a multi-GB workdir
-        retained on a machine whose disk this already filled once. This call
-        site is safe for the same reason startup's is: still the cycle
-        thread, still holding _bulk_lock, and by construction no snapshot can
-        be in flight -- maybe_backup() (if it ran at all) has already fully
-        returned. Runs every loop iteration (every interval_s, default 300s)
-        regardless of whether a backup happened THIS cycle, so an orphan is
-        caught within roughly SNAPSHOT_ORPHAN_MAX_AGE_S plus one interval,
-        not only at the next full restart.
-
-        Re-stamps EVERY tracked progress key, not just "backup", once
-        maybe_backup() returns (final-whole-branch-review Critical B): this
-        used to stamp only "backup" itself, so "cycle"/"sync" kept ageing
-        for the ENTIRE duration of a long backup -- reproduced live with a
-        2400s backup producing `_stalled_phase() -> ("cycle", 2400.0)` and a
-        spurious restart on the very next tick, even though the daemon was
-        legitimately busy backing up, not wedged. Uses the exact
-        `resume()`-style restamp (see `_restamp_all_progress`, and
-        `resume()`'s own docstring for the original instance of this
-        pattern), in the `finally` so it fires whether maybe_backup()
-        succeeded, failed internally (it swallows its own errors -- see its
-        docstring), or -- belt and braces -- raised.
+        Also re-sweeps orphaned mcpbrain-snap-* temp dirs left by the old
+        full-snapshot path (pre-incremental daemons; a watchdog os._exit
+        mid-snapshot), every iteration, not just at startup -- the startup
+        sweep spares an orphan younger than SNAPSHOT_ORPHAN_MAX_AGE_S.
         """
         self._note_progress("backup")
-        with self._bulk_lock_intent():
-            acquired = self._bulk_lock.acquire(timeout=self._bulk_lock_wait_s)
-        if not acquired:
-            log.warning(
-                "backup skipped this cycle: bulk lock held for more than "
-                "%.1fs (maintenance pass busy); will retry next cycle",
-                self._bulk_lock_wait_s)
-            return
-        # _backup_in_progress (Task 3): os._exit bypasses `finally`, so a
-        # watchdog restart mid-snapshot orphans the temp dir
-        # make_encrypted_snapshot is still writing to -- the mechanism that
-        # left ~24GB of mcpbrain-snap-* on disk and froze the host on
-        # 2026-07-27. _recover_from_stall checks this event and defers
-        # recovery while a backup is in flight. The full restamp in the
-        # `finally` below means a multi-minute backup (large store, slow
-        # upload) also reads as fresh progress throughout, not just at the
-        # start.
-        self._backup_in_progress.set()
         try:
             self.maybe_backup()
+            self.upload_backup_step()
         finally:
             # Restamp ALL of _progress, not just "backup" -- see this
-            # method's docstring (Critical B) for why a single-key stamp
-            # left "cycle"/"sync" stale for the whole backup duration.
+            # method's docstring (Critical B).
             self._restamp_all_progress()
-            self._backup_in_progress.clear()
             try:
                 removed = backup.sweep_orphan_snapshots(
                     tempfile.gettempdir(), max_age_s=SNAPSHOT_ORPHAN_MAX_AGE_S)
@@ -3227,7 +3378,6 @@ class Daemon:
                     log.info("swept %d orphaned snapshot temp dir(s)", removed)
             except Exception as exc:  # noqa: BLE001 — sweep must not crash the cycle
                 log.warning("snapshot orphan sweep failed: %s", exc, exc_info=True)
-            self._bulk_lock.release()
 
     # -- silent auto-update ---------------------------------------------------
 
@@ -5003,25 +5153,12 @@ class Daemon:
                 # once per iteration, so these retries land at the first
                 # iteration after their retry time (~interval_s), not at it.
                 self._retry_google_builds()
-                # Backup self-gates on configured + due; harmless when paused
-                # (a snapshot of current state). Runs in this loop thread, so it
-                # shares the single-writer lock the daemon already holds.
-                #
-                # Held under _bulk_lock, but NOT for the reason this comment
-                # used to give. snapshot() no longer runs wal_checkpoint and no
-                # longer copies the DB file, so neither the busy-abort nor the
-                # torn-copy hazard exists any more. What remains is that
-                # VACUUM INTO pins a read transaction for the whole multi-minute
-                # rebuild: no checkpoint can advance past it, so the WAL grows
-                # for that window. Holding the four chunk-writing passes off
-                # bounds that growth and the I/O contention alongside it.
-                #
-                # The acquire itself is BOUNDED (_backup_under_bulk_lock), the
-                # same shape as the gated passes' own acquire on the other side
-                # of this lock: a gated pass's execution time is not bounded by
-                # this plan, only its acquire is, so it can legitimately hold
-                # _bulk_lock past one tick -- an unbounded `with` here would
-                # park this cycle thread for that pass's whole duration.
+                # Backup: capture when due (self-gates on configured + due;
+                # harmless when paused -- a restore point of current state),
+                # then one time-boxed upload + prune step. Capture takes
+                # _bulk_lock only for the online-backup copy, with a BOUNDED
+                # acquire (a gated maintenance pass may legitimately hold the
+                # lock past one tick); the upload and prune never hold it.
                 self._backup_under_bulk_lock()
                 # Maintenance-thread liveness (Task 3): the watchdog itself
                 # lives inside _maintenance_loop (see _start_maintenance_thread),
@@ -5333,27 +5470,54 @@ def _backup_from_config(home):
         log.warning("backup configured but the token lacks Drive scope; backup disabled")
         return _BackupBuild()
     key = escrow_key.encode() if isinstance(escrow_key, str) else escrow_key
-    raw_interval = cfg.get("interval_s", DEFAULT_BACKUP_INTERVAL_S)
+    settings = _backup_settings(cfg)
+    # The resumable-upload transport, from the same credentials as `drive`.
+    # Built eagerly when the token loads; otherwise None and built on first
+    # upload (`Daemon._backup_transport`) -- never a reason to turn backup off.
     try:
-        interval_s = float(raw_interval)
-        if interval_s <= 0:
-            raise ValueError("must be positive")
-    except (TypeError, ValueError) as exc:
-        log.warning("backup.interval_s invalid (%r); using default %ss: %s",
-                    raw_interval, DEFAULT_BACKUP_INTERVAL_S, exc)
-        interval_s = float(DEFAULT_BACKUP_INTERVAL_S)
-    try:
-        retain = int(cfg.get("retain", 7))
-        if retain <= 0:
-            raise ValueError("must be positive")
-    except (TypeError, ValueError) as exc:
-        log.warning("backup.retain invalid (%r); using default 7: %s",
-                    cfg.get("retain"), exc)
-        retain = 7
+        transport = _build_backup_transport(Path(home) / "google_token.json")
+    except Exception as exc:  # noqa: BLE001 — retried lazily at upload time
+        log.info("backup upload transport not built yet (%s); will retry on upload", exc)
+        transport = None
     bc = BackupConfig(key=key, drive_service=drive,
                       shared_drive_id=shared_drive_id, user_id=user_id,
-                      retain=retain)
-    return _BackupBuild(bc, interval_s)
+                      settings=settings, transport=transport)
+    return _BackupBuild(bc, settings.capture_interval_s)
+
+
+def _backup_settings(cfg: dict) -> "backup_outbox.Settings":
+    """The `backup` block as Settings, each value validated: a bad or
+    non-positive value falls back to its default (logged), never disables
+    backup. `interval_s` is ignored -- it was the full-upload cadence; capture
+    runs every `capture_interval_s` (default DEFAULT_BACKUP_INTERVAL_S)."""
+    d = backup_outbox.Settings()
+    raw = dict(cfg or {})
+    retain_key = "retain_days" if "retain_days" in raw else "retain"
+    for key, attr in (("capture_interval_s", "capture_interval_s"),
+                      (retain_key, "retain_days"),
+                      ("base_threshold", "base_threshold"),
+                      ("upload_budget_s", "upload_budget_s"),
+                      ("outbox_max_bytes", "outbox_max_bytes")):
+        if key not in raw:
+            continue
+        try:
+            v = float(raw[key])
+            if not v > 0 or v != v or v == float("inf"):
+                raise ValueError("must be positive")
+        except (TypeError, ValueError) as exc:
+            log.warning("backup.%s invalid (%r); using default %s: %s",
+                        key, raw[key], getattr(d, attr), exc)
+            raw.pop(key)
+    return backup_outbox.Settings.from_config(raw)
+
+
+def _build_backup_transport(token_file=None):
+    """The resumable-upload Transport for backup, from the user's OAuth token
+    (the same credentials the backup drive_service is built from), with the
+    long upload timeout. Raises when the credentials cannot be loaded."""
+    creds = (auth.load_credentials(token_file=Path(token_file)) if token_file
+             else auth.load_credentials())
+    return drive_resumable.authorized_transport(creds, auth.DEFAULT_HTTP_TIMEOUT_S)
 
 
 def _build_drive_service():
