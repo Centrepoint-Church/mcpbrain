@@ -20,6 +20,7 @@ _REPO_ROOT = Path(__file__).resolve().parents[1]
 
 _MODULES = [
     "mcpbrain/backup.py",
+    "mcpbrain/backup_location.py",
     "mcpbrain/fleet.py",
     "mcpbrain/dashboard.py",
     "mcpbrain/auth.py",

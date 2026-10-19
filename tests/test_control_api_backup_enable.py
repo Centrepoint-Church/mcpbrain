@@ -16,7 +16,9 @@ def test_enable_backup_falls_back_to_org_default_without_fleet(tmp_path, monkeyp
     monkeypatch.setattr(backup_setup, "_escrow_key_to_drive",
                         lambda svc, uid, key, *, folder_id=None: captured.update(folder=folder_id))
 
+    monkeypatch.setattr(backup_setup, "_drive_id_of", lambda svc, fid: "0Adrive")
+
     cfg = backup_setup.enable_backup(str(tmp_path), drive_service=object(), user_id="u")
 
     assert captured["folder"] == tenant.profile().escrow_folder_id  # fell back, no raise
-    assert cfg["backup"]["shared_drive_id"] == tenant.profile().escrow_folder_id
+    assert cfg["backup"]["shared_drive_id"] == "0Adrive"  # the drive, not the folder

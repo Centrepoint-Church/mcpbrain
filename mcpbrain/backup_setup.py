@@ -30,8 +30,15 @@ def enable_backup(home: str, *, drive_service, user_id: str) -> dict:
     else:
         key_bytes = backup.generate_escrow_key()
 
-    shared_drive_id = _resolve_shared_drive(drive_service, home=home)
-    _escrow_key_to_drive(drive_service, user_id, key_bytes, folder_id=shared_drive_id)
+    from mcpbrain.restore import account_email
+    escrow_folder = _resolve_shared_drive(drive_service, home=home)
+    # restore reads <escrow folder>/<email>.key, so name the key by email
+    # (user_id only when no email is known yet).
+    person = (account_email(home) or user_id).strip().lower()
+    _escrow_key_to_drive(drive_service, person, key_bytes, folder_id=escrow_folder)
+    # backup.shared_drive_id must be a Shared Drive id; the escrow folder id is
+    # not one (Drive rejects it as driveId), so store the folder's drive.
+    shared_drive_id = _drive_id_of(drive_service, escrow_folder)
 
     # Fernet.generate_key() returns urlsafe-base64-encoded bytes; decode to str.
     key_str = key_bytes.decode() if isinstance(key_bytes, bytes) else key_bytes
@@ -44,6 +51,18 @@ def enable_backup(home: str, *, drive_service, user_id: str) -> dict:
             "retain": 7,
         }
     })
+
+
+def _drive_id_of(drive_service, folder_id: str) -> str:
+    """The Shared Drive id that holds ``folder_id``."""
+    meta = drive_service.files().get(
+        fileId=folder_id, fields="driveId", supportsAllDrives=True,
+    ).execute(num_retries=_NUM_RETRIES)
+    drive_id = (meta or {}).get("driveId")
+    if not drive_id:
+        raise RuntimeError(
+            f"escrow folder {folder_id!r} is not inside a Shared Drive")
+    return drive_id
 
 
 def _resolve_shared_drive(drive_service, *, home: str) -> str:

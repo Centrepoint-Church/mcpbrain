@@ -5,6 +5,7 @@ def test_enable_writes_config_and_escrows(tmp_path, monkeypatch):
     monkeypatch.setenv("MCPBRAIN_HOME", str(tmp_path))
     uploaded = {}
     monkeypatch.setattr(backup_setup, "_resolve_shared_drive", lambda svc, **kw: "SHARED1")
+    monkeypatch.setattr(backup_setup, "_drive_id_of", lambda svc, fid: fid)
     monkeypatch.setattr(backup_setup, "_escrow_key_to_drive", lambda svc, uid, key, **kw: uploaded.setdefault("k", (uid, key)))
     cfg = backup_setup.enable_backup(str(tmp_path), drive_service=object(), user_id="josh@x.com")
     assert cfg["backup"]["escrow_key"] and cfg["backup"]["shared_drive_id"] == "SHARED1" and cfg["backup"]["user_id"] == "josh@x.com"
@@ -14,6 +15,7 @@ def test_enable_writes_config_and_escrows(tmp_path, monkeypatch):
 def test_enable_idempotent_keeps_existing_key(tmp_path, monkeypatch):
     monkeypatch.setenv("MCPBRAIN_HOME", str(tmp_path))
     monkeypatch.setattr(backup_setup, "_resolve_shared_drive", lambda svc, **kw: "S")
+    monkeypatch.setattr(backup_setup, "_drive_id_of", lambda svc, fid: fid)
     monkeypatch.setattr(backup_setup, "_escrow_key_to_drive", lambda *a, **kw: None)
     a = backup_setup.enable_backup(str(tmp_path), drive_service=object(), user_id="u")["backup"]["escrow_key"]
     b = backup_setup.enable_backup(str(tmp_path), drive_service=object(), user_id="u")["backup"]["escrow_key"]
@@ -54,9 +56,10 @@ def test_enable_backup_escrows_to_configured_shared_drive(tmp_path, monkeypatch)
         captured["uid"] = uid
 
     monkeypatch.setattr(backup_setup, "_escrow_key_to_drive", _fake_escrow)
+    monkeypatch.setattr(backup_setup, "_drive_id_of", lambda svc, fid: "0Adrive")
     cfg = backup_setup.enable_backup(str(tmp_path), drive_service=object(), user_id="josh@x.com")
     assert captured["folder_id"] == "ESCROW1"
-    assert cfg["backup"]["shared_drive_id"] == "ESCROW1"
+    assert cfg["backup"]["shared_drive_id"] == "0Adrive"
 
 
 class _RecordingExec:
@@ -123,3 +126,40 @@ def test_escrow_key_to_drive_passes_num_retries_on_update():
     backup_setup._escrow_key_to_drive(_Drive(), "u@x.com", b"key", folder_id="F1")
 
     assert calls == [backup_setup._NUM_RETRIES] * 2   # one list + one update
+
+
+def test_enable_backup_names_key_by_email(tmp_path, monkeypatch):
+    monkeypatch.setenv("MCPBRAIN_HOME", str(tmp_path))
+    from mcpbrain import config
+    config.write_config(str(tmp_path), {"owner_email": "Dana.Okafor@Example.org"})
+    seen = {}
+    monkeypatch.setattr(backup_setup, "_resolve_shared_drive", lambda svc, **kw: "F")
+    monkeypatch.setattr(backup_setup, "_drive_id_of", lambda svc, fid: "0A")
+    monkeypatch.setattr(backup_setup, "_escrow_key_to_drive",
+                        lambda svc, name, key, **kw: seen.setdefault("name", name))
+    cfg = backup_setup.enable_backup(str(tmp_path), drive_service=object(),
+                                     user_id="dana-okafor")
+    assert seen["name"] == "dana.okafor@example.org"
+    assert cfg["backup"]["user_id"] == "dana-okafor"  # kept for legacy discovery
+
+
+def test_enable_backup_stores_drive_id_not_folder_id(tmp_path, monkeypatch):
+    monkeypatch.setenv("MCPBRAIN_HOME", str(tmp_path))
+    monkeypatch.setattr(backup_setup, "_resolve_shared_drive", lambda svc, **kw: "1folder")
+    monkeypatch.setattr(backup_setup, "_escrow_key_to_drive", lambda *a, **kw: None)
+
+    class _Exec:
+        def execute(self, num_retries=0):
+            return {"driveId": "0Adrive"}
+
+    class _Files:
+        def get(self, fileId, **kw):
+            assert fileId == "1folder"
+            return _Exec()
+
+    class _Svc:
+        def files(self):
+            return _Files()
+
+    cfg = backup_setup.enable_backup(str(tmp_path), drive_service=_Svc(), user_id="u")
+    assert cfg["backup"]["shared_drive_id"] == "0Adrive"
