@@ -311,3 +311,55 @@ def test_detect_reports_a_key_fetch_failure_as_a_reason(tmp_path, monkeypatch):
     monkeypatch.setattr(restore, "_download_escrow_key", boom)
     out = restore.detect_restorable(str(tmp_path), drive_service=object())
     assert out["available"] is False and "could not look up" in out["reason"]
+    assert out["retry"] is True
+
+
+def test_detect_marks_only_transient_listing_failures_for_retry(tmp_path, monkeypatch):
+    import errno
+    monkeypatch.setenv("MCPBRAIN_HOME", str(tmp_path))
+    _cfg(tmp_path, fleet={"escrow_folder_id": "ESC"})
+    monkeypatch.setattr(restore, "_download_escrow_key", lambda svc, folder, email: b"K")
+    for exc, retry in ((backup_restore.ListingIncomplete("partial"), True),
+                       (OSError(errno.ENETUNREACH, "Network is unreachable"), True),
+                       (ValueError("backup.shared_drive_id is not configured"), False)):
+        def boom(home, svc, key, exc=exc):
+            raise exc
+        monkeypatch.setattr(backup_restore, "candidates", boom)
+        out = restore.detect_restorable(str(tmp_path), drive_service=object())
+        assert out["available"] is False and bool(out.get("retry")) is retry, exc
+
+
+def _keys_on_drive(monkeypatch, names):
+    """_list_in_drives answers by exact file name; the download returns the
+    file id's bytes."""
+    import re as _re
+
+    from mcpbrain import backup
+    asked = []
+
+    def list_in_drives(svc, q, **kw):
+        name = _re.search(r"name = '([^']*)'", q).group(1)
+        asked.append(name)
+        return [{"id": name}] if name in names else []
+    monkeypatch.setattr(backup, "_list_in_drives", list_in_drives)
+    monkeypatch.setattr(backup, "download_snapshot",
+                        lambda svc, fid, dest, **kw: Path(dest).write_bytes(names[fid].encode()))
+    return asked
+
+
+def test_mixed_case_email_finds_a_lower_case_key(monkeypatch):
+    asked = _keys_on_drive(monkeypatch, {"dana.okafor@example.org.key": "LOWER="})
+    assert restore._download_escrow_key(object(), "ESC", "Dana.Okafor@Example.org") == b"LOWER="
+    assert asked == ["dana.okafor@example.org.key"]          # lower-case name first
+
+
+def test_mixed_case_email_falls_back_to_an_original_case_key(monkeypatch):
+    asked = _keys_on_drive(monkeypatch, {"Dana.Okafor@Example.org.key": "ORIG="})
+    assert restore._download_escrow_key(object(), "ESC", "Dana.Okafor@Example.org") == b"ORIG="
+    assert asked == ["dana.okafor@example.org.key", "Dana.Okafor@Example.org.key"]
+
+
+def test_lower_case_email_finds_only_the_lower_case_name(monkeypatch):
+    asked = _keys_on_drive(monkeypatch, {})
+    assert restore._download_escrow_key(object(), "ESC", "j@x.com") is None
+    assert asked == ["j@x.com.key"]

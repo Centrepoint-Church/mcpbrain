@@ -151,21 +151,18 @@ def test_backup_auto_reports_the_point_actually_used_after_a_fallback(tmp_path, 
     finally: srv.stop()
 
 
-@pytest.mark.parametrize("info", [
-    {"available": False, "has_key": False, "reason": "could not look up the escrow key"},
-    {"available": False, "has_key": True},
-])
-def test_backup_auto_inconclusive_detection_is_503_and_never_enables(tmp_path, monkeypatch,
-                                                                     info):
-    """R27b: a transient detection failure (or a key with no restore point
-    found) must not turn on a NEW backup -- that path rotated the escrow key
-    and made every existing backup unrestorable. 503 retry; Drive untouched."""
+def test_backup_auto_transient_detection_is_503_and_never_enables(tmp_path, monkeypatch):
+    """R27b/R29: a TRANSIENT detection failure must not turn on a new backup --
+    that path rotated the escrow key and made every existing backup
+    unrestorable. 503 retry; the escrow key untouched."""
     from mcpbrain import config, restore, auth, backup_setup
     monkeypatch.setattr(config, "owner_email", lambda home: "me@example.com")
     monkeypatch.setattr(config, "store_path", lambda: str(tmp_path / "missing.sqlite3"))
     monkeypatch.setattr(auth, "load_credentials", lambda: object())
     monkeypatch.setattr(auth, "build_service", lambda *a, **k: object())
-    monkeypatch.setattr(restore, "detect_restorable", lambda home, svc: dict(info))
+    monkeypatch.setattr(restore, "detect_restorable", lambda home, svc: {
+        "available": False, "has_key": False, "retry": True,
+        "reason": "could not look up the escrow key"})
     monkeypatch.setattr(backup_setup, "enable_backup",
                         lambda *a, **k: pytest.fail("must not enable backup"))
     monkeypatch.setattr(backup_setup, "_escrow_key_to_drive",
@@ -176,7 +173,53 @@ def test_backup_auto_inconclusive_detection_is_503_and_never_enables(tmp_path, m
             _authed_post(srv, "/api/backup/auto")
         assert e.value.code == 503
         body = json.loads(e.value.read())
-        assert body["retry"] is True and body["reason"]
+        assert body["retry"] is True and "escrow key" in body["reason"]
+    finally: srv.stop()
+
+
+def test_backup_auto_key_but_no_backups_enables_with_the_adopted_key(tmp_path, monkeypatch):
+    """R29: an escrow key on Drive with no restore point is a definitive "no
+    backup yet": backup is enabled, ADOPTING the Drive key (R27a) -- the key
+    file on Drive is never rewritten."""
+    from mcpbrain import config, restore, auth, backup_setup
+    monkeypatch.setenv("MCPBRAIN_HOME", str(tmp_path))
+    config.write_config(str(tmp_path), {"owner_email": "me@example.com"})
+    monkeypatch.setattr(config, "store_path", lambda: str(tmp_path / "missing.sqlite3"))
+    monkeypatch.setattr(auth, "load_credentials", lambda: object())
+    monkeypatch.setattr(auth, "build_service", lambda *a, **k: object())
+    monkeypatch.setattr(restore, "detect_restorable", lambda home, svc: {
+        "available": False, "has_key": True, "snapshot_id": None})
+    monkeypatch.setattr(restore, "_download_escrow_key",
+                        lambda svc, folder, email: b"DRIVEKEY=")
+    monkeypatch.setattr(backup_setup, "_resolve_shared_drive", lambda svc, **kw: "ESC")
+    monkeypatch.setattr(backup_setup, "_drive_id_of", lambda svc, fid: "0A")
+    monkeypatch.setattr(backup_setup, "_escrow_key_to_drive",
+                        lambda *a, **k: pytest.fail("the Drive key file must stay untouched"))
+    srv = ControlServer(FakeDaemon(), home=str(tmp_path)); srv.start()
+    try:
+        body = json.loads(_authed_post(srv, "/api/backup/auto").read())
+        assert body["action"] == "backup_enabled"
+        assert config.read_config(str(tmp_path))["backup"]["escrow_key"] == "DRIVEKEY="
+    finally: srv.stop()
+
+
+def test_backup_auto_no_escrow_folder_proceeds_to_enable(tmp_path, monkeypatch):
+    # R29: "no escrow folder configured" is not transient -- no 503 loop.
+    from mcpbrain import config, restore, auth, backup_setup
+    monkeypatch.setattr(config, "owner_email", lambda home: "me@example.com")
+    monkeypatch.setattr(config, "store_path", lambda: str(tmp_path / "missing.sqlite3"))
+    monkeypatch.setattr(config, "read_config", lambda home: {})
+    monkeypatch.setattr(auth, "load_credentials", lambda: object())
+    monkeypatch.setattr(auth, "build_service", lambda *a, **k: object())
+    monkeypatch.setattr(restore, "detect_restorable", lambda home, svc: {
+        "available": False, "reason": "no escrow folder configured"})
+    called = {}
+    monkeypatch.setattr(backup_setup, "enable_backup",
+                        lambda home, **k: called.setdefault("enabled", True) or {})
+    srv = ControlServer(FakeDaemon(), home=str(tmp_path)); srv.start()
+    try:
+        body = json.loads(_authed_post(srv, "/api/backup/auto").read())
+        assert body["action"] == "backup_enabled" and called["enabled"] is True
     finally: srv.stop()
 
 

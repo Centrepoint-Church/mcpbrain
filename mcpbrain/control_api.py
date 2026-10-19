@@ -633,15 +633,14 @@ class ControlServer:
                     svc = _auth.build_service("drive", "v3", creds,
                                               timeout_s=_auth.DEFAULT_HTTP_TIMEOUT_S)
                     info = _restore.detect_restorable(str(self.home), svc)
-                    # Detection could not tell (a transient lookup failure), or
-                    # the account HAS an escrow key yet no restore point showed
-                    # up: never fall through to enable_backup on that -- a
-                    # backup may well exist, and enabling would start a new one
-                    # over an empty store. The wizard retries on 503 (R27b).
-                    if info.get("reason") or (info.get("has_key") and not info.get("available")):
-                        reason = info.get("reason") or (
-                            "an escrow key exists for this account but no restore point "
-                            "was found yet")
+                    # Detection could not tell (a TRANSIENT lookup failure): never
+                    # fall through to enable_backup on that -- a backup may well
+                    # exist, and enabling would start a new one over an empty
+                    # store. The wizard retries on 503 (R27b/R29). A definitive
+                    # "key but no restore point" proceeds: enable_backup adopts
+                    # the Drive key, never replaces it (R27a).
+                    if info.get("retry"):
+                        reason = info.get("reason") or "restore detection failed"
                         log.warning("backup/auto: restore detection inconclusive, "
                                     "not enabling backup: %s", reason)
                         return h_json(h, 503, {"error": reason, "reason": reason,

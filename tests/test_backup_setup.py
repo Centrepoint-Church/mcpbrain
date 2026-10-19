@@ -240,3 +240,19 @@ def test_enable_backup_stores_drive_id_not_folder_id(tmp_path, monkeypatch):
 
     cfg = backup_setup.enable_backup(str(tmp_path), drive_service=_Svc(), user_id="u")
     assert cfg["backup"]["shared_drive_id"] == "0Adrive"
+
+
+def test_enable_backup_reads_the_key_under_the_original_case_email(tmp_path, monkeypatch):
+    """R30: enable_backup passes the email as-is, so _download_escrow_key can
+    try <lower>.key and then an older install's <Original>.key; a new key is
+    still written under the lower-cased name."""
+    monkeypatch.setenv("MCPBRAIN_HOME", str(tmp_path))
+    from mcpbrain import config
+    config.write_config(str(tmp_path), {"owner_email": "Dana.Okafor@Example.org"})
+    uploads, seen = [], []
+    _setup_stubs(monkeypatch, uploads)
+    monkeypatch.setattr(restore, "_download_escrow_key",
+                        lambda svc, folder, email: seen.append(email))
+    backup_setup.enable_backup(str(tmp_path), drive_service=object(), user_id="u")
+    assert seen == ["Dana.Okafor@Example.org"]
+    assert uploads[0][0] == "dana.okafor@example.org"

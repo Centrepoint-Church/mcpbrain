@@ -40,8 +40,10 @@ def enable_backup(home: str, *, drive_service, user_id: str) -> dict:
     escrow_folder = _resolve_shared_drive(drive_service, home=home)
     # restore reads <escrow folder>/<email>.key, so name the key by email
     # (user_id only when no email is known yet).
-    person = (account_email(home) or user_id).strip().lower()
-    drive_key = _download_escrow_key(drive_service, escrow_folder, person)
+    email = (account_email(home) or user_id).strip()
+    person = email.lower()
+    # Reads <lower>.key, falling back to an older install's original-case name.
+    drive_key = _download_escrow_key(drive_service, escrow_folder, email)
     if drive_key is not None:
         drive_key = drive_key.strip()
         if local_key is None:

@@ -161,11 +161,23 @@ class EscrowKeyUnavailable(RuntimeError):
     new key and, before R27, overwrite the one every existing backup needs."""
 
 
+def _escrow_key_names(user_email: str) -> list[str]:
+    """The escrow key's file name is the LOWER-CASED email (R30); an older
+    install may have written it with the email's original case, so reads
+    fall back to that name when the lower-case one is absent."""
+    email = user_email.strip()
+    names = [f"{email.lower()}.key"]
+    if email != email.lower():
+        names.append(f"{email}.key")
+    return names
+
+
 def _download_escrow_key(drive_service, escrow_folder_id: str, user_email: str) -> bytes | None:
-    """<user_email>.key from the escrow folder: its bytes, or None when Drive
-    definitively has no such file. Any failure to list or download it raises
-    EscrowKeyUnavailable (chained to the original error, so the transient
-    classifier still sees the cause) -- never None.
+    """The escrow key (<email lower-cased>.key, else <email>.key) from the
+    escrow folder: its bytes, or None when Drive definitively has neither.
+    Any failure to list or download it raises EscrowKeyUnavailable (chained
+    to the original error, so the transient classifier still sees the cause)
+    -- never None.
 
     The key is uploaded by backup_setup at enable time. Fetching it from the
     Shared Drive (which the user already has access to) means recovery needs no
@@ -174,17 +186,22 @@ def _download_escrow_key(drive_service, escrow_folder_id: str, user_email: str) 
     import tempfile
 
     from mcpbrain import backup as _backup
-    name = f"{user_email}.key"
-    try:
-        # Parent-based query: the escrow folder is nested inside a Shared Drive,
-        # so its id is NOT a valid driveId — query by parent with corpora=allDrives.
-        files = _backup._list_in_drives(
-            drive_service,
-            f"name = '{name}' and trashed = false and '{escrow_folder_id}' in parents",
-            fields="files(id, name)")
-    except Exception as exc:
-        raise EscrowKeyUnavailable(
-            f"could not look up the escrow key {name}: {type(exc).__name__}: {exc}") from exc
+    files: list = []
+    for name in _escrow_key_names(user_email):
+        try:
+            # Parent-based query: the escrow folder is nested inside a Shared
+            # Drive, so its id is NOT a valid driveId — query by parent with
+            # corpora=allDrives.
+            files = _backup._list_in_drives(
+                drive_service,
+                f"name = '{name}' and trashed = false and '{escrow_folder_id}' in parents",
+                fields="files(id, name)")
+        except Exception as exc:
+            raise EscrowKeyUnavailable(
+                f"could not look up the escrow key {name}: "
+                f"{type(exc).__name__}: {exc}") from exc
+        if files:
+            break
     if not files:
         return None
     fd, tmp = tempfile.mkstemp(prefix=".escrowkey-")
@@ -322,6 +339,19 @@ def _describe(drive_service, cands, limit: int) -> list[dict]:
              "label": c.label, "file_id": c.file_id} for c in cands[:limit]]
 
 
+def _is_transient(exc) -> bool:
+    """A listing failure worth retrying: an incomplete listing, or what the
+    daemon's network classifier calls transient (incl. any Drive 5xx)."""
+    from mcpbrain import backup_restore
+    if isinstance(exc, backup_restore.ListingIncomplete):
+        return True
+    from mcpbrain.sync.reflow_handler import _http_status, _is_transient as _net
+    if _net(exc):
+        return True
+    status = _http_status(exc)
+    return isinstance(status, int) and 500 <= status <= 599
+
+
 def detect_restorable(home: str, drive_service) -> dict:
     """Report whether an existing backup can be restored for this account.
 
@@ -332,7 +362,10 @@ def detect_restorable(home: str, drive_service) -> dict:
     escrow_folder_id, restore_point, source, candidates}: `snapshot_id` is the
     chosen point's file id, `restore_point` its capture time (ISO-8601 UTC),
     `source` "chain" or "legacy:<folder>", `candidates` the first 11 points
-    described. Never raises -- degrades to available=False (with `reason`).
+    described. Never raises -- degrades to available=False with `reason`,
+    plus `retry: True` when the failure was transient (an escrow-key fetch
+    that failed, an incomplete listing, a network error): the caller must
+    then retry rather than conclude there is no backup.
     """
     from mcpbrain import backup_restore
     # The escrow convention is email-keyed (<email>.key). Use the signed-in
@@ -351,7 +384,7 @@ def detect_restorable(home: str, drive_service) -> dict:
         key = _download_escrow_key(drive_service, folder, user_email)
     except EscrowKeyUnavailable as exc:
         log.warning("restore detection: %s", exc)
-        out["reason"] = str(exc)
+        out.update(reason=str(exc), retry=True)
         return out
     out["has_key"] = bool(key)
     if not key:
@@ -360,7 +393,7 @@ def detect_restorable(home: str, drive_service) -> dict:
         cands = backup_restore.candidates(home, drive_service, key)
     except Exception as exc:  # noqa: BLE001 — detection degrades, never raises
         log.warning("restore detection: could not list restore points: %s", exc)
-        out["reason"] = f"{type(exc).__name__}: {exc}"
+        out.update(reason=f"{type(exc).__name__}: {exc}", retry=_is_transient(exc))
         return out
     if not cands:
         return out
