@@ -22,6 +22,7 @@ _MODULES = [
     "mcpbrain/backup.py",
     "mcpbrain/backup_location.py",
     "mcpbrain/backup_prune.py",
+    "mcpbrain/backup_restore.py",
     "mcpbrain/backup_uploader.py",
     "mcpbrain/fleet.py",
     "mcpbrain/dashboard.py",
