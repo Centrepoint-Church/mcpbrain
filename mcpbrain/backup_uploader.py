@@ -15,7 +15,8 @@ outbox/, whose sweep deletes every file no sidecar names)::
                  size, sha256, kind, seq}], "base_bytes", "first_captured_at",
                  "last_captured_at", "committed_at", "manifests": [{seq, file_id}]}},
      "inflight": {item_name: {drive_name: Session json | {"file_id", ...}}},
-     "pending_deletes": [file_id, ...],
+     "pending_deletes": [file_id, ...],   # trashed by prune (R17), never deleted
+     "delete_failures": {file_id: {"count", "error"}},  # permanent refusals
      "stalls": {"<item>/<drive_name>": consecutive no-progress steps},
      "mismatches": {"<item>/<drive_name>": consecutive Drive/local mismatches}}
 
@@ -97,7 +98,7 @@ def journal_path(home):
 
 def _empty() -> dict:
     return {"chains": {}, "inflight": {}, "pending_deletes": [], "stalls": {},
-            "mismatches": {}}
+            "mismatches": {}, "delete_failures": {}}
 
 
 def load_journal(home) -> dict:
@@ -152,13 +153,32 @@ def _confirm(svc, meta: dict, path) -> dict:
     return meta
 
 
-def _delete_remote(svc, j: dict, file_id: str) -> None:
-    """Best effort; a failure leaves the id on `pending_deletes` for prune."""
+def http_status(exc: Exception) -> int | None:
+    status = getattr(getattr(exc, "resp", None), "status", None)
     try:
-        svc.files().delete(fileId=file_id, supportsAllDrives=True).execute(
-            num_retries=_NUM_RETRIES)
+        return int(status)
+    except (TypeError, ValueError):
+        return None
+
+
+def trash(svc, file_id: str) -> None:
+    """Move a Drive file (or a folder, with its contents) to the trash.
+
+    Never a permanent delete (R17): on a shared drive a Content manager may
+    trash but not delete, and the trash keeps 30 days of recovery."""
+    svc.files().update(fileId=file_id, body={"trashed": True},
+                       supportsAllDrives=True).execute(num_retries=_NUM_RETRIES)
+
+
+def _delete_remote(svc, j: dict, file_id: str) -> None:
+    """Best effort trash; a 404 is done, any other failure leaves the id on
+    `pending_deletes` for prune."""
+    try:
+        trash(svc, file_id)
     except Exception as exc:  # noqa: BLE001 — best effort by design
-        log.warning("backup: could not delete Drive file %s (%s); queued", file_id, exc)
+        if http_status(exc) == 404:
+            return
+        log.warning("backup: could not trash Drive file %s (%s); queued", file_id, exc)
         if file_id not in j["pending_deletes"]:
             j["pending_deletes"].append(file_id)
 

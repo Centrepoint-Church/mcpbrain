@@ -3,8 +3,12 @@
 Runs after a commit, spends at most `budget_s`, and is safe to stop anywhere:
 everything it means to delete is first written to the journal's
 `pending_deletes` list, and each id leaves that list only once Drive has
-deleted it (or answered 404, which is the same outcome). The next call carries
-on from the list.
+TRASHED it (R17: never a permanent delete -- a Content manager can trash on a
+shared drive, and the trash keeps 30 days of recovery) or answered 404, which
+is the same outcome. A permanent refusal (403 and other 4xx) on one id is
+counted in `delete_failures` and the step moves on; a transient error
+(network, 5xx, 429) stops the step. The next call carries on from the list.
+Every listing filters `trashed = false`, so trashed items never come back.
 
 **What is deleted, and why it is safe.** When in doubt, keep.
 
@@ -49,7 +53,7 @@ import time
 from datetime import datetime, timezone
 from typing import Callable
 
-from mcpbrain import backup, backup_location
+from mcpbrain import backup, backup_location, drive_resumable as dr
 from mcpbrain import backup_uploader as bu
 
 log = logging.getLogger(__name__)
@@ -61,12 +65,17 @@ _CHAIN_ID = re.compile(r"^chain-(\d{8})-[0-9a-f]+$")
 _LIST_FIELDS = "nextPageToken, files(id, name, mimeType, createdTime, modifiedTime)"
 
 
-def _is_not_found(exc: Exception) -> bool:
-    status = getattr(getattr(exc, "resp", None), "status", None)
-    try:
-        return int(status) == 404
-    except (TypeError, ValueError):
-        return False
+def _classify(exc: Exception) -> str:
+    """'done' (404), 'permanent' (another refusal: 403 permission, 400...), or
+    'transient' (network, 5xx, 429, a rate-limit 403) -- which stops the step."""
+    status = bu.http_status(exc)
+    if status == 404:
+        return "done"
+    if status is None:
+        return "transient"
+    if dr._is_transient_status(status, getattr(exc, "content", b"") or b""):
+        return "transient"
+    return "permanent" if 400 <= status < 500 else "transient"
 
 
 def _ts(value) -> float | None:
@@ -273,21 +282,32 @@ def prune_step(home, *, drive_service, retain_days: float, now: float,
 
     by_folder = {e.get("folder_id"): c for c, e in j["chains"].items()
                  if isinstance(e, dict)}
-    while j["pending_deletes"] and not over():
-        fid = j["pending_deletes"][0]
+    failures = j.setdefault("delete_failures", {})
+    for fid in list(j["pending_deletes"]):
+        if over():
+            break
         try:
-            svc.files().delete(fileId=fid, supportsAllDrives=True).execute(
-                num_retries=_NUM_RETRIES)
+            bu.trash(svc, fid)
         except Exception as exc:  # noqa: BLE001 — classified below
-            if not _is_not_found(exc):
-                log.warning("backup prune: could not delete %s (%s); will retry",
+            kind = _classify(exc)
+            if kind == "transient":
+                log.warning("backup prune: could not trash %s (%s); will retry",
                             fid, exc)
                 break
-        j["pending_deletes"].pop(0)
+            if kind == "permanent":
+                rec = failures.get(fid) or {}
+                failures[fid] = {"count": int(rec.get("count") or 0) + 1,
+                                 "error": str(exc)[:300]}
+                log.warning("backup prune: Drive refused to trash %s (%s); kept on "
+                            "the list, moving on", fid, exc)
+                bu.save_journal(home, j)
+                continue
+        j["pending_deletes"].remove(fid)
+        failures.pop(fid, None)
         chain = by_folder.get(fid)
         if chain is not None:
             j["chains"].pop(chain, None)
-            log.info("backup prune: deleted chain %s (folder %s)", chain, fid)
+            log.info("backup prune: trashed chain %s (folder %s)", chain, fid)
         deleted.append(fid)
         bu.save_journal(home, j)
     return {"deleted": deleted, "held": None}

@@ -13,7 +13,9 @@ import re
 import shutil
 import sqlite3
 
+import httplib2
 import pytest
+from googleapiclient.errors import HttpError
 
 from mcpbrain import backup, backup_outbox as bo, backup_uploader as bu, config
 from tests.test_drive_resumable import FakeDrive, FakeTransport
@@ -45,6 +47,8 @@ class Server(FakeDrive):
         self.deleted: list[str] = []
         self.gets: list[str] = []
         self.corrupt_manifest = False
+        self.trash_calls: list[str] = []
+        self.trash_fail = 0
         self.n = 0
 
     def _final(self, s):
@@ -123,13 +127,21 @@ class Service:
                     return {"id": fid, "size": str(len(data)), "md5Checksum": md5}
                 return _Exec(run)
 
-            def delete(self, fileId, supportsAllDrives=None, **kw):
+            # R17: remote cleanup TRASHES (Content managers cannot delete
+            # permanently on a shared drive). No delete() here on purpose: a
+            # permanent delete fails the test with AttributeError.
+            def update(self, fileId, body=None, supportsAllDrives=None, **kw):
                 assert supportsAllDrives is True
+                assert body == {"trashed": True}
 
                 def run():
+                    outer.server.trash_calls.append(fileId)
+                    status = outer.server.trash_fail
+                    if status:
+                        raise HttpError(httplib2.Response({"status": status}), b"{}")
                     outer.deleted.append(fileId)
                     outer.server.files.pop(fileId, None)
-                    return None
+                    return {"id": fileId, "trashed": True}
                 return _Exec(run)
         return F()
 
@@ -308,6 +320,22 @@ def test_manifest_only_after_every_file_verified(env):
     env.server.corrupt.clear()
     res2 = env.step()
     assert res2.error is None and res2.committed == [base.name]
+
+
+def test_remote_cleanup_trashes_and_queues_only_real_failures(env):
+    """R17: the bad remote copy is trashed (never permanently deleted); a 404
+    is done, any other failure leaves the id on pending_deletes for prune."""
+    base = env.cap()
+    env.server.corrupt.add(base.records["name"])
+    env.server.trash_fail = 404
+    env.step()
+    assert len(env.server.trash_calls) == 1
+    assert bu.load_journal(env.home)["pending_deletes"] == []
+
+    env.server.trash_fail = 500
+    env.step()
+    assert len(env.server.trash_calls) == 2
+    assert bu.load_journal(env.home)["pending_deletes"] == [env.server.trash_calls[-1]]
 
 
 def test_coalesces_before_upload_but_not_started_items(env, tmp_path):

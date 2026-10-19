@@ -62,6 +62,7 @@ class FakeDrive:
 
     def list(self, q, **kw):
         assert kw.get("supportsAllDrives") is True
+        assert "trashed = false" in q
         self.lists.append({"q": q, **kw})
         parent = re.search(r"'([^']+)' in parents", q).group(1)
 
@@ -80,8 +81,9 @@ class FakeDrive:
             return {"files": out}
         return _Exec(run)
 
-    def delete(self, fileId, **kw):
+    def update(self, fileId, body=None, **kw):
         assert kw.get("supportsAllDrives") is True
+        assert body == {"trashed": True}
         self.kwargs.append(kw)
 
         def run():
@@ -92,7 +94,7 @@ class FakeDrive:
             if fileId not in self.items or fileId in self.deleted:
                 raise HttpError(httplib2.Response({"status": 404}), b"{}")
             self.deleted.append(fileId)
-            return ""
+            return {"id": fileId, "trashed": True}
         return _Exec(run)
 
 
@@ -360,3 +362,52 @@ def test_nonpositive_retention_keeps_everything(tmp_path, retain):
                         "chain-z": _chain("fz", NOW - DAY, NOW)})
     d = _drive_with("fa", "fz")
     assert _step(tmp_path, d, retain_days=retain)["deleted"] == []
+
+
+# R17: trash, and a permanent refusal on one id does not block the rest ------
+
+def test_403_on_one_id_does_not_block_the_next(tmp_path):
+    _journal(tmp_path, {"chain-a": _chain("fa", NOW - 40 * DAY, NOW - 30 * DAY),
+                        "chain-z": _chain("fz", NOW - DAY, NOW)},
+             pending=["stuck", "o2"])
+    d = _drive_with("fa", "fz")
+    d.add("stuck", "x", "fz", created=NOW)
+    d.add("o2", "y", "fz", created=NOW)
+    d.fail["stuck"] = 403
+    out = _step(tmp_path, d)
+    assert out["deleted"] == ["o2", "fa"]
+    j = bu.load_journal(tmp_path)
+    assert j["pending_deletes"] == ["stuck"]
+    assert j["delete_failures"]["stuck"]["count"] == 1
+    assert "403" in j["delete_failures"]["stuck"]["error"]
+    assert set(j["chains"]) == {"chain-z"}
+
+    _step(tmp_path, d)
+    assert bu.load_journal(tmp_path)["delete_failures"]["stuck"]["count"] == 2
+
+    d.fail.clear()           # permission fixed: the next step trashes it
+    assert _step(tmp_path, d)["deleted"] == ["stuck"]
+    j = bu.load_journal(tmp_path)
+    assert j["pending_deletes"] == [] and j["delete_failures"] == {}
+
+
+@pytest.mark.parametrize("status", [429, 503])
+def test_transient_error_stops_the_step(tmp_path, status):
+    _journal(tmp_path, {"chain-z": _chain("fz", NOW - DAY, NOW)},
+             pending=["busy", "o2"])
+    d = _drive_with("fz")
+    d.add("busy", "x", "fz", created=NOW)
+    d.add("o2", "y", "fz", created=NOW)
+    d.fail["busy"] = status
+    assert _step(tmp_path, d)["deleted"] == []
+    assert d.delete_calls == ["busy"]
+    j = bu.load_journal(tmp_path)
+    assert j["pending_deletes"] == ["busy", "o2"] and j["delete_failures"] == {}
+
+
+def test_prune_trashes_rather_than_deletes(tmp_path):
+    _journal(tmp_path, {"chain-a": _chain("fa", NOW - 40 * DAY, NOW - 30 * DAY),
+                        "chain-z": _chain("fz", NOW - DAY, NOW)})
+    d = _drive_with("fa", "fz")
+    assert not hasattr(d, "delete")
+    assert _step(tmp_path, d)["deleted"] == ["fa"]
