@@ -30,19 +30,30 @@ unique, so no write ever overwrites a file a committed sidecar names.
 **Crash safety.** Order within a capture: segments (each temp + rename) ->
 sidecar (temp + rename = commit) -> pages.idx -> capture.json. A crash before
 the sidecar rename leaves only unreferenced files, swept by the next run. A
-crash after it leaves a committed item that capture.json does not know about,
-and pages.idx in an unknown state (old or new). The next capture then chains
-onto that item and adds every page in the item's segment ranges to its own
-changed set: a page that changed in the item and changed BACK before the redo
-would otherwise be missed when diffing against a fresh index — and the union
-is a harmless superset when the index is stale. Correct in both cases without
-having to know which happened.
+crash after it leaves a committed item capture.json does not know about, and
+pages.idx either old or new. Diffing against the wrong index silently drops
+pages (a delta of chain A taken against chain B's fresh base index omits every
+page that changed between A's last item and B's base), so the index is
+IDENTIFIED, never assumed: CaptureState and every sidecar record
+`index_digest`, the sha256 of the index that capture produced. Before diffing:
+
+- index digest == the state's: the index is the state's. Continue the state's
+  chain after its newest committed item, and add every page in the segment
+  ranges of items committed after the state to the changed set — a page that
+  changed in such an item and changed BACK would otherwise be missed.
+- index digest == a same-chain item committed after the state: the index is
+  that item's. Continue after it (plus the ranges of any items after it).
+- anything else (another chain's base, a damaged or foreign index): new base.
+
+An item whose sidecar the uploader already deleted is fine as long as the
+index still matches the state.
 """
 from __future__ import annotations
 
 import errno
 import hashlib
 import json
+import logging
 import os
 import secrets
 import shutil
@@ -55,6 +66,8 @@ from pathlib import Path
 from typing import Literal
 
 from mcpbrain import backup_pages
+
+log = logging.getLogger(__name__)
 
 _SPACE_MARGIN = 1.1
 _COPY_NAME = "capture.sqlite3"
@@ -125,6 +138,8 @@ class Item:
     segments: list[dict] = field(default_factory=list)
     records: dict | None = None
     bytes: int = 0
+    # sha256 of the pages.idx this capture produced (see module docstring).
+    index_digest: str = ""
 
     def to_json(self) -> str:
         return json.dumps(asdict(self), sort_keys=True)
@@ -161,6 +176,8 @@ class CaptureState:
     base_bytes: int
     delta_bytes: int
     store_id: str
+    # sha256 of pages.idx as this state left it; "" never matches = new base.
+    index_digest: str = ""
 
 
 def backup_dir(home) -> Path:
@@ -243,6 +260,18 @@ def outbox_bytes(home) -> int:
     return sum(p.stat().st_size for p in ob.iterdir() if p.is_file())
 
 
+def _quarantine_bad_sidecars(ob: Path) -> None:
+    for p in sorted(ob.glob("*.json")):
+        try:
+            Item.from_json(p.read_text())
+        except (ValueError, TypeError, KeyError) as e:
+            bad = p.with_name(p.name + ".bad")
+            os.replace(p, bad)
+            log.warning("backup outbox: unreadable sidecar %s quarantined as %s "
+                        "(%s); unnamed outbox files are kept until it is resolved",
+                        p.name, bad.name, e)
+
+
 def _sweep(home) -> None:
     """Drop what a crash left behind: temp files, files no live sidecar names,
     sidecars a committed coalesce superseded, and anything in work/.
@@ -252,6 +281,10 @@ def _sweep(home) -> None:
     """
     ob = outbox_dir(home)
     if ob.is_dir():
+        _quarantine_bad_sidecars(ob)
+        # A quarantined sidecar may name files we cannot see: delete nothing
+        # unnamed while one exists, or a committed item's segments go with it.
+        protect = any(ob.glob("*.json.bad"))
         pairs = _read_sidecars(home)
         items = [it for _p, it in pairs]
         live: set[str] = set()
@@ -267,7 +300,7 @@ def _sweep(home) -> None:
                 p.unlink(missing_ok=True)
             elif p.suffix == ".json":
                 continue
-            elif p.name not in live:
+            elif p.name not in live and not protect:
                 p.unlink(missing_ok=True)
     wd = work_dir(home)
     if wd.is_dir():
@@ -293,6 +326,18 @@ def _copy_store(store_path, dst: Path) -> None:
             out.close()
     finally:
         src.close()
+
+
+def _logical_size(store_path) -> int:
+    """page_count x page_size: what the copy will occupy. The main file alone
+    can be far smaller in WAL mode, where committed pages live in the -wal."""
+    con = sqlite3.connect(f"{Path(store_path).resolve().as_uri()}?mode=ro", uri=True)
+    try:
+        n = con.execute("PRAGMA page_count").fetchone()[0]
+        ps = con.execute("PRAGMA page_size").fetchone()[0]
+    finally:
+        con.close()
+    return int(n) * int(ps)
 
 
 def _remove_copy(copy: Path) -> None:
@@ -390,7 +435,7 @@ def capture(home, store_path, key: bytes, *, lock=nullcontext(),
     wd = work_dir(home)
     wd.mkdir(parents=True, exist_ok=True)
     outbox_dir(home).mkdir(parents=True, exist_ok=True)
-    need = int(os.path.getsize(store_path) * _SPACE_MARGIN)
+    need = int(_logical_size(store_path) * _SPACE_MARGIN)
     free = shutil.disk_usage(str(wd)).free
     if free < need:
         raise OSError(errno.ENOSPC,
@@ -416,20 +461,33 @@ def _capture_copy(home, copy: Path, key: bytes, *, settings: Settings, now: floa
     state = _load_state(home)
     fp = backup_pages.records_fingerprint(records_dir, config_path)
 
-    # Items committed after the last saved state (a crash between the sidecar
-    # rename and capture.json). See the module docstring.
-    later: list[Item] = []
-    if state is not None:
-        later = sorted((it for it in pending_items(home)
+    # Items of the state's chain committed after the last saved state (a crash
+    # between the sidecar rename and capture.json). See the module docstring.
+    since: list[Item] = []   # every such item: they are in the chain now
+    later: list[Item] = []   # those the index does not reflect: union their pages
+    base = (state is None or not idx_path.exists() or state.store_id != store_id)
+    index = backup_pages.PageIndex()
+    if not base:
+        index = backup_pages.PageIndex.load(idx_path)
+        h = index.digest()
+        since = sorted((it for it in pending_items(home)
                         if it.chain == state.chain and it.seq > state.seq),
                        key=lambda i: i.seq)
-
-    base = (state is None or not idx_path.exists() or state.store_id != store_id)
-    index = backup_pages.PageIndex() if base else backup_pages.PageIndex.load(idx_path)
+        if h == state.index_digest:
+            anchor = state.seq
+        else:
+            match = [it.seq for it in since if it.index_digest == h]
+            if match:
+                anchor = match[-1]
+            else:
+                base = True
+                index = backup_pages.PageIndex()
+        if not base:
+            later = [it for it in since if it.seq > anchor]
     scan = backup_pages.scan_changes(copy, index)
 
     if not base:
-        prev_count = later[-1].page_count if later else state.page_count
+        prev_count = since[-1].page_count if since else state.page_count
         # A shrink means pages the chain holds no longer exist; a page_size
         # change makes every page a different unit. Neither is a delta.
         if scan.page_size != state.page_size or scan.page_count < prev_count:
@@ -443,10 +501,10 @@ def _capture_copy(home, copy: Path, key: bytes, *, settings: Settings, now: floa
                                      min(s["last_pgno"], scan.page_count) + 1))
         if not changed and scan.page_count == prev_count and fp == state.records_fp:
             return None
-        prev_seq = later[-1].seq if later else state.seq
+        prev_seq = since[-1].seq if since else state.seq
         seq = prev_seq + 1
         so_far = state.delta_bytes + sum(
-            s["size"] for it in later for s in it.segments)
+            s["size"] for it in since for s in it.segments)
         item_name = f"{state.chain}-{seq:06d}"
         header = {"chain": state.chain, "seq": seq, "kind": "delta",
                   "page_count": scan.page_count}
@@ -501,7 +559,11 @@ def _capture_copy(home, copy: Path, key: bytes, *, settings: Settings, now: floa
 
 
 def _commit(home, item: Item, index, state: CaptureState) -> None:
-    """Sidecar (the commit), then pages.idx, then capture.json — in that order."""
+    """Sidecar (the commit), then pages.idx, then capture.json — in that order.
+
+    Both the sidecar and the state carry the new index's digest, so the next
+    capture can tell which of them (if either) pages.idx belongs to."""
+    item.index_digest = state.index_digest = index.digest()
     _write_sidecar(home, item)
     index.save(backup_dir(home) / "pages.idx")
     _save_state(home, state)
@@ -570,7 +632,10 @@ def coalesce(home, key: bytes, *, started: set[str]) -> Item | None:
                   prev_seq=run[0].prev_seq, captured_at=newest.captured_at,
                   page_size=ps, page_count=count, db_sha256=newest.db_sha256,
                   segments=segs, records=records,
-                  bytes=sum(s["size"] for s in segs) + (records["size"] if records else 0))
+                  bytes=sum(s["size"] for s in segs) + (records["size"] if records else 0),
+                  # the merged item ends at the newest's state, so pages.idx
+                  # (if it was saved for the newest) still identifies it
+                  index_digest=newest.index_digest)
     _write_sidecar(home, merged)
     for it in run[:-1]:
         (outbox_dir(home) / f"{it.name}.json").unlink(missing_ok=True)

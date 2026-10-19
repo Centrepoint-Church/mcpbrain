@@ -364,6 +364,7 @@ def test_coalesce_newest_page_wins(env):
     assert merged.kind == "delta" and merged.chain == base.chain
     assert merged.seq == d4.seq and merged.prev_seq == d2.prev_seq == 1
     assert merged.db_sha256 == d4.db_sha256
+    assert merged.index_digest == d4.index_digest != ""
     assert merged.page_count == d4.page_count
     assert all(s["name"].startswith(f"delta-{d4.seq:06d}-")
                for s in merged.segments)
@@ -455,3 +456,132 @@ def test_item_json_round_trip():
     extra = json.loads(it.to_json())
     extra["future_field"] = 1
     assert bo.Item.from_json(json.dumps(extra)) == it
+
+
+def _pages_of_chain(home, item):
+    """Every pending item of `item`'s chain up to and including it."""
+    return [i for i in bo.pending_items(home)
+            if i.chain == item.chain and i.seq <= item.seq]
+
+
+def _assert_rebuilds(home, item, store):
+    chain = _pages_of_chain(home, item)
+    assert chain[0].kind == "base"
+    rebuilt = _rebuild(home, chain)
+    assert hashlib.sha256(rebuilt).hexdigest() == item.db_sha256
+    assert _rows_of_bytes(rebuilt, home) == _rows(store)
+
+
+def _threshold_base_crash(env, monkeypatch, where):
+    home, store, _r, _c, cap = env
+    cap()
+    _update_row(store, 5, "x" * 400)
+    if where == "after_sidecar":
+        monkeypatch.setattr(bp.PageIndex, "save", lambda self, p: (_ for _ in ()).throw(
+            OSError("crash")))
+    else:
+        monkeypatch.setattr(bo, "_save_state", lambda *a, **k: (_ for _ in ()).throw(
+            OSError("crash")))
+    with pytest.raises(OSError):
+        cap(settings=bo.Settings(base_threshold=0.0))
+    monkeypatch.undo()
+    _update_row(store, 190, "y" * 400)  # a page far from row 5's
+    return home, store, cap()
+
+
+@pytest.mark.parametrize("where", ["after_sidecar", "after_index"])
+def test_crash_inside_threshold_base_commit_next_item_rebuilds(env, monkeypatch, where):
+    home, store, item = _threshold_base_crash(env, monkeypatch, where)
+    _assert_rebuilds(home, item, store)
+    _update_row(store, 9, "z" * 400)
+    _assert_rebuilds(home, env[4](), store)
+
+
+@pytest.mark.parametrize("where", ["after_sidecar", "after_index"])
+def test_crash_inside_first_base_commit_next_item_rebuilds(env, monkeypatch, where):
+    home, store, _r, _c, cap = env
+    if where == "after_sidecar":
+        monkeypatch.setattr(bp.PageIndex, "save", lambda self, p: (_ for _ in ()).throw(
+            OSError("crash")))
+    else:
+        monkeypatch.setattr(bo, "_save_state", lambda *a, **k: (_ for _ in ()).throw(
+            OSError("crash")))
+    with pytest.raises(OSError):
+        cap()
+    monkeypatch.undo()
+    _update_row(store, 7, "y" * 400)
+    item = cap()
+    _assert_rebuilds(home, item, store)
+
+
+def test_index_not_matching_state_forces_base(env):
+    """pages.idx that is not the state's index (nor a pending item's) is never
+    diffed against: e.g. the item it described was uploaded and deleted."""
+    home, store, _r, _c, cap = env
+    base = cap()
+    idx = bo.backup_dir(home) / "pages.idx"
+    data = bytearray(idx.read_bytes())
+    data[-1] ^= 0xFF
+    idx.write_bytes(bytes(data))
+    _insert(store)
+    item = cap()
+    assert item.kind == "base" and item.chain != base.chain
+
+
+def test_index_matching_state_continues_after_sidecar_uploaded(env):
+    home, store, _r, _c, cap = env
+    base = cap()
+    _insert(store)
+    d = cap()
+    # the uploader shipped both items and deleted their local files
+    for it in (base, d):
+        for f in it.files():
+            (bo.outbox_dir(home) / f).unlink()
+        (bo.outbox_dir(home) / f"{it.name}.json").unlink()
+    _insert(store)
+    nxt = cap()
+    assert nxt.kind == "delta" and nxt.prev_seq == d.seq
+
+
+def test_free_space_need_uses_logical_page_count(env, monkeypatch):
+    home, store, _r, _c, cap = env
+    con = sqlite3.connect(store)
+    ps = con.execute("PRAGMA page_size").fetchone()[0]
+    n = con.execute("PRAGMA page_count").fetchone()[0]
+    con.close()
+    need = int(n * ps * 1.1)
+    # main file reports tiny; the logical size must still drive the check
+    real_getsize = os.path.getsize
+    monkeypatch.setattr(bo.os.path, "getsize",
+                        lambda p: 1 if str(p) == str(store) else real_getsize(p))
+    usage = shutil.disk_usage(str(store.parent))
+    monkeypatch.setattr(bo.shutil, "disk_usage",
+                        lambda p: type(usage)(usage.total, 0, need - 1))
+    with pytest.raises(OSError) as ei:
+        cap()
+    assert ei.value.errno == errno.ENOSPC
+    monkeypatch.setattr(bo.shutil, "disk_usage",
+                        lambda p: type(usage)(usage.total, 0, need + 1))
+    assert cap() is not None
+
+
+@pytest.mark.parametrize("bad", ["{not json", '{"name": "x"}'])
+def test_unparseable_sidecar_quarantined_and_files_kept(env, bad):
+    home, store, _r, _c, cap = env
+    item = cap()
+    side = bo.outbox_dir(home) / f"{item.name}.json"
+    side.write_text(bad)
+    orphan = bo.outbox_dir(home) / "someone-else-delta-000003-0001"
+    orphan.write_bytes(b"maybe named by the bad sidecar")
+    _insert(store)
+    cap()
+    ob = bo.outbox_dir(home)
+    assert not side.exists()
+    assert (ob / f"{item.name}.json.bad").read_text() == bad
+    assert orphan.exists()
+    for f in item.files():
+        assert (ob / f).exists()
+    # and stays protected on later sweeps
+    _insert(store)
+    cap()
+    assert orphan.exists()

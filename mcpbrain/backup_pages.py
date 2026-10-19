@@ -72,6 +72,11 @@ class PageIndex:
         tmp.write_bytes(bytes(self._d))
         os.replace(tmp, path)
 
+    def digest(self) -> str:
+        """sha256 of the serialised index: identifies WHICH capture's state an
+        index on disk describes, so capture never diffs against the wrong one."""
+        return hashlib.sha256(bytes(self._d)).hexdigest()
+
     def __len__(self) -> int:
         return len(self._d) // _DIGEST_SIZE
 
