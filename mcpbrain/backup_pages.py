@@ -24,7 +24,6 @@ import tempfile
 import zlib
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Iterator
 
 from mcpbrain import backup
 
@@ -154,7 +153,8 @@ class SegmentFile:
 
 def _finish_segment(buf: bytes, pgnos: list[int], *, out_dir: Path, name: str,
                     key: bytes, header: dict) -> SegmentFile:
-    hdr = dict(header, first_pgno=pgnos[0], last_pgno=pgnos[-1])
+    hdr = dict(header, first_pgno=pgnos[0], last_pgno=pgnos[-1],
+               pages=len(pgnos))
     path = out_dir / name
     tmp = out_dir / (name + ".tmp")
     with backup.open_encrypted(tmp, key) as enc:
@@ -206,8 +206,15 @@ def write_segments(db_path, pgnos, *, out_dir, prefix, key: bytes,
             comp, parts, size, cur = zlib.compressobj(_ZLIB_LEVEL), [], 0, []
 
         for pgno in pgnos:
+            if pgno < 1:
+                raise ValueError(f"invalid page number {pgno}")
             f.seek((pgno - 1) * ps)
             page = f.read(ps)
+            # A short page would be framed as a short record and desync every
+            # following one in the reader; the file shrank or has a ragged tail.
+            if len(page) != ps:
+                raise ValueError(
+                    f"page {pgno} is {len(page)} bytes, expected {ps}")
             out = comp.compress(_PGNO.pack(pgno) + page)
             if out:
                 parts.append(out)
@@ -220,49 +227,109 @@ def write_segments(db_path, pgnos, *, out_dir, prefix, key: bytes,
     return segments
 
 
-def read_segment(path, key: bytes) -> tuple[dict, Iterator[tuple[int, bytes]]]:
+# Max decompressed bytes taken per zlib call. Sparse pages compress ~1000:1, so
+# without a cap one compressed block could expand to ~1 GB.
+_MAX_OUT = 1 << 20
+
+
+class _PageIter:
+    """Iterator over (pgno, page) that owns the decrypted temp dir.
+
+    Cleanup must not depend on iteration starting (a generator's `finally` never
+    runs if `next()` is never called, which would leave plaintext database pages
+    behind), so it lives in close(), which __del__ and the context manager call.
+    """
+
+    def __init__(self, tmpdir: Path, fh, page_size: int, expected: int):
+        self._tmpdir, self._fh = tmpdir, fh
+        self.peak_buffered = 0
+        self._gen = self._run(page_size, expected)
+
+    def _run(self, ps: int, expected: int):
+        dec = zlib.decompressobj()
+        buf = bytearray()
+        off = 0
+        count = 0
+        rec = 4 + ps
+        pending = b""
+        while not dec.eof:
+            if not pending:
+                pending = self._fh.read(1 << 20)
+                if not pending:
+                    break
+            buf += dec.decompress(pending, _MAX_OUT)
+            pending = dec.unconsumed_tail
+            self.peak_buffered = max(self.peak_buffered, len(buf) - off)
+            while len(buf) - off >= rec:
+                yield _PGNO.unpack_from(buf, off)[0], bytes(buf[off + 4:off + rec])
+                off += rec
+                count += 1
+            del buf[:off]  # compact once per chunk, not per page
+            off = 0
+        if not dec.eof:
+            raise ValueError("segment body truncated")
+        if buf:
+            raise ValueError("truncated page record in segment")
+        if count != expected:
+            raise ValueError(
+                f"segment holds {count} pages, header says {expected}")
+
+    def __iter__(self):
+        return self
+
+    def __next__(self):
+        try:
+            return next(self._gen)
+        except BaseException:
+            self.close()
+            raise
+
+    def close(self) -> None:
+        if self._fh is not None:
+            self._fh.close()
+            self._fh = None
+        if self._tmpdir is not None:
+            shutil.rmtree(self._tmpdir, ignore_errors=True)
+            self._tmpdir = None
+        self._gen.close()
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *exc):
+        self.close()
+
+    def __del__(self):
+        try:
+            self.close()
+        except Exception:
+            pass
+
+
+def read_segment(path, key: bytes) -> tuple[dict, "_PageIter"]:
     """Return (header, iterator of (pgno, page)). ValueError on a bad magic.
 
-    Decrypts to a private temp file, which the iterator removes when it is
-    exhausted or closed; the header is parsed eagerly so a wrong file fails here
-    rather than part-way through a restore. A wrong key raises InvalidToken.
+    Decrypts to a private temp file owned by the returned iterator (removed on
+    exhaustion, error, close(), `with`, or garbage collection). The header is
+    parsed eagerly so a wrong file fails here rather than part-way through a
+    restore. A wrong key raises InvalidToken. Iteration raises ValueError if the
+    body is truncated or its page count disagrees with the header.
     """
     tmpdir = Path(tempfile.mkdtemp(prefix="mcpbrain-seg-"))
+    fh = None
     try:
         plain = backup.decrypt_file(path, tmpdir / "seg", key)
         fh = plain.open("rb")
         if fh.read(len(_SEGMENT_MAGIC)) != _SEGMENT_MAGIC:
-            fh.close()
             raise ValueError("not an mcpbrain page segment")
         header = json.loads(fh.readline())
-        page_size = int(header["page_size"])  # always stamped by write_segments
+        it = _PageIter(tmpdir, fh, int(header["page_size"]), int(header["pages"]))
     except BaseException:
+        if fh is not None:
+            fh.close()
         shutil.rmtree(tmpdir, ignore_errors=True)
         raise
-
-    def pages() -> Iterator[tuple[int, bytes]]:
-        try:
-            dec = zlib.decompressobj()
-            buf = b""
-            ps = page_size
-            while True:
-                blk = fh.read(1 << 20)
-                if blk:
-                    buf += dec.decompress(blk)
-                else:
-                    buf += dec.flush()
-                while ps and len(buf) >= 4 + ps:
-                    yield _PGNO.unpack_from(buf)[0], buf[4:4 + ps]
-                    buf = buf[4 + ps:]
-                if not blk:
-                    break
-            if buf:
-                raise ValueError("truncated page record in segment")
-        finally:
-            fh.close()
-            shutil.rmtree(tmpdir, ignore_errors=True)
-
-    return header, pages()
+    return header, it
 
 
 def _record_files(records_dir, config_path):

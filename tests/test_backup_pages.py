@@ -1,5 +1,7 @@
 """Page index, page scan and encrypted page segments (incremental backup)."""
 import hashlib
+import json
+import zlib
 import os
 import sqlite3
 import tarfile
@@ -207,3 +209,87 @@ def test_records_tar_uses_restore_arc_names(tmp_path):
     with tarfile.open(plain) as t:
         names = t.getnames()
     assert "records/a.md" in names and "config.json" in names
+
+
+def _zero_db(path, npages=64, ps=4096):
+    data = bytearray(npages * ps)
+    data[:16] = b"SQLite format 3\x00"
+    data[16:18] = ps.to_bytes(2, "big")
+    path.write_bytes(bytes(data))
+    return path
+
+
+def test_read_segment_bounded_memory_on_sparse_pages(tmp_path, monkeypatch):
+    db = _zero_db(tmp_path / "z.sqlite3")
+    key = backup.generate_escrow_key()
+    segs = bp.write_segments(db, list(range(1, 65)), out_dir=tmp_path / "o",
+                             prefix="z", key=key, header={})
+    monkeypatch.setattr(bp, "_MAX_OUT", 8192)
+    _, it = bp.read_segment(segs[0].path, key)
+    got = list(it)
+    assert [n for n, _ in got] == list(range(1, 65))
+    assert all(p == db.read_bytes()[(n - 1) * 4096:n * 4096] for n, p in got)
+    assert it.peak_buffered <= 8192 + 4 + 4096
+
+
+def test_write_segments_rejects_short_page_and_bad_pgno(tmp_path):
+    db = _zero_db(tmp_path / "z.sqlite3", npages=4)
+    with db.open("ab") as f:
+        f.write(b"\x00" * 100)  # ragged tail
+    key = backup.generate_escrow_key()
+    with pytest.raises(ValueError):
+        bp.write_segments(db, [5], out_dir=tmp_path / "o", prefix="a", key=key, header={})
+    with pytest.raises(ValueError):
+        bp.write_segments(db, [9], out_dir=tmp_path / "o", prefix="a", key=key, header={})
+    with pytest.raises(ValueError):
+        bp.write_segments(db, [0], out_dir=tmp_path / "o", prefix="a", key=key, header={})
+
+
+def test_read_segment_header_only_leaves_no_plaintext(tmp_path, monkeypatch):
+    import gc
+    import tempfile
+    made = []
+    real = tempfile.mkdtemp
+
+    def spy(*a, **k):
+        d = real(*a, **k)
+        made.append(d)
+        return d
+    monkeypatch.setattr(tempfile, "mkdtemp", spy)
+    db = _db50(tmp_path)
+    key = backup.generate_escrow_key()
+    segs = bp.write_segments(db, [1, 2], out_dir=tmp_path / "o", prefix="b",
+                             key=key, header={})
+    header, it = bp.read_segment(segs[0].path, key)
+    seg_dirs = [d for d in made if "mcpbrain-seg-" in d]
+    assert seg_dirs and all(os.path.exists(d) for d in seg_dirs)
+    del it
+    gc.collect()
+    assert header["pages"] == 2
+    assert not any(os.path.exists(d) for d in seg_dirs)
+
+
+def _hand_segment(path, key, body, header):
+    with backup.open_encrypted(path, key) as enc:
+        enc.write(bp._SEGMENT_MAGIC)
+        enc.write(json.dumps(header).encode() + b"\n")
+        enc.write(body)
+
+
+def test_read_segment_detects_truncated_body(tmp_path):
+    key = backup.generate_escrow_key()
+    ps = 4096
+    recs = b"".join(bp._PGNO.pack(n) + bytes([n]) * ps for n in (1, 2, 3))
+    hdr = {"page_size": ps, "pages": 3, "first_pgno": 1, "last_pgno": 3}
+    full = zlib.compress(recs)
+    # cut mid-stream
+    _hand_segment(tmp_path / "cut", key, full[:-6], hdr)
+    with pytest.raises(ValueError):
+        list(bp.read_segment(tmp_path / "cut", key)[1])
+    # clean stream cut at a record boundary: eof ok, page count short
+    _hand_segment(tmp_path / "short", key, zlib.compress(recs[: 2 * (4 + ps)]), hdr)
+    with pytest.raises(ValueError):
+        list(bp.read_segment(tmp_path / "short", key)[1])
+    # intact passes
+    _hand_segment(tmp_path / "ok", key, full, hdr)
+    assert len(list(bp.read_segment(tmp_path / "ok", key)[1])) == 3
