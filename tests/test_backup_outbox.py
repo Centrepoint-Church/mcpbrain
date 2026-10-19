@@ -382,6 +382,32 @@ def test_coalesce_newest_page_wins(env):
     assert bo.coalesce(home, KEY, started=set()) is None
 
 
+def test_coalesce_stops_at_deadline_after_two_items(env):
+    """A clock that advances per read bounds the merge: once the deadline has
+    passed the run is cut (never below two items) and the rest stay pending,
+    following the merged item, so restore still rebuilds every state."""
+    home, store, _r, _c, cap = env
+    base = cap()
+    ds = []
+    for v in ("a", "b", "c", "d"):
+        _update_row(store, 5, v * 400)
+        ds.append(cap())
+    t = [0.0]
+
+    def clock():
+        t[0] += 10
+        return t[0]
+
+    merged = bo.coalesce(home, KEY, started=set(), deadline=5, clock=clock)
+    assert merged.seq == ds[1].seq and merged.prev_seq == base.seq
+    pend = bo.pending_items(home)
+    assert [i.name for i in pend] == [base.name, merged.name, ds[2].name, ds[3].name]
+    assert ds[2].prev_seq == merged.seq
+    rebuilt = _rebuild(home, pend)
+    assert hashlib.sha256(rebuilt).hexdigest() == ds[3].db_sha256
+    assert hashlib.sha256(_rebuild(home, [base, merged])).hexdigest() == ds[1].db_sha256
+
+
 def test_coalesce_does_not_merge_across_started(env):
     home, store, base, (d2, d3, d4) = _three_deltas(env)
     assert bo.coalesce(home, KEY, started={d3.name}) is None

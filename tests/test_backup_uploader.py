@@ -498,3 +498,171 @@ def test_on_progress_reports_bytes(env):
     env.step(on_progress=seen.append)
     assert seen and {"item", "file", "sent", "total"} <= set(seen[-1])
 
+
+
+# ---- review fix round 1 -------------------------------------------------
+
+def _flip(path, at=200):
+    data = bytearray(path.read_bytes())
+    data[at] ^= 0xFF
+    path.write_bytes(bytes(data))
+
+
+def test_crash_after_journal_commit_finishes_cleanup_not_a_gap(env, monkeypatch, caplog):
+    """Killed after the journal records committed_seq but before the sidecar
+    goes: the next step finishes that commit (restore point, cleanup) and
+    uploads the later delta; no gap, no forced base."""
+    base = env.cap(clock=lambda: 1_000.0)
+    _insert(env.store, 5)
+    d2 = env.cap(clock=lambda: 2_000.0)
+    _insert(env.store, 5)
+    d3 = env.cap(clock=lambda: 3_000.0)
+    real = bu._finish_local
+
+    def crash(home, item):
+        if item.name == d2.name:
+            raise KeyboardInterrupt  # stands in for a kill; not an Exception
+        return real(home, item)
+
+    monkeypatch.setattr(bu, "_finish_local", crash)
+    j = bu.load_journal(env.home)
+    j["inflight"][d3.name] = {}          # keep d3 out of a merge for step 1
+    bu.save_journal(env.home, j)
+    with pytest.raises(KeyboardInterrupt):
+        env.step()
+    monkeypatch.setattr(bu, "_finish_local", real)
+    assert bu.load_journal(env.home)["chains"][base.chain]["committed_seq"] == 2
+    assert d2.name in [it.name for it in bo.pending_items(env.home)]
+
+    with caplog.at_level(logging.WARNING, logger="mcpbrain.backup_uploader"):
+        res = env.step()
+    assert res.error is None
+    assert res.committed == [d2.name, d3.name]
+    assert not [r for r in caplog.records if "discarded" in r.getMessage()]
+    assert (bo.backup_dir(env.home) / "capture.json").exists()
+    st = _state(env)
+    assert st["restore_point"] == 3_000.0 and st["consecutive_failures"] == 0
+    _insert(env.store, 5)
+    assert env.cap().kind == "delta"
+
+
+def test_committed_item_never_coalesced(env, monkeypatch):
+    base = env.cap()
+    _insert(env.store, 5)
+    d2 = env.cap()
+    _insert(env.store, 5)
+    d3 = env.cap()
+    # journal says d2 is committed, its sidecar survived (crash), d3 not started
+    j = bu.load_journal(env.home)
+    j["chains"][base.chain] = {"folder_id": "x", "committed_seq": 2, "files": [],
+                               "base_bytes": 0, "manifests": []}
+    bu.save_journal(env.home, j)
+    seen = []
+    real = bo.coalesce
+
+    def spy(home, key, *, started, **kw):
+        seen.append(set(started))
+        return real(home, key, started=started, **kw)
+
+    monkeypatch.setattr(bo, "coalesce", spy)
+    monkeypatch.setattr(bu, "_finish_committed", lambda home, j: [])
+    bu._coalesce(env.home, KEY, bu.load_journal(env.home), deadline=1e18,
+                 clock=lambda: 0.0)
+    assert seen and all({base.name, d2.name} <= s for s in seen)
+    assert {it.name for it in bo.pending_items(env.home)} == {base.name, d2.name, d3.name}
+
+
+def test_corrupt_segment_during_coalesce_discards_item_not_uploads(env):
+    base = env.cap()
+    _insert(env.store, 5)
+    d2 = env.cap()
+    _insert(env.store, 5)
+    env.cap()
+    _flip(bo.outbox_dir(env.home) / d2.segments[0]["file"])
+    res = env.step()
+    assert res.error is None
+    assert res.committed == [base.name]
+    assert bo.pending_items(env.home) == []
+    assert not (bo.backup_dir(env.home) / "capture.json").exists()
+    _insert(env.store, 5)
+    assert env.cap().kind == "base"
+
+
+def test_unattributable_coalesce_failure_uploads_unmerged(env, monkeypatch):
+    base = env.cap()
+    _insert(env.store, 5)
+    d2 = env.cap()
+    _insert(env.store, 5)
+    d3 = env.cap()
+
+    def boom(*a, **kw):
+        raise RuntimeError("merge exploded")
+
+    monkeypatch.setattr(bo, "coalesce", boom)
+    res = env.step()
+    assert res.error is None
+    assert res.committed == [base.name, d2.name, d3.name]
+    assert (bo.backup_dir(env.home) / "capture.json").exists()
+
+
+def test_repeated_drive_mismatch_discards_item_after_three(env):
+    base = env.cap()
+    env.server.corrupt.add(base.segments[0]["name"])
+    for n in (1, 2):
+        res = env.step()
+        assert res.error and "md5" in res.error
+        assert [it.name for it in bo.pending_items(env.home)] == [base.name]
+        assert (bo.backup_dir(env.home) / "capture.json").exists()
+    res = env.step()
+    assert bo.pending_items(env.home) == []
+    assert not (bo.backup_dir(env.home) / "capture.json").exists()
+    assert bu.load_journal(env.home)["mismatches"] == {}
+
+
+def test_permission_errors_never_discard(env):
+    base = env.cap()
+
+    def refuse(n, method, headers, body):
+        return 403, {}, b'{"error": {"errors": [{"reason": "insufficientFilePermissions"}]}}'
+
+    for _ in range(5):
+        res = env.step(transport=FakeTransport(env.server, hook=refuse))
+        assert res.error
+    assert [it.name for it in bo.pending_items(env.home)] == [base.name]
+    assert (bo.backup_dir(env.home) / "capture.json").exists()
+    assert _state(env)["consecutive_failures"] == 5
+
+
+def test_local_file_not_matching_sidecar_is_never_uploaded(env):
+    base = env.cap()
+    bad = base.segments[0]
+    _flip(bo.outbox_dir(env.home) / bad["file"])
+    t = FakeTransport(env.server)
+    res = env.step(transport=t)
+    assert res.committed == []
+    assert not [s for s in env.server.sessions.values()
+                if s["meta"]["name"] == bad["name"]]
+    assert not [n for m in env.svc._all().values()
+                if (n := m["name"]).startswith("manifest-")]
+    assert bo.pending_items(env.home) == []
+    assert not (bo.backup_dir(env.home) / "capture.json").exists()
+
+
+def test_coalescing_stays_inside_the_budget(env, monkeypatch):
+    env.cap()
+    t = [0.0]
+
+    def clock():
+        return t[0]
+
+    calls = []
+
+    def slow_merge(home, key, *, started, deadline=None, clock=None):
+        calls.append(deadline)
+        t[0] += 100           # each merge costs 100 s
+        return object()       # "merged something": the loop would go again
+
+    monkeypatch.setattr(bo, "coalesce", slow_merge)
+    env.step(budget_s=150, clock=clock)
+    assert len(calls) == 2
+    assert all(d == 150 for d in calls)

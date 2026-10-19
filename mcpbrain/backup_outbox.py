@@ -581,29 +581,38 @@ def _sqlite_header(page_size: int) -> bytes:
     return b"SQLite format 3\x00" + enc.to_bytes(2, "big") + b"\x00" * 82
 
 
-def coalesce(home, key: bytes, *, started: set[str]) -> Item | None:
+def coalesce(home, key: bytes, *, started: set[str], deadline: float | None = None,
+             clock=time.monotonic) -> Item | None:
     """Merge the first run of >=2 consecutive, not-started deltas of one chain.
 
-    Newest page wins; the merged item takes the newest item's name, seq,
-    page_count, db_sha256 and capture time, the oldest's prev_seq, and the
-    newest non-None records. Order: merged segments (unique local names) ->
+    Newest page wins; the merged item takes the newest merged item's name,
+    seq, page_count, db_sha256 and capture time, the oldest's prev_seq, and
+    the newest non-None records. Order: merged segments (unique local names) ->
     merged sidecar renamed over the newest's sidecar (the commit) -> older
     sidecars deleted -> files nothing names any more swept. A crash after the
     commit leaves older sidecars that `_superseded` hides and the next sweep
     removes. Returns the merged Item, or None when there is nothing to merge.
+
+    `deadline` (on `clock`) bounds the work: once it passes, the run is cut
+    after the item just read (never before two, so every call that starts
+    makes progress). The items left out stay pending, still following the
+    merged item, and a later call can merge them.
     """
     _sweep(home)
     run = _first_run(home, started)
     if run is None:
         return None
-    newest = run[-1]
-    ps, count = newest.page_size, newest.page_count
+    ps = run[-1].page_size
     work_dir(home).mkdir(parents=True, exist_ok=True)
     sparse = work_dir(home) / f"coalesce-{_token()}.pages"
     seen: set[int] = set()
+    merged_run: list[Item] = []
     try:
         with sparse.open("wb") as f:
             for it in run:
+                if (deadline is not None and len(merged_run) >= 2
+                        and clock() >= deadline):
+                    break
                 if it.page_size != ps:
                     raise ValueError(f"{it.name}: page_size differs within a chain")
                 for s in it.segments:
@@ -613,20 +622,25 @@ def coalesce(home, key: bytes, *, started: set[str]) -> Item | None:
                         if int(hdr["page_size"]) != ps:
                             raise ValueError(f"{s['file']}: page_size mismatch")
                         for pgno, page in pages:
-                            if pgno > count:
+                            if pgno > it.page_count:
                                 continue
                             f.seek((pgno - 1) * ps)
                             f.write(page)
                             seen.add(pgno)
+                merged_run.append(it)
             if 1 not in seen:
                 f.seek(0)
                 f.write(_sqlite_header(ps))
+        newest = merged_run[-1]
+        count = newest.page_count
         header = {"chain": newest.chain, "seq": newest.seq, "kind": "delta",
                   "page_count": count}
-        segs = _write_pages(home, sparse, seen, item_name=newest.name,
+        segs = _write_pages(home, sparse, {p for p in seen if p <= count},
+                            item_name=newest.name,
                             prefix=f"delta-{newest.seq:06d}", key=key, header=header)
     finally:
         sparse.unlink(missing_ok=True)
+    run = merged_run
     records = next((it.records for it in reversed(run) if it.records), None)
     merged = Item(name=newest.name, kind="delta", chain=newest.chain, seq=newest.seq,
                   prev_seq=run[0].prev_seq, captured_at=newest.captured_at,

@@ -16,7 +16,8 @@ outbox/, whose sweep deletes every file no sidecar names)::
                  "last_captured_at", "committed_at", "manifests": [{seq, file_id}]}},
      "inflight": {item_name: {drive_name: Session json | {"file_id", ...}}},
      "pending_deletes": [file_id, ...],
-     "stalls": {"<item>/<drive_name>": consecutive no-progress steps}}
+     "stalls": {"<item>/<drive_name>": consecutive no-progress steps},
+     "mismatches": {"<item>/<drive_name>": consecutive Drive/local mismatches}}
 
 An inflight entry is either the resumable Session (resume by status query) or,
 once Drive's size and md5 equal the local file's, the recorded file id — and
@@ -43,6 +44,7 @@ creating it; nothing is deleted or re-uploaded because a listing omitted it.
 """
 from __future__ import annotations
 
+import hashlib
 import json
 import logging
 import os
@@ -62,10 +64,22 @@ _OCTET = "application/octet-stream"
 # Coalesce merges one run per call; bound the loop so a pathological outbox
 # cannot spin the step.
 _MAX_COALESCE = 64
+# Consecutive steps in which Drive's size/md5 for the same file disagree with
+# the local file before the item is judged locally broken and discarded.
+_MAX_MISMATCHES = 3
 
 
 class UploadFailed(Exception):
     """A file or manifest Drive holds does not match what we sent."""
+
+
+class _Discard(Exception):
+    """`item` cannot be uploaded as captured (local corruption): discard it
+    and the rest of its chain, so the next capture is a base."""
+
+    def __init__(self, item, why: str):
+        super().__init__(why)
+        self.item, self.why = item, why
 
 
 @dataclass
@@ -82,7 +96,8 @@ def journal_path(home):
 
 
 def _empty() -> dict:
-    return {"chains": {}, "inflight": {}, "pending_deletes": [], "stalls": {}}
+    return {"chains": {}, "inflight": {}, "pending_deletes": [], "stalls": {},
+            "mismatches": {}}
 
 
 def load_journal(home) -> dict:
@@ -149,7 +164,7 @@ def _delete_remote(svc, j: dict, file_id: str) -> None:
 
 
 def _continuous(j: dict, item: bo.Item) -> bool:
-    committed = int((j["chains"].get(item.chain) or {}).get("committed_seq") or 0)
+    committed = _committed_seq(j, item.chain)
     if item.kind == "base":
         return committed == 0 and item.prev_seq is None
     return committed > 0 and item.prev_seq == committed
@@ -160,6 +175,65 @@ def _locally_complete(home, j: dict, item: bo.Item) -> bool:
     ob = bo.outbox_dir(home)
     return all("file_id" in (done.get(spec["name"]) or {}) or (ob / spec["file"]).is_file()
                for spec, _k in _item_files(item))
+
+
+def _forget_counters(j: dict, item_name: str) -> None:
+    for table in ("stalls", "mismatches"):
+        for k in [k for k in j[table] if k.startswith(f"{item_name}/")]:
+            del j[table][k]
+
+
+def _sha256(path) -> str:
+    h = hashlib.sha256()
+    with open(path, "rb") as fh:
+        for block in iter(lambda: fh.read(1 << 20), b""):
+            h.update(block)
+    return h.hexdigest()
+
+
+def _corrupt_item(home, items: list[bo.Item]) -> bo.Item | None:
+    """The first of `items` with a local file whose sha256 differs from its
+    sidecar's: what a failed coalesce is attributed to."""
+    ob = bo.outbox_dir(home)
+    for it in items:
+        for spec, _k in _item_files(it):
+            p = ob / spec["file"]
+            try:
+                if p.is_file() and _sha256(p) != spec["sha256"]:
+                    return it
+            except OSError:
+                return it
+    return None
+
+
+def _committed_seq(j: dict, chain: str) -> int:
+    return int((j["chains"].get(chain) or {}).get("committed_seq") or 0)
+
+
+def _finish_local(home, item: bo.Item) -> None:
+    """Local half of a commit, run after the journal records it: idempotent,
+    so a crash anywhere in it is finished by the next step."""
+    # R6: capture.json behind this item (a crash between its sidecar rename
+    # and capture.json) would, once the sidecar is gone, let the next capture
+    # reuse this seq. Drop it before the sidecar so the next capture is a base.
+    cs = bo._load_state(home)
+    if cs is not None and cs.chain == item.chain and item.seq > cs.seq:
+        _drop_capture_state(home)
+    _delete_local(home, item)
+    write_backup_state(home, ok=True, restore_point=item.captured_at)
+
+
+def _finish_committed(home, j: dict) -> list[str]:
+    """Items the journal already committed (a crash after the journal write,
+    before the sidecar went): finish their cleanup. Never discard them as a
+    gap, never coalesce them."""
+    done = []
+    for it in bo.pending_items(home):
+        if it.seq <= _committed_seq(j, it.chain):
+            log.info("backup: %s was committed before a restart; finishing", it.name)
+            _finish_local(home, it)
+            done.append(it.name)
+    return done
 
 
 def _drop_capture_state(home) -> None:
@@ -182,17 +256,16 @@ def _discard_from(home, j: dict, item: bo.Item, why: str) -> int:
             fid = entry.get("file_id") if isinstance(entry, dict) else None
             if fid and fid not in j["pending_deletes"]:
                 j["pending_deletes"].append(fid)
-        for k in [k for k in j["stalls"] if k.startswith(f"{it.name}/")]:
-            del j["stalls"][k]
+        _forget_counters(j, it.name)
     save_journal(home, j)
     # capture.json first: a crash after it but before the sidecars go still
     # leaves the next capture a base.
     _drop_capture_state(home)
     for it in victims:
         _delete_local(home, it)
-    log.warning("backup chain %s has a gap at %s (%s); discarded %d item(s), "
-                "the next capture starts a new base", item.chain, item.name, why,
-                len(victims))
+    log.warning("backup chain %s: discarded %s and %d later item(s) (%s); "
+                "the next capture starts a new base", item.chain, item.name,
+                len(victims) - 1, why)
     return len(victims)
 
 
@@ -280,26 +353,36 @@ def upload_step(home, *, drive_service, transport, key, budget_s,
     j = load_journal(home)
     error: str | None = None
     try:
-        loc = backup_location.resolve(home, drive_service, create=True)
-        for _ in range(_MAX_COALESCE):
-            if bo.coalesce(home, key, started=set(j["inflight"])) is None:
-                break
+        committed += _finish_committed(home, j)
+        _coalesce(home, key, j, deadline=deadline, clock=clock)
+        loc = None
         while clock() < deadline:
             items = bo.pending_items(home)
             if not items:
                 break
             item = items[0]
+            if item.seq <= _committed_seq(j, item.chain):
+                _finish_local(home, item)
+                committed.append(item.name)
+                continue
             if not _continuous(j, item):
-                have = (j["chains"].get(item.chain) or {}).get("committed_seq") or 0
                 _discard_from(home, j, item,
-                              f"follows seq {item.prev_seq}, chain has {have} committed")
+                              f"gap: follows seq {item.prev_seq}, chain has "
+                              f"{_committed_seq(j, item.chain)} committed")
                 continue
             if not _locally_complete(home, j, item):
                 _discard_from(home, j, item, "local files missing")
                 continue
-            if not _upload_item(home, drive_service, transport, key, j, loc, item,
-                                deadline=deadline, clock=clock, sleep=sleep,
-                                wall=wall, on_progress=on_progress, state=state):
+            if loc is None:
+                loc = backup_location.resolve(home, drive_service, create=True)
+            try:
+                ok = _upload_item(home, drive_service, transport, key, j, loc, item,
+                                  deadline=deadline, clock=clock, sleep=sleep,
+                                  wall=wall, on_progress=on_progress, state=state)
+            except _Discard as d:
+                _discard_from(home, j, d.item, d.why)
+                continue
+            if not ok:
                 break
             committed.append(item.name)
     except Exception as exc:  # noqa: BLE001 — recorded, surfaced, retried next step
@@ -317,6 +400,33 @@ def upload_step(home, *, drive_service, transport, key, budget_s,
             log.warning("backup journal write failed: %s", exc)
         write_backup_state(home, ok=False, error=error)
     return _result(home, committed, state["progress"], error)
+
+
+def _coalesce(home, key, j: dict, *, deadline, clock) -> None:
+    """Merge runs of not-started deltas within the step's budget. A failure
+    never blocks uploads: a corrupt local file is pinned on its item, which is
+    discarded (new base); anything else is logged and merging is skipped."""
+    for _ in range(_MAX_COALESCE):
+        if clock() >= deadline:
+            return
+        # Committed items were finished above; listing them too keeps a
+        # committed-but-uncleaned item out of any merge regardless.
+        started = set(j["inflight"]) | {
+            it.name for it in bo.pending_items(home)
+            if it.seq <= _committed_seq(j, it.chain)}
+        try:
+            if bo.coalesce(home, key, started=started, deadline=deadline,
+                           clock=clock) is None:
+                return
+        except Exception as exc:  # noqa: BLE001 — see docstring
+            cands = [it for it in bo.pending_items(home)
+                     if it.kind == "delta" and it.name not in started]
+            bad = _corrupt_item(home, cands)
+            if bad is None:
+                log.warning("backup: merging pending deltas failed (%s); uploading "
+                            "them unmerged", exc)
+                return
+            _discard_from(home, j, bad, f"corrupt local file found while merging: {exc}")
 
 
 def _upload_item(home, svc, transport, key, j, loc, item: bo.Item, *, deadline,
@@ -351,10 +461,18 @@ def _upload_item(home, svc, transport, key, j, loc, item: bo.Item, *, deadline,
             save_journal(home, j)
             _report(s.offset, _size)
 
+        # Never ship bytes the sidecar does not vouch for: a corrupted local
+        # file would commit a restore point that cannot be rebuilt.
+        if _sha256(path) != spec["sha256"]:
+            raise _Discard(item, f"local file {name} does not match its recorded sha256")
         try:
             meta = dr.upload_file(transport, path, name=name, parent_id=folder,
                                   session=session, save=save, deadline=deadline,
                                   clock=clock, sleep=sleep)
+        except dr.UploadMismatch as exc:
+            _note_stall(j, stall_key, best["moved"])
+            _note_mismatch(j, item, stall_key, exc)
+            raise
         except Exception:
             _note_stall(j, stall_key, best["moved"])
             raise
@@ -369,16 +487,18 @@ def _upload_item(home, svc, transport, key, j, loc, item: bo.Item, *, deadline,
             return False
         try:
             meta = _confirm(svc, meta, path)
-        except dr.UploadMismatch:
+        except dr.UploadMismatch as exc:
             # Drive holds different bytes: that file id is worthless. Drop it
             # and the session so the next step uploads the file afresh.
             done.pop(name, None)
             _delete_remote(svc, j, meta["id"])
+            _note_mismatch(j, item, stall_key, exc)
             save_journal(home, j)
             raise
         done[name] = {"file_id": meta["id"], "size": spec["size"],
                       "sha256": spec["sha256"]}
         j["stalls"].pop(stall_key, None)
+        j["mismatches"].pop(stall_key, None)
         state["moved"] = True
         save_journal(home, j)
         path.unlink(missing_ok=True)
@@ -389,6 +509,17 @@ def _upload_item(home, svc, transport, key, j, loc, item: bo.Item, *, deadline,
     _commit(home, svc, key, j, item, folder, wall)
     state["moved"] = True
     return True
+
+
+def _note_mismatch(j: dict, item: bo.Item, key: str, exc: Exception) -> None:
+    """Count a size/md5 disagreement; at _MAX_MISMATCHES in a row the file
+    (and so the item) is judged broken. Errors not about the file's bytes
+    (403, quota, network) never come here and never discard."""
+    n = int(j["mismatches"].get(key) or 0) + 1
+    j["mismatches"][key] = n
+    if n >= _MAX_MISMATCHES:
+        raise _Discard(item, f"{key.split('/', 1)[1]} mismatched on Drive {n} times "
+                             f"in a row ({exc})") from exc
 
 
 def _note_stall(j: dict, key: str, moved: bool) -> int:
@@ -419,18 +550,9 @@ def _commit(home, svc, key, j: dict, item: bo.Item, folder: str, wall) -> None:
     entry["committed_at"] = wall()
     entry.setdefault("manifests", []).append({"seq": item.seq, "file_id": manifest_id})
     j["inflight"].pop(item.name, None)
-    for k in [k for k in j["stalls"] if k.startswith(f"{item.name}/")]:
-        del j["stalls"][k]
+    _forget_counters(j, item.name)
     save_journal(home, j)
-
-    # R6: capture.json behind this item (a crash between its sidecar rename and
-    # capture.json) would, once the sidecar is gone, let the next capture reuse
-    # this seq. Drop it before the sidecar so the next capture is a base.
-    cs = bo._load_state(home)
-    if cs is not None and cs.chain == item.chain and item.seq > cs.seq:
-        _drop_capture_state(home)
-    _delete_local(home, item)
-    write_backup_state(home, ok=True, restore_point=item.captured_at)
+    _finish_local(home, item)
 
 
 def _result(home, committed, progress, error) -> StepResult:
