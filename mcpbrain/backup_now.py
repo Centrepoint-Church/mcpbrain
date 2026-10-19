@@ -53,12 +53,17 @@ def _describe(running: dict) -> str:
 
 
 def main(argv=None, *, client=None, home=None, sleep=time.sleep,
-         clock=time.monotonic, out=print) -> int:
+         clock=time.monotonic, out=None) -> int:
     p = argparse.ArgumentParser(prog="mcpbrain backup",
                                 description="Back up the brain to Google Drive now.")
     p.add_argument("--no-wait", action="store_true",
                    help="ask the daemon to back up, then return without watching")
     args = p.parse_args(argv or [])
+    if out is None:
+        # Flushed: the command is mostly waiting, and a buffered print would
+        # show nothing until the end when stdout is not a terminal.
+        def out(line):
+            print(line, flush=True)
     home = home or app_dir()
     client = client or ControlClient()
 
