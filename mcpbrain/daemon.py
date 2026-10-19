@@ -46,7 +46,7 @@ from contextlib import contextmanager, nullcontext
 from dataclasses import dataclass, replace
 from pathlib import Path
 
-from mcpbrain import auth, backup, config, control_api, drain, graph_write, prepare
+from mcpbrain import auth, backup, backup_restore, config, control_api, drain, graph_write, prepare
 from mcpbrain.agents import win_supervised
 from mcpbrain.backup import make_encrypted_snapshot, upload_snapshot
 from mcpbrain.backup_state import write_backup_state  # noqa: F401 — re-exported; moved there
@@ -1626,6 +1626,14 @@ class Daemon:
                     return
                 continue
             if status in ("restored", "no_snapshot"):
+                self._release_restore_hold(home)
+                bo.succeeded()
+            elif status == "partial":
+                # R24: the store is restored (it has content now), the records
+                # repo / config.json are not. Never retried -- the empty-store
+                # rule would refuse it -- so lift the hold and surface it.
+                self._restore_error = ("store restored, but the records repo / "
+                                       f"config.json were not: {exc}")[:200]
                 self._release_restore_hold(home)
                 bo.succeeded()
             elif status == "unconfigured":
@@ -5114,16 +5122,15 @@ def write_daemon_heartbeat(home) -> None:
 
 
 def maybe_restore_on_first_run(store, home) -> bool:
-    """Restore the latest encrypted snapshot when starting with an empty store.
-
-    No-op unless: the store is empty (chunk_count() == 0), a backup is fully
-    configured, and Drive has at least one snapshot. The subsequent normal
-    daemon cycle performs the delta sync. Returns True if a restore ran.
+    """If the store is empty and backup is configured, restore the newest
+    restore point from Drive (store + records repo + config.json). The
+    subsequent normal daemon cycle performs the delta sync. Returns True if a
+    restore ran (a partial one included: the store has content now).
     The daemon itself uses _restore_on_first_run_classified, which also
     reports a transient skip.
     """
     status, _exc = _restore_on_first_run_classified(store, home)
-    return status == "restored"
+    return status in ("restored", "partial")
 
 
 def _restore_on_first_run_classified(store, home, *, gate=None):
@@ -5132,14 +5139,19 @@ def _restore_on_first_run_classified(store, home, *, gate=None):
       ("unconfigured", None) backup not configured / credentials permanently bad
       ("transient", exc)     Google unreachable (credentials, listing, download),
                              or the live store was busy at the swap
-      ("no_snapshot", None)  Drive definitively holds no snapshot
+      ("no_snapshot", None)  Drive definitively holds no restore point
       ("restored", None)
-    Any other failure (wrong key, corrupt snapshot) is raised, as before.
-    `gate` (the daemon's restoring gate) brackets only the final swap; see
-    backup.download_and_restore.
+      ("partial", exc)       the store was swapped in, but the records repo /
+                             config.json could not be placed after it (R24):
+                             the store has content now, so this is reported,
+                             never retried
+    Any other failure (wrong key, every restore point broken) is raised, as
+    before. `gate` (the daemon's restoring gate; default the store's own)
+    brackets only the final swap (backup.swap_in_store).
 
-    References backup functions via the module attribute (backup.find_latest_snapshot,
-    backup.download_and_restore) so they remain patchable in tests.
+    Goes through backup_restore.restore_latest -- the one restore function
+    every entry point uses -- referenced via the module attribute so tests can
+    patch it.
     """
     if store.chunk_count() != 0:
         return ("not_empty", None)
@@ -5151,21 +5163,34 @@ def _restore_on_first_run_classified(store, home, *, gate=None):
             log.warning("restore-on-first-run: Google unreachable (transient): %s", transient)
             return ("transient", transient)
         return ("unconfigured", None)
+    swap_gate = gate if gate is not None else getattr(store, "restoring_gate", None)
+    swapped: list[bool] = []
+
+    def swap(stage, dest):
+        backup.swap_in_store(stage, dest, gate=swap_gate)
+        swapped.append(True)
+
     try:
-        file_id = backup.find_latest_snapshot(bc.drive_service, bc.shared_drive_id,
-                                              bc.user_id)
-        if not file_id:
+        result = backup_restore.restore_latest(
+            home, bc.drive_service, bc.key, dest_store=store.path,
+            records_dir=config.records_dir(home),
+            config_path=str(Path(home) / "config.json"), swap=swap)
+    except backup_restore.NoRestorePoint as exc:
+        if not exc.fallbacks:
             return ("no_snapshot", None)
-        if gate is not None:
-            backup.download_and_restore(bc, store, file_id, gate=gate)
-        else:
-            backup.download_and_restore(bc, store, file_id)
+        raise
     except Exception as exc:  # noqa: BLE001 — classified, then re-raised
+        if swapped:
+            log.error("restore-on-first-run: the store was restored but the records "
+                      "repo / config.json could not be placed: %s", exc)
+            return ("partial", exc)
         if _is_transient_google_error(exc):
             log.warning("restore-on-first-run: not restored yet (transient): %s", exc)
             return ("transient", exc)
         raise
-    log.info("restored store from latest snapshot %s", file_id)
+    log.info("restored store from %s %s (captured %s)%s", result.used.kind,
+             result.used.label, result.used.captured_at,
+             f" after {len(result.fallbacks)} fallback(s)" if result.fallbacks else "")
     return ("restored", None)
 
 
@@ -5193,7 +5218,7 @@ def _is_transient_probe_error(exc) -> bool:
 
 
 def _probe_snapshot(home):
-    """Does Drive hold a snapshot for this user? ("snapshot" | "no_snapshot" |
+    """Does Drive hold a restore point for this user (backup_restore.candidates)? ("snapshot" | "no_snapshot" |
     "unconfigured" | "transient" | "error", exc). Read-only; never raises.
     Any Drive 5xx counts as transient here (_is_transient_probe_error)."""
     build = _backup_from_config(home)
@@ -5202,14 +5227,13 @@ def _probe_snapshot(home):
         transient = getattr(build, "transient", None)
         return ("transient", transient) if transient is not None else ("unconfigured", None)
     try:
-        file_id = backup.find_latest_snapshot(bc.drive_service, bc.shared_drive_id,
-                                              bc.user_id)
+        found = backup_restore.candidates(home, bc.drive_service, bc.key)
     except Exception as exc:  # noqa: BLE001 — a probe must never raise into the loop
         if _is_transient_probe_error(exc):
             return ("transient", exc)
         log.warning("restore pending: snapshot lookup failed permanently: %s", exc)
         return ("error", exc)
-    return ("snapshot", None) if file_id else ("no_snapshot", None)
+    return ("snapshot", None) if found else ("no_snapshot", None)
 
 
 def _restore_pending_path(home) -> Path:

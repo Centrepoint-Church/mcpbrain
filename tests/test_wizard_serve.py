@@ -90,6 +90,34 @@ def test_backup_auto_restores_over_schema_only_store(tmp_path, monkeypatch):
     finally: srv.stop()
 
 
+def test_backup_auto_reports_restore_point_and_partial_restore(tmp_path, monkeypatch):
+    # The response names the restore point used; a restore whose store swapped
+    # but whose records/config could not be placed is reported as partial (200),
+    # not as a failure the wizard would retry over a store that now has content.
+    from mcpbrain import config, restore, auth
+    monkeypatch.setattr(config, "owner_email", lambda home: "me@example.com")
+    monkeypatch.setattr(config, "store_path", lambda: str(tmp_path / "missing.sqlite3"))
+    monkeypatch.setattr(auth, "load_credentials", lambda: object())
+    monkeypatch.setattr(auth, "build_service", lambda *a, **k: object())
+    monkeypatch.setattr(restore, "detect_restorable", lambda home, svc: {
+        "available": True, "snapshot_id": "snap1",
+        "restore_point": "2026-10-19T07:13:00Z", "source": "chain"})
+
+    def partial(home, **k):
+        raise restore.PartialRestore("store restored, records not: disk full")
+    monkeypatch.setattr(restore, "run_restore_auto", partial)
+    srv = ControlServer(FakeDaemon(), home=str(tmp_path)); srv.start()
+    try:
+        resp = _authed_post(srv, "/api/backup/auto")
+        body = json.loads(resp.read())
+        assert resp.status == 200
+        assert body["action"] == "restored" and body["partial"] is True
+        assert "disk full" in body["error"]
+        assert body["restore_point"] == "2026-10-19T07:13:00Z"
+        assert body["source"] == "chain"
+    finally: srv.stop()
+
+
 def test_backup_auto_enables_when_no_backup(tmp_path, monkeypatch):
     # No restorable backup → turn on encrypted backup instead (still no user choice).
     from mcpbrain import config, restore, auth, backup_setup

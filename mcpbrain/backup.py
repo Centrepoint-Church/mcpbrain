@@ -16,10 +16,10 @@ Drive upload (Task 5.3) ships the encrypted artifact to a per-user folder under
 an org Shared Drive. The Drive API resource is INJECTED (so tests mock it) and
 every call sets supportsAllDrives=True, which Shared Drives require.
 
-Restore + delta-sync (Task 5.4) is the reinstall recovery path. On a fresh
-machine the admin finds the newest snapshot on the Shared Drive
-(find_latest_snapshot), downloads it (download_snapshot), decrypts+places it as
-the live store (restore), then runs a normal sync cycle (run_sync_cycle from
+Restore + delta-sync is the reinstall recovery path. Every restore entry point
+goes through backup_restore.restore_latest (the newest restore point across the
+incremental chains and these legacy single-file snapshots; `restore` below
+decrypts+places a legacy one), then a normal sync cycle (run_sync_cycle from
 mcpbrain.sync). The restored store carries its sync cursors, so the delta-sync
 resumes from the snapshot point and catches everything that changed since.
 
@@ -1230,29 +1230,6 @@ def upload_to_folder(service, file_path, parent_folder_id: str, *,
         media_body=media, supportsAllDrives=True, fields="id",
     ))
     return created["id"]
-
-
-def find_latest_in_subfolder(service, parent_folder_id: str, subfolder_name: str) -> str | None:
-    """Newest non-folder file in <parent_folder_id>/<subfolder_name>/, or None.
-
-    Parent-based (corpora=allDrives) so it works for a folder nested in a Shared
-    Drive, where the folder id is not a valid driveId.
-    """
-    subs = _list_in_drives(
-        service,
-        f"name = '{subfolder_name}' and mimeType = '{FOLDER_MIME}' and trashed = false "
-        f"and '{parent_folder_id}' in parents",
-        fields="files(id, name)")
-    if not subs:
-        return None
-    files = _list_in_drives(
-        service,
-        f"'{subs[0]['id']}' in parents and trashed = false and mimeType != '{FOLDER_MIME}'")
-    if not files:
-        return None
-    files.sort(key=lambda f: (f.get("createdTime", ""), f.get("modifiedTime", "")),
-               reverse=True)
-    return files[0]["id"]
 
 
 def download_snapshot(service, file_id: str, dest_path, *, downloader_factory=None) -> Path:

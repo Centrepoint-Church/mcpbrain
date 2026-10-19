@@ -1,11 +1,22 @@
-"""Recovery path: restore the brain store from the latest encrypted snapshot on Drive."""
+"""Recovery path: restore the brain from the newest restore point on Drive.
+
+Every entry point here (`mcpbrain restore`, `restore --auto`, `restore
+--check`, and the wizard's /api/backup/auto via run_restore_auto) goes through
+backup_restore: the newest restore point by capture time across the
+incremental chains and every legacy folder, verified before it is swapped in,
+with the records repo and config.json restored alongside the store.
+"""
 from __future__ import annotations
 
+import logging
 import os
 import socket
 import sys
-import tempfile
+import time
+from datetime import datetime, timezone
 from pathlib import Path
+
+log = logging.getLogger(__name__)
 
 # The daemon-running probe's connect timeout. Loopback answers or refuses
 # at once; this only bounds a pathological local stack.
@@ -56,54 +67,69 @@ def refuse_if_daemon_running(home: str) -> None:
             "`launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/com.mcpbrain.plist`.")
 
 
-def _restore_via_stage(tmp_path: Path, p: Path, key: bytes, home: str, swap) -> None:
-    """Decrypt the downloaded artifact into a STAGING file beside the store
-    (records repo + config.json go straight to their destinations), then hand
-    the staging file to `swap` -- never write over the live store in place.
-    `swap(stage)` defaults to backup.swap_in_store(stage, p): a busy-checked WAL
-    checkpoint, then an atomic os.replace. That default is only safe with the
-    daemon STOPPED (run_restore/run_restore_auto refuse otherwise): a busy == 0
-    checkpoint cannot stop a daemon connection opened earlier from writing
-    after the replace. The daemon passes one that also raises its restoring
-    gate."""
-    from mcpbrain import backup as _backup, config as _cfg
-    fd, stage = tempfile.mkstemp(dir=str(p.parent), prefix=".restore-", suffix=".stage")
-    os.close(fd)
-    stage = Path(stage)
-    try:
-        # Restore the full bundle: store + the local records repo + config.json
-        # (a bare-store legacy artifact restores the store only -- restore()
-        # detects the shape). records_dir/config_path are ignored when the
-        # artifact doesn't carry them.
-        _backup.restore(
-            tmp_path, stage, key,
-            records_dir=_cfg.records_dir(home),
-            config_path=str(Path(home) / "config.json"))
+class PartialRestore(RuntimeError):
+    """The store was swapped in, but the records repo / config.json could not
+    be placed. The store now HAS content, so this is not a failed restore to
+    retry (the empty-store rule would refuse it): it is reported, and the
+    records can be recovered by hand or by `mcpbrain restore --force` with the
+    daemon stopped."""
+
+    def __init__(self, msg: str, path: Path | None = None):
+        super().__init__(msg)
+        self.path = path
+
+
+def _restore_newest(home: str, drive_service, key: bytes, swap):
+    """backup_restore.restore_latest into the live store path, records repo and
+    config.json. `swap(stage)` is the caller's store swap (the daemon's gated
+    one); None is backup.swap_in_store, only safe with the daemon STOPPED
+    (run_restore/run_restore_auto refuse otherwise).
+
+    Raises NoRestorePoint as RuntimeError, and PartialRestore when the store
+    swapped but the records/config placement after it failed (R24)."""
+    from mcpbrain import backup as _backup, backup_restore, config as _cfg
+    p = Path(_cfg.store_path())
+    swapped: list[bool] = []
+
+    def _swap(stage, dest):
         if swap is None:
-            _backup.swap_in_store(stage, p)
+            _backup.swap_in_store(stage, dest)
         else:
             swap(stage)
-    finally:
-        try:
-            stage.unlink()
-        except OSError:
-            pass
+        swapped.append(True)
+
+    try:
+        return backup_restore.restore_latest(
+            home, drive_service, key, dest_store=p,
+            records_dir=_cfg.records_dir(home),
+            config_path=str(Path(home) / "config.json"),
+            swap=_swap, budget_s=None)
+    except backup_restore.NoRestorePoint as exc:
+        raise RuntimeError(str(exc)) from exc
+    except Exception as exc:
+        if not swapped:
+            raise
+        msg = (f"the store was restored to {p}, but the records repo / config.json "
+               f"could not be placed: {type(exc).__name__}: {exc}")
+        log.error("restore partly done: %s", msg)
+        raise PartialRestore(msg, p) from exc
 
 
 def run_restore(home: str, *, key: bytes | None = None, force: bool = False,
-                swap=None) -> str:
-    """Find the latest snapshot on Drive and restore it to the store path.
+                swap=None):
+    """Restore the newest restore point on Drive to the store path (plus the
+    records repo and config.json). Returns backup_restore.RestoreResult.
 
     Resolves the escrow key from config (backup.escrow_key) unless key is given.
     Raises ValueError if backup is not configured.
-    Raises RuntimeError if the store already exists and force=False.
-    Returns the path of the restored store as a string.
+    Raises RuntimeError if the store already exists and force=False, or when
+    nothing is restorable; PartialRestore when only the store was placed.
 
     With `swap` None (the `mcpbrain restore` CLI, a separate process) this is
     NOT safe while the daemon runs, so it raises DaemonRunningError before
     anything is written -- force or not.
     """
-    from mcpbrain import backup as _backup, auth as _auth, config as _cfg
+    from mcpbrain import auth as _auth, config as _cfg
 
     if swap is None:
         refuse_if_daemon_running(home)
@@ -117,40 +143,16 @@ def run_restore(home: str, *, key: bytes | None = None, force: bool = False,
             raise ValueError("Backup not configured. Run the install skill and enable backup.")
         key = stored_key.encode()
 
-    shared_drive_id = backup_cfg.get("shared_drive_id", "")
-    user_id = backup_cfg.get("user_id") or _cfg.owner_email(home)
-
-    creds = _auth.load_credentials()
-    drive_service = _auth.build_service("drive", "v3", creds,
-                                        timeout_s=_auth.DEFAULT_HTTP_TIMEOUT_S)
-
-    file_id = _backup.find_latest_snapshot(drive_service, shared_drive_id, user_id)
-    if file_id is None:
-        raise RuntimeError("No snapshot found on Drive.")
-
-    store_path = _cfg.store_path()
-    p = Path(store_path)
+    p = Path(_cfg.store_path())
     if p.exists() and p.stat().st_size > 0 and not force:
         raise RuntimeError(
             f"Store already exists at {p}. Use --force to overwrite, or delete it first."
         )
 
-    p.parent.mkdir(parents=True, exist_ok=True)
-    fd, tmp = tempfile.mkstemp(dir=str(p.parent), prefix=".restore-", suffix=".enc")
-    if hasattr(os, "fchmod"):
-        os.fchmod(fd, 0o600)
-    os.close(fd)
-    tmp_path = Path(tmp)
-    try:
-        _backup.download_snapshot(drive_service, file_id, tmp_path)
-        _restore_via_stage(tmp_path, p, key, home, swap)
-    finally:
-        try:
-            tmp_path.unlink()
-        except OSError:
-            pass
-
-    return str(p)
+    creds = _auth.load_credentials()
+    drive_service = _auth.build_service("drive", "v3", creds,
+                                        timeout_s=_auth.DEFAULT_HTTP_TIMEOUT_S)
+    return _restore_newest(home, drive_service, key, swap)
 
 
 def _download_escrow_key(drive_service, escrow_folder_id: str, user_email: str) -> bytes | None:
@@ -269,18 +271,51 @@ def account_email(home: str) -> str:
     return ((_cfg.read_config(home).get("backup") or {}).get("user_id") or "").strip()
 
 
+def _iso(ts: float) -> str:
+    return datetime.fromtimestamp(ts, timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+
+
+def _source(drive_service, cand, names: dict) -> str:
+    """"chain" for a manifest; "legacy:<folder name>" for a single-file
+    snapshot (the folder id when its name cannot be read). Display only."""
+    if cand.kind == "manifest":
+        return "chain"
+    fid = cand.folder_id
+    if fid not in names:
+        try:
+            from mcpbrain import backup as _backup
+            meta = drive_service.files().get(
+                fileId=fid, fields="name", supportsAllDrives=True,
+            ).execute(num_retries=_backup._NUM_RETRIES)
+            names[fid] = (meta or {}).get("name") or fid
+        except Exception:  # noqa: BLE001 — a label, never a reason to fail
+            names[fid] = fid
+    return f"legacy:{names[fid]}"
+
+
+def _describe(drive_service, cands, limit: int) -> list[dict]:
+    names: dict = {}
+    return [{"restore_point": _iso(c.captured_at), "captured_at": c.captured_at,
+             "source": _source(drive_service, c, names), "kind": c.kind,
+             "label": c.label, "file_id": c.file_id} for c in cands[:limit]]
+
+
 def detect_restorable(home: str, drive_service) -> dict:
     """Report whether an existing backup can be restored for this account.
 
     Resolves the escrow folder (config → tenant profile) and the user's email,
-    then checks the escrow folder for both the user's escrow key and a snapshot.
-    Returns {available, snapshot_id, has_key, user_email, escrow_folder_id}.
-    Never raises — degrades to available=False.
+    fetches the user's escrow key, and lists the restore points
+    (backup_restore.candidates: every chain's newest manifest and every legacy
+    file, newest first). Returns {available, snapshot_id, has_key, user_email,
+    escrow_folder_id, restore_point, source, candidates}: `snapshot_id` is the
+    chosen point's file id, `restore_point` its capture time (ISO-8601 UTC),
+    `source` "chain" or "legacy:<folder>", `candidates` the first 11 points
+    described. Never raises -- degrades to available=False (with `reason`).
     """
-    from mcpbrain import backup as _backup
-    # The escrow convention is email-keyed (snapshot subfolder <email>/ and
-    # <email>.key). Use the signed-in account email (owner_email → Google account
-    # → legacy backup.user_id) so restore works before the profile step is saved.
+    from mcpbrain import backup_restore
+    # The escrow convention is email-keyed (<email>.key). Use the signed-in
+    # account email (owner_email → Google account → legacy backup.user_id) so
+    # restore works before the profile step is saved.
     user_email = account_email(home)
     if not user_email:
         return {"available": False, "reason": "no account signed in yet"}
@@ -288,37 +323,43 @@ def detect_restorable(home: str, drive_service) -> dict:
     if not folder:
         return {"available": False, "reason": "no escrow folder configured"}
     key = _download_escrow_key(drive_service, folder, user_email)
-    snapshot_id = None
+    out = {"available": False, "snapshot_id": None, "has_key": bool(key),
+           "user_email": user_email, "escrow_folder_id": folder,
+           "restore_point": None, "source": None, "candidates": []}
+    if not key:
+        return out
     try:
-        # Snapshots live in <escrow folder>/<user_email>/ — parent-based lookup
-        # (the escrow folder is nested in a Shared Drive, not a Shared Drive root).
-        snapshot_id = _backup.find_latest_in_subfolder(drive_service, folder, user_email)
-    except Exception:  # noqa: BLE001
-        snapshot_id = None
-    return {
-        "available": bool(key and snapshot_id),
-        "snapshot_id": snapshot_id,
-        "has_key": bool(key),
-        "user_email": user_email,
-        "escrow_folder_id": folder,
-    }
+        cands = backup_restore.candidates(home, drive_service, key)
+    except Exception as exc:  # noqa: BLE001 — detection degrades, never raises
+        log.warning("restore detection: could not list restore points: %s", exc)
+        out["reason"] = f"{type(exc).__name__}: {exc}"
+        return out
+    if not cands:
+        return out
+    described = _describe(drive_service, cands, 11)
+    out.update(available=True, snapshot_id=cands[0].file_id,
+               restore_point=described[0]["restore_point"],
+               source=described[0]["source"], candidates=described)
+    return out
 
 
 def run_restore_auto(home: str, *, force: bool = False, drive_service=None,
-                     swap=None) -> str:
-    """Detect and restore the latest backup, fetching the escrow key from Drive.
+                     swap=None):
+    """Detect and restore the newest restore point, fetching the escrow key
+    from Drive. Returns backup_restore.RestoreResult.
 
     The turnkey recovery path for a fresh machine: after Google sign-in, this
-    needs no key and no folder IDs (org defaults) — it finds the user's key +
-    snapshot in the escrow folder and restores the full bundle (store + records
-    + config). Raises RuntimeError when nothing is restorable.
+    needs no key and no folder IDs (org defaults) — it finds the user's key in
+    the escrow folder and restores the full bundle (store + records + config).
+    Raises RuntimeError when nothing is restorable, PartialRestore when only
+    the store was placed.
 
     With `swap` None (the `mcpbrain restore --auto` CLI, a separate process)
     this is NOT safe while the daemon runs, so it raises DaemonRunningError
     before anything is written -- force or not. The daemon's own caller
     (/api/backup/auto) passes its gated `swap`.
     """
-    from mcpbrain import auth as _auth, backup as _backup, config as _cfg
+    from mcpbrain import auth as _auth, config as _cfg
 
     if swap is None:
         refuse_if_daemon_running(home)
@@ -333,30 +374,43 @@ def run_restore_auto(home: str, *, force: bool = False, drive_service=None,
         raise RuntimeError(
             "No restorable backup found for this account "
             f"({info.get('user_email') or 'unknown'})."
+            + (f" {info['reason']}" if info.get("reason") else "")
         )
     key = _download_escrow_key(drive_service, info["escrow_folder_id"], info["user_email"])
+    if not key:
+        raise RuntimeError("The escrow key could not be fetched from Drive; try again.")
 
-    store_path = _cfg.store_path()
-    p = Path(store_path)
+    p = Path(_cfg.store_path())
     if p.exists() and p.stat().st_size > 0 and not force:
         raise RuntimeError(
             f"Store already exists at {p}. Use --force to overwrite, or delete it first."
         )
-    p.parent.mkdir(parents=True, exist_ok=True)
-    fd, tmp = tempfile.mkstemp(dir=str(p.parent), prefix=".restore-", suffix=".enc")
-    if hasattr(os, "fchmod"):
-        os.fchmod(fd, 0o600)
-    os.close(fd)
-    tmp_path = Path(tmp)
-    try:
-        _backup.download_snapshot(drive_service, info["snapshot_id"], tmp_path)
-        _restore_via_stage(tmp_path, p, key, home, swap)
-    finally:
-        try:
-            tmp_path.unlink()
-        except OSError:
-            pass
-    return str(p)
+    return _restore_newest(home, drive_service, key, swap)
+
+
+def _age(seconds: float) -> str:
+    seconds = max(0.0, seconds)
+    if seconds < 3600:
+        return f"{int(seconds // 60)} min ago"
+    if seconds < 48 * 3600:
+        return f"{int(seconds // 3600)} h ago"
+    return f"{int(seconds // 86400)} d ago"
+
+
+def _when(ts: float, now: float | None = None) -> str:
+    """'2026-10-19 17:13 (3 h ago)', local time."""
+    now = time.time() if now is None else now
+    return (f"{datetime.fromtimestamp(ts).strftime('%Y-%m-%d %H:%M')} "
+            f"({_age(now - ts)})")
+
+
+def _print_result(result, drive_service) -> None:
+    used = result.used
+    print(f"Restored: {result.path}")
+    print(f"Restore point: {_when(used.captured_at)} from "
+          f"{_source(drive_service, used, {})} ({used.label})")
+    for cand, why in result.fallbacks:
+        print(f"  skipped {cand.label}: {why}")
 
 
 def run_restore_main(argv=None) -> None:
@@ -383,20 +437,36 @@ def run_restore_main(argv=None) -> None:
                                                 timeout_s=_auth.DEFAULT_HTTP_TIMEOUT_S)
             info = detect_restorable(home, drive_service)
             if info["available"]:
-                print(f"Restorable backup found for {info['user_email']} "
-                      f"(snapshot {info['snapshot_id']}). Stop the daemon first "
-                      f"(launchctl bootout gui/$(id -u)/com.mcpbrain), then run: "
-                      f"mcpbrain restore --auto")
+                first, *others = info["candidates"]
+                print(f"Restore point for {info['user_email']}: "
+                      f"{_when(first['captured_at'])} from {first['source']} "
+                      f"({first['label']})")
+                if others:
+                    print("Older restore points (used only if a newer one fails):")
+                    for c in others[:10]:
+                        print(f"  {_when(c['captured_at'])}  {c['source']}  {c['label']}")
+                print("Stop the daemon first (launchctl bootout gui/$(id -u)/com.mcpbrain), "
+                      "then run: mcpbrain restore --auto")
             else:
-                print("No restorable backup found for this account.")
+                print("No restorable backup found for this account."
+                      + (f" ({info['reason']})" if info.get("reason") else ""))
             sys.exit(0)
         if ns.auto:
-            restored = run_restore_auto(home, force=ns.force)
+            refuse_if_daemon_running(home)       # before any Drive call
+            creds = _auth.load_credentials()
+            drive_service = _auth.build_service("drive", "v3", creds,
+                                                timeout_s=_auth.DEFAULT_HTTP_TIMEOUT_S)
+            result = run_restore_auto(home, force=ns.force, drive_service=drive_service)
         else:
             key = ns.key.encode() if ns.key else None
-            restored = run_restore(home, key=key, force=ns.force)
-        print(f"Restored: {restored}")
+            result = run_restore(home, key=key, force=ns.force)
+            drive_service = None
+        _print_result(result, drive_service)
         sys.exit(0)
+    except PartialRestore as exc:
+        print(f"Restore partly done: {exc}. The store is restored; the records repo "
+              "and config.json were left as they were.", file=sys.stderr)
+        sys.exit(1)
     except Exception as exc:
         print(f"Restore failed: {exc}", file=sys.stderr)
         sys.exit(1)

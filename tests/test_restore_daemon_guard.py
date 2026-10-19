@@ -35,25 +35,27 @@ def listener(home):
 
 @pytest.fixture
 def drive(monkeypatch):
-    """Drive + decrypt stand-ins that record every write."""
+    """Drive + restore stand-ins that record every write."""
+    from mcpbrain import backup_restore
     calls = []
     monkeypatch.setattr("mcpbrain.auth.load_credentials", lambda: calls.append("creds") or object())
     monkeypatch.setattr("mcpbrain.auth.build_service",
                         lambda *a, **k: calls.append("build") or object())
-    monkeypatch.setattr("mcpbrain.backup.find_latest_snapshot",
-                        lambda *a: calls.append("find") or "SNAP")
-    monkeypatch.setattr("mcpbrain.backup.find_latest_in_subfolder", lambda *a: "SNAP")
     monkeypatch.setattr(restore, "_download_escrow_key", lambda *a: b"KEYBYTES")
-    monkeypatch.setattr("mcpbrain.backup.download_snapshot",
-                        lambda svc, fid, dest: calls.append("download")
-                        or Path(dest).write_bytes(b"enc") or Path(dest))
+    cand = backup_restore.Candidate("legacy", 1.0, "SNAP", "F", "snap.enc")
+    monkeypatch.setattr(backup_restore, "candidates",
+                        lambda *a: calls.append("find") or [cand])
 
-    def fake_restore(enc, dest, key, *, records_dir=None, config_path=None):
+    def fake_restore_latest(home, svc, key, *, dest_store, records_dir=None,
+                            config_path=None, swap=None, budget_s=None):
         calls.append("restore")
-        Path(dest).write_bytes(b"store")
+        stage = Path(str(dest_store) + ".stage")
+        stage.write_bytes(b"store")
+        swap(stage, Path(dest_store))
         Path(config_path).write_text("{}")          # the bundle's config.json
-        return Path(dest)
-    monkeypatch.setattr("mcpbrain.backup.restore", fake_restore)
+        stage.unlink(missing_ok=True)
+        return backup_restore.RestoreResult(cand, [], Path(dest_store))
+    monkeypatch.setattr(backup_restore, "restore_latest", fake_restore_latest)
     monkeypatch.setattr("mcpbrain.backup.swap_in_store",
                         lambda stage, dest: calls.append("swap")
                         or Path(dest).write_bytes(Path(stage).read_bytes()))
@@ -101,7 +103,7 @@ def test_run_restore_auto_refuses_while_daemon_runs(home, listener, drive, force
 def test_run_restore_proceeds_when_nothing_listens(home, drive):
     out = restore.run_restore(str(home))
     assert drive[-2:] == ["restore", "swap"]
-    assert Path(out).read_bytes() == b"store"
+    assert Path(out.path).read_bytes() == b"store"
 
 
 def test_daemon_passed_swap_is_not_refused(home, listener, drive):

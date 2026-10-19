@@ -355,19 +355,28 @@ def _restore_rig(home, monkeypatch, *, snapshot="SNAP1", find_errors=(), build_e
     monkeypatch.setattr(auth, "build_google_services", build)
     rec["build"] = build
     errs = list(find_errors)
+    from mcpbrain import backup_restore as br
 
-    def find(svc, sd, uid):
+    def cand():
+        return br.Candidate("manifest", 1.0, snapshot, "CF", "chain-x seq 1")
+
+    def candidates(home_, svc, key):
         if errs:
             raise errs.pop(0)
-        return snapshot
+        return [cand()] if snapshot else []
 
-    def restore(bc, store, fid, **kw):
-        rec["gates"].append(kw.get("gate"))
+    def restore_latest(home_, svc, key, **kw):
+        if errs:
+            raise errs.pop(0)
+        if not snapshot:
+            raise br.NoRestorePoint("no restore point could be restored (none found)")
+        rec["gates"].append(kw.get("swap"))
         if restore_error is not None:
             raise restore_error
-        rec["restored"].append(fid)
-    monkeypatch.setattr(dmod.backup, "find_latest_snapshot", find)
-    monkeypatch.setattr(dmod.backup, "download_and_restore", restore)
+        rec["restored"].append(snapshot)
+        return br.RestoreResult(cand(), [], kw["dest_store"])
+    monkeypatch.setattr(dmod.backup_restore, "candidates", candidates)
+    monkeypatch.setattr(dmod.backup_restore, "restore_latest", restore_latest)
     monkeypatch.setattr(dmod, "_mac_user_is_active", lambda: True)
     monkeypatch.setattr(dmod, "make_encrypted_snapshot", lambda *a, **k: home / "snap.enc")
     monkeypatch.setattr(dmod, "upload_snapshot",
@@ -789,6 +798,23 @@ def _snapshot_artifact(tmp_path, n=3):
     return art, key
 
 
+def _fake_legacy_drive(monkeypatch, art):
+    """Drive holding ONE legacy snapshot (`art`): the real restore_latest runs,
+    only discovery and the byte download are faked."""
+    import shutil
+    import time
+    from pathlib import Path
+
+    from mcpbrain import backup_restore as br
+    cand = br.Candidate("legacy", time.time() - 60, "SNAP1", "LF", "snap.enc")
+    monkeypatch.setattr(br, "_discover", lambda h, svc: ([], [cand]))
+
+    def download(svc, fid, dest, **kw):
+        Path(dest).parent.mkdir(parents=True, exist_ok=True)
+        shutil.copyfile(art, dest)
+    monkeypatch.setattr(br, "_download", download)
+
+
 def _integrity(path):
     import sqlite3
     con = sqlite3.connect(str(path))
@@ -930,9 +956,8 @@ def test_store_gate_times_out_and_reopens(tmp_path):
 
 
 def test_startup_restore_end_to_end_through_the_restoring_gate(home, monkeypatch):
-    """The real download_and_restore through Daemon._restore_gate: a local fake
-    Drive (download_snapshot copies a real encrypted snapshot), a real store."""
-    import shutil
+    """The real backup_restore.restore_latest through Daemon._restore_gate: a
+    local fake Drive (one legacy encrypted snapshot), a real store."""
 
     from mcpbrain import backup as bmod
     art, key = _snapshot_artifact(home)
@@ -941,9 +966,7 @@ def test_startup_restore_end_to_end_through_the_restoring_gate(home, monkeypatch
         "escrow_key": key.decode(), "shared_drive_id": "SD", "user_id": "u1"}})
     monkeypatch.setattr(auth, "build_google_services",
                         FlakyBuild(result={"drive_service": "DRIVE"}))
-    monkeypatch.setattr(bmod, "find_latest_snapshot", lambda svc, sd, uid: "SNAP1")
-    monkeypatch.setattr(bmod, "download_snapshot",
-                        lambda svc, fid, dest, **kw: shutil.copyfile(art, dest))
+    _fake_legacy_drive(monkeypatch, art)
     d = _daemon(home, Clock())
     seen = []
     real_ckpt = bmod._checkpoint_for_swap
@@ -966,26 +989,21 @@ def test_wizard_restore_is_busy_checked_and_never_in_place(home, monkeypatch):
     refused (503, retry) while a reader holds the store, intact afterwards,
     then swapped in cleanly."""
     import json
-    import shutil
     import sqlite3
     import urllib.error
     import urllib.request
 
-    from mcpbrain import backup as bmod
     from mcpbrain import restore as rmod
     from mcpbrain.control_api import ControlServer
     art, key = _snapshot_artifact(home)
     monkeypatch.setattr(dmod.config, "store_path", lambda: home / "b.sqlite3")
     monkeypatch.setattr("mcpbrain.config.store_path", lambda: home / "b.sqlite3")
     monkeypatch.setattr(rmod, "account_email", lambda h: "sam@example.org")
-    monkeypatch.setattr(rmod, "detect_restorable", lambda h, svc: {
-        "available": True, "snapshot_id": "SNAP1", "user_email": "sam@example.org",
-        "escrow_folder_id": "ESC", "has_key": True})
+    monkeypatch.setattr(rmod, "_escrow_folder", lambda h: "ESC")
     monkeypatch.setattr(rmod, "_download_escrow_key", lambda svc, folder, email: key)
     monkeypatch.setattr(auth, "load_credentials", lambda *a, **k: object())
     monkeypatch.setattr(auth, "build_service", lambda *a, **k: object())
-    monkeypatch.setattr(bmod, "download_snapshot",
-                        lambda svc, fid, dest, **kw: shutil.copyfile(art, dest))
+    _fake_legacy_drive(monkeypatch, art)
 
     d = _daemon(home, Clock())               # empty store at home/b.sqlite3
     # A reader in another connection holding a read transaction over live frames.

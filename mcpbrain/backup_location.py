@@ -67,7 +67,11 @@ def resolve(home: str, drive_service, *, create: bool = False) -> Location:
     if not person:
         raise ValueError("no account email known; cannot name the backup folder")
     cfg = config.read_config(home).get("backup") or {}
-    configured = cfg.get("shared_drive_id")
+    escrow = restore._escrow_folder(home)
+    # A fresh machine has no backup block until the wizard's auto-restore has
+    # run, and that restore must find the backups first: fall back to the
+    # escrow folder, whose drive is what enable_backup writes here anyway.
+    configured = cfg.get("shared_drive_id") or escrow
     if not configured:
         raise ValueError("backup.shared_drive_id is not configured")
     drive_id = _drive_id(drive_service, configured)
@@ -85,7 +89,6 @@ def resolve(home: str, drive_service, *, create: bool = False) -> Location:
     if user_id:
         legacy.append(_find_folder(drive_service, user_id, drive_id,
                                    drive_id=drive_id))
-    escrow = restore._escrow_folder(home)
     if escrow:
         legacy.append(_find_folder(drive_service, person, escrow, drive_id=None))
     seen: set[str] = set()

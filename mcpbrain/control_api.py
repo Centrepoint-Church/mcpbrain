@@ -643,13 +643,31 @@ class ControlServer:
                         # in behind the daemon's restoring gate after a busy-checked
                         # checkpoint (Daemon.swap_restored_store). A busy store is
                         # transient -- the wizard is told to retry.
-                        _restore.run_restore_auto(
-                            str(self.home), drive_service=svc, force=True,
-                            swap=getattr(d, "swap_restored_store", None))
+                        # run_restore_auto restores the NEWEST restore point
+                        # across every backup location (backup_restore), with
+                        # the records repo + config.json.
+                        body_out = {"action": "restored",
+                                    "snapshot_id": info.get("snapshot_id"),
+                                    "restore_point": info.get("restore_point"),
+                                    "source": info.get("source")}
+                        try:
+                            result = _restore.run_restore_auto(
+                                str(self.home), drive_service=svc, force=True,
+                                swap=getattr(d, "swap_restored_store", None))
+                        except _restore.PartialRestore as exc:
+                            # The store is restored (it has content now); only the
+                            # records/config were not placed. Not a failure to
+                            # retry: the empty-store rule would refuse it.
+                            log.error("backup/auto: restore partly done: %s", exc)
+                            return h_json(h, 200, {**body_out, "partial": True,
+                                                   "error": str(exc)})
+                        used = getattr(result, "used", None)
+                        if used is not None:
+                            body_out.update(snapshot_id=used.file_id,
+                                            restore_point=_restore._iso(used.captured_at))
                         # The restored bundle carries the escrow key + backup config,
                         # so backup is already on after a restore.
-                        return h_json(h, 200, {"action": "restored",
-                                               "snapshot_id": info.get("snapshot_id")})
+                        return h_json(h, 200, body_out)
                     cur_backup = _config.read_config(str(self.home)).get("backup") or {}
                     if not cur_backup.get("escrow_key"):
                         backup_setup.enable_backup(str(self.home), drive_service=svc, user_id=owner)

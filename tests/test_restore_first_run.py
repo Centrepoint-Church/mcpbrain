@@ -11,6 +11,7 @@ find_latest_snapshot(service, shared_drive_id, user_id).
 from mcpbrain.store import Store
 from mcpbrain import daemon as dmod
 from mcpbrain import backup as bmod
+from mcpbrain import backup_restore
 
 
 class FakeBC:
@@ -25,18 +26,25 @@ class FakeBC:
         self.out_path = None
 
 
+def _result(file_id="snap-id"):
+    cand = backup_restore.Candidate("manifest", 1.0, file_id, "CF", "chain-x seq 1")
+    return backup_restore.RestoreResult(cand, [], None)
+
+
 def test_empty_store_with_backup_restores(monkeypatch, tmp_path):
     s = Store(str(tmp_path / "b.sqlite3"), dim=384)
     s.init()  # empty
     called = {}
     monkeypatch.setattr(dmod, "_backup_from_config", lambda home: (FakeBC(), 3600))
-    monkeypatch.setattr(dmod.backup, "find_latest_snapshot", lambda svc, sd, uid: "snap-id")
-    monkeypatch.setattr(
-        dmod.backup, "download_and_restore",
-        lambda bc, store, snap: called.setdefault("restored", snap),
-    )
+
+    def fake(home, svc, key, **kw):
+        called.update(svc=svc, key=key, **kw)
+        return _result()
+    monkeypatch.setattr(dmod.backup_restore, "restore_latest", fake)
     assert dmod.maybe_restore_on_first_run(s, str(tmp_path)) is True
-    assert called.get("restored") == "snap-id"
+    assert called["svc"] == "DRIVE" and called["key"] == FakeBC().key
+    assert str(called["dest_store"]) == str(s.path)
+    assert called["records_dir"] and called["config_path"]   # the whole bundle
 
 
 def test_non_empty_store_skips_restore(monkeypatch, tmp_path):
@@ -45,11 +53,10 @@ def test_non_empty_store_skips_restore(monkeypatch, tmp_path):
     s.upsert_chunk(doc_id="d", text="x", content_hash="h", metadata={})
     assert s.chunk_count() == 1
     monkeypatch.setattr(dmod, "_backup_from_config", lambda home: (FakeBC(), 3600))
-    monkeypatch.setattr(dmod.backup, "find_latest_snapshot", lambda *a: "snap-id")
     flag = {"restored": False}
     monkeypatch.setattr(
-        dmod.backup, "download_and_restore",
-        lambda *a: flag.__setitem__("restored", True),
+        dmod.backup_restore, "restore_latest",
+        lambda *a, **k: flag.__setitem__("restored", True),
     )
     assert dmod.maybe_restore_on_first_run(s, str(tmp_path)) is False
     assert flag["restored"] is False
@@ -61,13 +68,101 @@ def test_no_backup_configured_skips(monkeypatch, tmp_path):
     monkeypatch.setattr(dmod, "_backup_from_config", lambda home: (None, None))
     looked = {"called": False}
 
-    def _should_not_run(*a):
+    def _should_not_run(*a, **k):
         looked["called"] = True
-        return "snap-id"
+        return _result()
 
-    monkeypatch.setattr(dmod.backup, "find_latest_snapshot", _should_not_run)
+    monkeypatch.setattr(dmod.backup_restore, "restore_latest", _should_not_run)
     assert dmod.maybe_restore_on_first_run(s, str(tmp_path)) is False
     assert looked["called"] is False
+
+
+def test_no_restore_point_is_no_snapshot_but_all_broken_raises(monkeypatch, tmp_path):
+    import pytest
+    s = Store(str(tmp_path / "b.sqlite3"), dim=384)
+    s.init()
+    monkeypatch.setattr(dmod, "_backup_from_config", lambda home: (FakeBC(), 3600))
+
+    def none_found(*a, **k):
+        raise backup_restore.NoRestorePoint("none found")
+    monkeypatch.setattr(dmod.backup_restore, "restore_latest", none_found)
+    assert dmod._restore_on_first_run_classified(s, str(tmp_path)) == ("no_snapshot", None)
+
+    cand = backup_restore.Candidate("legacy", 1.0, "L", "F", "x.enc")
+
+    def all_broken(*a, **k):
+        raise backup_restore.NoRestorePoint("all broken", [(cand, "integrity_check failed")])
+    monkeypatch.setattr(dmod.backup_restore, "restore_latest", all_broken)
+    with pytest.raises(backup_restore.NoRestorePoint):
+        dmod._restore_on_first_run_classified(s, str(tmp_path))
+
+
+def test_startup_restore_restores_records_and_config(monkeypatch, tmp_path):
+    """The start-up empty-store restore used to place the STORE only; now it
+    goes through restore_latest and restores the records repo + config.json
+    from the bundle too (spec §5). Real restore_latest, real bundle; only Drive
+    discovery and download are faked."""
+    import shutil
+    import sqlite3
+    import time
+    from pathlib import Path
+
+    from mcpbrain import config
+
+    home = tmp_path / "home"
+    home.mkdir()
+    monkeypatch.setenv("MCPBRAIN_HOME", str(home))
+    # The snapshot source: a store with content, a records repo, a config.
+    src = tmp_path / "src"
+    src.mkdir()
+    snap_store = Store(str(src / "brain.sqlite3"), dim=384)
+    snap_store.init()
+    snap_store.upsert_chunk(doc_id="d1", text="x", content_hash="h1", metadata={})
+    sqlite3.connect(str(snap_store.path)).execute("PRAGMA wal_checkpoint(TRUNCATE)").close()
+    (src / "records").mkdir()
+    (src / "records" / "voice.md").write_text("restored voice")
+    (src / "config.json").write_text('{"owner_email": "sam@example.org", "marker": "restored"}')
+    key = bmod.generate_escrow_key()
+    art = tmp_path / "snap.enc"
+    bmod.make_encrypted_snapshot(snap_store.path, art, key, records_dir=src / "records",
+                                 config_path=src / "config.json")
+
+    config.write_config(str(home), {"owner_email": "sam@example.org"})
+    bc = FakeBC()
+    bc.key = key
+    monkeypatch.setattr(dmod, "_backup_from_config", lambda h: (bc, 3600))
+    cand = backup_restore.Candidate("legacy", time.time() - 60, "L1", "LF", "snap.enc")
+    monkeypatch.setattr(backup_restore, "_discover", lambda h, svc: ([], [cand]))
+    monkeypatch.setattr(backup_restore, "_download",
+                        lambda svc, fid, dest, **kw: (Path(dest).parent.mkdir(
+                            parents=True, exist_ok=True), shutil.copyfile(art, dest)))
+
+    live = Store(str(home / "brain.sqlite3"), dim=384)
+    live.init()
+    assert dmod._restore_on_first_run_classified(live, str(home)) == ("restored", None)
+    assert live.chunk_count() == 1
+    assert (Path(config.records_dir(str(home))) / "voice.md").read_text() == "restored voice"
+    assert config.read_config(str(home)).get("marker") == "restored"
+
+
+def test_records_failure_after_swap_is_a_partial_restore(monkeypatch, tmp_path):
+    """R24: the store was swapped in, then placing records/config failed. The
+    store has content now, so the start-up path reports it (partial) instead of
+    raising into a failed-and-retry the empty-store rule would then block."""
+    from pathlib import Path
+    s = Store(str(tmp_path / "b.sqlite3"), dim=384)
+    s.init()
+    monkeypatch.setattr(dmod, "_backup_from_config", lambda home: (FakeBC(), 3600))
+    monkeypatch.setattr(dmod.backup, "swap_in_store", lambda stage, dest, gate=None: None)
+
+    def swap_then_fail(home, svc, key, **kw):
+        stage = Path(str(kw["dest_store"]) + ".stage")
+        kw["swap"](stage, kw["dest_store"])
+        raise OSError(28, "No space left on device")
+    monkeypatch.setattr(dmod.backup_restore, "restore_latest", swap_then_fail)
+    status, exc = dmod._restore_on_first_run_classified(s, str(tmp_path))
+    assert status == "partial"
+    assert "No space left" in str(exc)
 
 
 def test_run_restores_before_migrate(monkeypatch, tmp_path):

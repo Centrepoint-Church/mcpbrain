@@ -119,3 +119,17 @@ def test_no_email_raises(tmp_path, monkeypatch):
     home = _home(tmp_path, monkeypatch, email="", user_id="")
     with pytest.raises(ValueError):
         backup_location.resolve(home, FakeDrive(drives={"0Adrive"}))
+
+
+def test_fresh_machine_uses_the_escrow_folders_drive(tmp_path, monkeypatch):
+    # Before the wizard's auto-restore there is no backup block yet; restore
+    # must still find the backups: the drive is the escrow folder's drive
+    # (the same one enable_backup would write into backup.shared_drive_id).
+    monkeypatch.setenv("MCPBRAIN_HOME", str(tmp_path))
+    config.write_config(str(tmp_path), {"owner_email": "Sam@Example.org",
+                                        "fleet": {"escrow_folder_id": "ESC"}})
+    svc = FakeDrive(drives={"0Adrive"}, folder_drive={"ESC": "0Adrive"}, folders={
+        "P": ("sam@example.org", "0Adrive"), "L": ("sam@example.org", "ESC")})
+    loc = backup_location.resolve(str(tmp_path), svc)
+    assert loc.drive_id == "0Adrive"
+    assert loc.folder_id == "P" and loc.legacy_folders == ("L",)
