@@ -38,6 +38,7 @@ leaving what is verified for the next call.
 """
 from __future__ import annotations
 
+import gzip
 import hashlib
 import heapq
 import json
@@ -89,6 +90,11 @@ class RestoreIncomplete(Exception):
     """`budget_s` ran out mid-download; verified files stay for the next call."""
 
 
+class ListingIncomplete(TimeoutError):
+    """Drive flagged a listing `incompleteSearch`. Transient (a TimeoutError,
+    as RestoreBusyError is): retry later, never restore from a partial view."""
+
+
 class _Bad(Exception):
     """This candidate is provably unusable: fall back to the next one."""
 
@@ -113,8 +119,15 @@ class _Chain:
 
 
 def _files(svc, parent: str, *, drive_id: str | None, extra: str = "") -> list[dict]:
-    files, _complete = backup_prune._list(
+    """Children of `parent`. A listing Drive marks `incompleteSearch` may omit
+    the newest chain or manifest, so restoring from it could silently pick an
+    older point: raise ListingIncomplete (transient) instead."""
+    files, complete = backup_prune._list(
         svc, f"'{parent}' in parents and trashed = false{extra}", drive_id=drive_id)
+    if not complete:
+        raise ListingIncomplete(
+            f"Drive returned an incomplete listing for folder {parent}; "
+            "restore will retry rather than risk choosing an older point")
     return files
 
 
@@ -282,7 +295,10 @@ def candidates(home, drive_service, key) -> list[Candidate]:
     out = list(legacy)
     bad: list = []
     for ch in chains:
-        h = _head(drive_service, key, home, ch, None, time.monotonic, bad)
+        try:
+            h = _head(drive_service, key, home, ch, None, time.monotonic, bad)
+        except _Transient as exc:
+            raise exc.__cause__ from None
         if h:
             out.append(h[0])
     for cand, why in bad:
@@ -379,7 +395,7 @@ def _build_from_manifest(svc, key, home, m: dict, stage: Path, work: Path,
     # decryption work is wasted on a candidate missing a file.
     local = [(f, _fetch(svc, home, f, deadline=deadline, clock=clock))
              for f in pages + (records if want_records else [])]
-    with open(stage, "wb") as out:
+    with _open_stage(stage) as out:
         for spec, path in local[:len(pages)]:
             header, it = backup_pages.read_segment(path, key)
             with it:
@@ -410,19 +426,59 @@ def _build_from_legacy(svc, key, home, cand: Candidate, stage: Path, work: Path,
     _integrity(stage)
 
 
+def _open_stage(stage: Path):
+    return open(stage, "wb")
+
+
+def _is_local_env_error(exc: BaseException) -> bool:
+    """An OSError from THIS machine (ENOSPC, EDQUOT, EIO, EROFS, EACCES...)
+    says nothing about the restore point: falling back on it would restore an
+    older, smaller point because the disk is full. gzip's BadGzipFile is an
+    OSError too, but it means the artifact's content is malformed."""
+    return isinstance(exc, OSError) and not isinstance(exc, gzip.BadGzipFile)
+
+
 def _place_records(work: Path, records_dir, config_path) -> None:
+    """Replace records_dir / config_path atomically: build the new copy beside
+    the destination, then rename the old aside and the new in. Any failure
+    leaves the original in place."""
     rec = work / "records"
     if records_dir and rec.is_dir():
-        dest = Path(records_dir)
-        if dest.exists():
-            shutil.rmtree(dest)
-        dest.parent.mkdir(parents=True, exist_ok=True)
-        shutil.copytree(rec, dest)
+        _replace_dir(rec, Path(records_dir))
     cfg = work / "config.json"
     if config_path and cfg.is_file():
         dest = Path(config_path)
         dest.parent.mkdir(parents=True, exist_ok=True)
-        shutil.copy2(cfg, dest)
+        tmp = dest.with_name(f".{dest.name}.restore-{os.getpid()}")
+        try:
+            shutil.copy2(cfg, tmp)
+            os.replace(tmp, dest)
+        finally:
+            tmp.unlink(missing_ok=True)
+
+
+def _replace_dir(src: Path, dest: Path) -> None:
+    dest.parent.mkdir(parents=True, exist_ok=True)
+    new = dest.with_name(f".{dest.name}.restore-new-{os.getpid()}")
+    old = dest.with_name(f".{dest.name}.restore-old-{os.getpid()}")
+    for p in (new, old):
+        if p.exists():
+            shutil.rmtree(p)
+    try:
+        shutil.copytree(src, new)
+        moved = False
+        if dest.exists():
+            os.replace(dest, old)
+            moved = True
+        try:
+            os.replace(new, dest)
+        except BaseException:
+            if moved:
+                os.replace(old, dest)
+            raise
+    finally:
+        shutil.rmtree(new, ignore_errors=True)
+    shutil.rmtree(old, ignore_errors=True)
 
 
 # ---------------------------------------------------------------- restore
@@ -465,6 +521,7 @@ def restore_latest(home, drive_service, key, *, dest_store, records_dir=None,
             work = rdir / f"work-{cand.file_id}"
             shutil.rmtree(work, ignore_errors=True)
             work.mkdir()
+            built = False
             try:
                 if manifest is not None:
                     _build_from_manifest(drive_service, key, home, manifest, stage,
@@ -473,8 +530,15 @@ def restore_latest(home, drive_service, key, *, dest_store, records_dir=None,
                 else:
                     _build_from_legacy(drive_service, key, home, cand, stage, work,
                                        want_records, deadline=deadline, clock=clock)
+                built = True
             except (RestoreIncomplete, _Transient):
                 raise
+            except OSError as exc:
+                if _is_local_env_error(exc):
+                    raise          # this machine's problem, not the candidate's
+                _remove_stage(stage)
+                skip(cand, f"{type(exc).__name__}: {exc}")
+                continue
             except _Bad as exc:
                 _remove_stage(stage)
                 skip(cand, str(exc))
@@ -484,7 +548,8 @@ def restore_latest(home, drive_service, key, *, dest_store, records_dir=None,
                 skip(cand, f"{type(exc).__name__}: {exc}")
                 continue
             finally:
-                if not stage.exists():
+                if not built:
+                    _remove_stage(stage)
                     shutil.rmtree(work, ignore_errors=True)
             try:
                 swap(stage, dest)

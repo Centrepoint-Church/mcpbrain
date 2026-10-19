@@ -7,11 +7,13 @@ adds folder listings and `get_media` downloads (served to the real
 MediaIoBaseDownload through a fake http) over the same file store, so restore
 reads exactly the manifests and segments the uploader wrote.
 """
+import errno
 import hashlib
 import json
 import re
 import sqlite3
 from datetime import datetime, timezone
+from pathlib import Path
 
 import httplib2
 import pytest
@@ -89,7 +91,10 @@ class RService(Service):
                     hits.append({"id": fid, "name": m["name"], "mimeType": mime,
                                  "createdTime": m.get("createdTime", "")})
                 outer.server.lists.append(q)
-                return _Exec(lambda: {"files": hits})
+                resp = {"files": hits}
+                if parent in outer.server.incomplete:
+                    resp["incompleteSearch"] = True
+                return _Exec(lambda: resp)
 
             def get_media(self, fileId, supportsAllDrives=None, **kw):
                 assert supportsAllDrives is True
@@ -115,6 +120,7 @@ def env(tmp_path, monkeypatch):
     cfg.write_text('{"v": 1}')
     server = Server()
     server.downloads, server.on_download, server.lists = [], [], []
+    server.incomplete = set()
 
     class E:
         pass
@@ -499,3 +505,116 @@ def test_stale_stage_removed_first(env):
     env.restore()
     assert not stage.exists()
     assert _rows(env.dest) == _rows(env.store)
+
+
+# ---- fix round 1
+
+
+def test_local_disk_error_building_stage_propagates_without_fallback(env, monkeypatch):
+    """ENOSPC writing the stage is this machine's problem: it must not demote
+    to an older (smaller) restore point such as the June legacy file."""
+    env.cap_up()
+    esc_person = env.folder("owner@example.org", "ESC")
+    env.legacy(esc_person, datetime(2026, 6, 16, tzinfo=timezone.utc).timestamp())
+    env.dest.parent.mkdir(parents=True)
+    original = _make_db(env.dest, rows=3).read_bytes()
+    real_open = br._open_stage
+
+    class Full:
+        def __init__(self, fh):
+            self.fh = fh
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *exc):
+            self.fh.close()
+
+        def seek(self, *a):
+            return self.fh.seek(*a)
+
+        def truncate(self, *a):
+            return self.fh.truncate(*a)
+
+        def write(self, data):
+            self.fh.write(data[:10])
+            raise OSError(errno.ENOSPC, "No space left on device")
+
+    monkeypatch.setattr(br, "_open_stage", lambda p: Full(real_open(p)))
+    swaps = []
+    with pytest.raises(OSError) as ei:
+        env.restore(swap=lambda s, d: swaps.append(1))
+    assert ei.value.errno == errno.ENOSPC
+    assert swaps == []
+    assert env.dest.read_bytes() == original
+    assert not env.dest.with_name(env.dest.name + ".stage").exists()
+    assert not list(br.restore_dir(env.home).glob("work-*"))
+    assert not env.out_records.exists()
+
+
+def test_incomplete_person_folder_listing_raises_transient(env):
+    env.cap_up()
+    person = env.svc.by_name("owner@example.org")[0]
+    env.server.incomplete.add(person)
+    with pytest.raises(br.ListingIncomplete):
+        env.restore()
+    with pytest.raises(br.ListingIncomplete):
+        br.candidates(env.home, env.svc, KEY)
+    assert not env.dest.exists()
+
+
+def test_incomplete_chain_listing_raises_transient(env):
+    base = env.cap_up()
+    _insert(env.store, 5)
+    env.cap_up()
+    env.server.incomplete.add(env.svc.by_name(base.chain)[0])
+    with pytest.raises(br.ListingIncomplete):
+        env.restore()
+    assert not env.dest.exists()
+    assert issubclass(br.ListingIncomplete, TimeoutError)
+
+
+def test_records_placement_failure_keeps_original_records(env, monkeypatch):
+    env.cap_up()
+    env.out_records.mkdir(parents=True)
+    (env.out_records / "keep.md").write_text("original")
+    env.out_cfg.write_text('{"orig": 1}')
+    real = br.shutil.copytree
+
+    def half(src, dst, *a, **kw):
+        if Path(dst).parent != env.out_records.parent:    # not the placement
+            return real(src, dst, *a, **kw)
+        Path(dst).mkdir(parents=True)
+        (Path(dst) / "partial.md").write_text("x")
+        raise OSError(errno.EIO, "copy failed mid-way")
+    monkeypatch.setattr(br.shutil, "copytree", half)
+    with pytest.raises(OSError):
+        env.restore()
+    monkeypatch.setattr(br.shutil, "copytree", real)
+    assert [p.name for p in env.out_records.iterdir()] == ["keep.md"]
+    assert (env.out_records / "keep.md").read_text() == "original"
+    assert _rows(env.dest) == _rows(env.store)       # the store did swap
+    assert sorted(p.name for p in env.out_records.parent.iterdir()) == [
+        "brain.sqlite3", "config.json", "records"]
+
+
+def test_records_placement_replaces_existing_dir(env):
+    env.cap_up()
+    env.out_records.mkdir(parents=True)
+    (env.out_records / "stale.md").write_text("old")
+    env.restore()
+    assert sorted(p.name for p in env.out_records.iterdir()) == ["a.md"]
+    assert sorted(p.name for p in env.out_records.parent.iterdir()) == [
+        "brain.sqlite3", "config.json", "records"]
+
+
+def test_candidates_unwraps_transient_errors(env):
+    base = env.cap_up()
+    mid = env.svc.by_name(f"manifest-{base.chain}-000001")[0]
+
+    def boom(fid):
+        if fid == mid:
+            raise httplib2.ServerNotFoundError("offline")
+    env.server.on_download.append(boom)
+    with pytest.raises(httplib2.ServerNotFoundError):
+        br.candidates(env.home, env.svc, KEY)
