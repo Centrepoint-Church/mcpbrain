@@ -42,6 +42,9 @@ class FakeDrive:
         self.fail: dict[str, int] = {}
         self.lists: list[dict] = []
         self.kwargs: list[dict] = []
+        self.lagging: set[str] = set()             # omitted from every listing
+        self.hidden_from_ordered: set[str] = set()  # omitted from ordered listings
+        self.incomplete: set[str] = set()          # parents listed incompleteSearch
 
     def add(self, fid, name, parent, *, created, folder=False):
         self.items[fid] = {"id": fid, "name": name, "parents": [parent],
@@ -68,7 +71,13 @@ class FakeDrive:
 
         def run():
             out = [dict(it) for fid, it in self.items.items()
-                   if it["parents"][0] == parent and self._alive(fid)]
+                   if it["parents"][0] == parent and self._alive(fid)
+                   and fid not in self.lagging]
+            m = re.search(r"createdTime > '([^']+)'", q)
+            if m:
+                out = [f for f in out if f["createdTime"][:19] > m.group(1)]
+            elif kw.get("orderBy"):
+                out = [f for f in out if f["id"] not in self.hidden_from_ordered]
             if f"mimeType = '{FOLDER_MIME}'" in q:
                 out = [f for f in out if f["mimeType"] == FOLDER_MIME]
             m = re.search(r"name contains '([^']+)'", q)
@@ -78,7 +87,10 @@ class FakeDrive:
                 out.sort(key=lambda f: f["createdTime"], reverse=True)
             if kw.get("pageSize"):
                 out = out[: kw["pageSize"]]
-            return {"files": out}
+            resp = {"files": out}
+            if parent in self.incomplete:
+                resp["incompleteSearch"] = True
+            return resp
         return _Exec(run)
 
     def update(self, fileId, body=None, **kw):
@@ -411,3 +423,41 @@ def test_prune_trashes_rather_than_deletes(tmp_path):
     d = _drive_with("fa", "fz")
     assert not hasattr(d, "delete")
     assert _step(tmp_path, d)["deleted"] == ["fa"]
+
+
+# fix round 1: listing completeness and legacy age ---------------------------
+
+def test_incomplete_child_listing_keeps_an_old_looking_unknown_folder(tmp_path):
+    _journal(tmp_path, {"chain-z": _chain("fz", NOW - 2 * DAY, NOW)})
+    d = _drive_with("fz")
+    _unknown(d, "uold", 20)
+    _unknown(d, "uold2", 20)
+    d.incomplete.add("uold")     # Drive says it may have missed children
+    out = _step(tmp_path, d)
+    assert out["deleted"] == ["uold2"]
+    child_lists = [x for x in d.lists if "'uold2' in parents" in x["q"]]
+    assert child_lists and all(x["corpora"] == "drive" and x["driveId"] == "drive"
+                               for x in child_lists)
+
+
+def test_recent_child_found_by_presence_query_keeps_folder(tmp_path):
+    _journal(tmp_path, {"chain-z": _chain("fz", NOW - 2 * DAY, NOW)})
+    d = _drive_with("fz")
+    _unknown(d, "uold", 20)
+    d.add("fresh", "delta-000009-0000", "uold", created=NOW - DAY)
+    d.hidden_from_ordered.add("fresh")  # the ordered listing lags behind
+    assert _step(tmp_path, d)["deleted"] == []
+    assert any("createdTime >" in x["q"] for x in d.lists)
+
+
+def test_fresh_legacy_file_kept_after_coverage(tmp_path):
+    d = _drive_with("fa")
+    d.add("legacy", "legacy", "drive", created=NOW - 200 * DAY, folder=True)
+    d.add("old", "mcpbrain-backup-2026-06-01-0000.enc", "legacy", created=NOW - 120 * DAY)
+    # a second machine of the same person, still on an old daemon
+    d.add("fresh", "mcpbrain-backup-2027-01-14-0000.enc", "legacy", created=NOW - DAY)
+    d.add("undated", "x.enc", "legacy", created=NOW - 120 * DAY)
+    d.items["undated"]["createdTime"] = ""
+    _journal(tmp_path, {"chain-a": _chain("fa", NOW - 8 * DAY, NOW)})
+    out = _step(tmp_path, d, loc=_loc(legacy=["legacy"]))
+    assert out["deleted"] == ["old"]

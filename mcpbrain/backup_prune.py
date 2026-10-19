@@ -24,13 +24,16 @@ Every listing filters `trashed = false`, so trashed items never come back.
   a chain overtaken by a committed successor can never progress). An id that
   does not parse is kept.
 * `chain-*` folders under the person folder that the journal does not know
-  (lost journal, an earlier install): deleted only when the journal's newest
+  (lost journal, an earlier install). Another machine's chains for the same
+  person are also "unknown" to this journal, and are removed only by this age
+  rule. Deleted only when the journal's newest
   committed chain began after the folder's newest activity and that activity
   (newest child createdTime, or the folder's own times) is older than
   `retain_days`. Absence from a listing is never a reason to delete — only
-  presence plus age.
-* Legacy single-file `.enc` backups (in `Location.legacy_folders` and loose in
-  the person folder) once the new layout's oldest committed restore point is
+  presence plus age: a child created after the cutoff (presence query) or a
+  listing Drive marks `incompleteSearch` keeps the folder.
+* Legacy single-file `.enc` backups created before the cutoff (in
+  `Location.legacy_folders` and loose in the person folder) once the new layout's oldest committed restore point is
   older than `retain_days`, i.e. the new layout already covers retention.
 * Ids the uploader queued (orphan uploads it could not delete).
 
@@ -159,31 +162,58 @@ def _eligible_chains(j: dict, committed, cutoff: float) -> list[str]:
     return out
 
 
-def _list(svc, q: str, **extra) -> list[dict]:
+def _list(svc, q: str, *, drive_id: str | None = None,
+          **extra) -> tuple[list[dict], bool]:
+    """(files, complete). `complete` is False when Drive flagged any page
+    `incompleteSearch` -- a caller deciding to DELETE must then keep."""
     out: list[dict] = []
+    complete = True
     token = None
+    scope = (dict(corpora="drive", driveId=drive_id) if drive_id
+             else dict(corpora="allDrives"))
     while True:
-        kw = dict(q=q, spaces="drive", corpora="allDrives",
-                  includeItemsFromAllDrives=True, supportsAllDrives=True,
-                  fields=_LIST_FIELDS, **extra)
+        kw = dict(q=q, spaces="drive", includeItemsFromAllDrives=True,
+                  supportsAllDrives=True, fields=_LIST_FIELDS, **scope, **extra)
         if token:
             kw["pageToken"] = token
         resp = svc.files().list(**kw).execute(num_retries=_NUM_RETRIES) or {}
         out.extend(resp.get("files") or [])
+        if resp.get("incompleteSearch"):
+            complete = False
         token = resp.get("nextPageToken")
         if not token or extra.get("pageSize"):
-            return out
+            return out, complete
 
 
-def _newest_activity(svc, folder: dict) -> float | None:
-    """Newest of the folder's own times and its newest child's createdTime."""
+def _rfc3339(t: float) -> str:
+    return datetime.fromtimestamp(t, tz=timezone.utc).strftime("%Y-%m-%dT%H:%M:%S")
+
+
+def _newest_activity(svc, folder: dict, *, drive_id: str,
+                     cutoff: float) -> float | None:
+    """Newest of the folder's own times and its children's times, or None
+    when the age cannot be established (keep).
+
+    Presence first: any live child created after `cutoff` means the folder is
+    young, whatever an ordered listing says. Then the newest children by
+    createdTime; an incomplete listing proves nothing, so it also means keep.
+    """
+    base = f"'{folder['id']}' in parents and trashed = false"
+    recent, complete = _list(svc, f"{base} and createdTime > '{_rfc3339(cutoff)}'",
+                             drive_id=drive_id, pageSize=1)
+    if recent:
+        return max(_ts(recent[0].get("createdTime")) or cutoff, cutoff)
+    if not complete:
+        return None
+    kids, complete = _list(svc, base, drive_id=drive_id,
+                           orderBy="createdTime desc", pageSize=10)
+    if not complete:
+        return None
     times = [_ts(folder.get("createdTime")), _ts(folder.get("modifiedTime"))]
-    kids = _list(svc, f"'{folder['id']}' in parents and trashed = false",
-                 orderBy="createdTime desc", pageSize=10)
     times += [_ts(k.get("createdTime")) for k in kids]
     times += [_ts(k.get("modifiedTime")) for k in kids]
     known = [t for t in times if t is not None]
-    return max(known) if known else None  # None: no evidence of age, keep
+    return max(known) if known else None
 
 
 def _unknown_chains(svc, j: dict, loc, committed, cutoff, over) -> list[str]:
@@ -191,30 +221,38 @@ def _unknown_chains(svc, j: dict, loc, committed, cutoff, over) -> list[str]:
         return []
     newest_start = float(committed[-1][1]["first_captured_at"])
     known = {e.get("folder_id") for e in j["chains"].values() if isinstance(e, dict)}
-    folders = _list(svc, f"'{loc.folder_id}' in parents and "
-                         f"mimeType = '{backup.FOLDER_MIME}' and trashed = false")
+    folders, _ = _list(svc, f"'{loc.folder_id}' in parents and "
+                            f"mimeType = '{backup.FOLDER_MIME}' and trashed = false",
+                       drive_id=loc.drive_id)
     out = []
     for f in folders:
         if over():
             break
         if not str(f.get("name", "")).startswith("chain-") or f["id"] in known:
             continue
-        newest = _newest_activity(svc, f)
+        newest = _newest_activity(svc, f, drive_id=loc.drive_id, cutoff=cutoff)
         if newest is not None and newest < cutoff and newest_start > newest:
-            log.info("backup prune: unknown chain folder %s (%s) last active %s; "
-                     "queued", f.get("name"), f["id"], f.get("createdTime"))
+            log.info("backup prune: unknown chain folder %s (%s) newest activity "
+                     "%s, before the retention cutoff %s; queued", f.get("name"),
+                     f["id"], _rfc3339(newest), _rfc3339(cutoff))
             out.append(f["id"])
     return out
 
 
-def _legacy_files(svc, loc, over) -> list[str]:
+def _legacy_files(svc, loc, cutoff, over) -> list[str]:
+    """Legacy `.enc` files created before `cutoff`. A newer one (another
+    machine of the same person still on an old daemon) is a restore point
+    inside retention and stays; so does one whose createdTime is unknown."""
     out = []
     for folder in [*loc.legacy_folders, loc.folder_id]:
         if not folder or over():
             continue
-        for f in _list(svc, f"'{folder}' in parents and trashed = false"):
+        files, _ = _list(svc, f"'{folder}' in parents and trashed = false")
+        for f in files:
+            created = _ts(f.get("createdTime"))
             if (f.get("mimeType") != backup.FOLDER_MIME
-                    and str(f.get("name", "")).endswith(".enc")):
+                    and str(f.get("name", "")).endswith(".enc")
+                    and created is not None and created < cutoff):
                 out.append(f["id"])
     return out
 
@@ -274,7 +312,7 @@ def prune_step(home, *, drive_service, retain_days: float, now: float,
                 oldest = (float(committed[0][1]["first_captured_at"])
                           if committed else None)
                 if oldest is not None and oldest < cutoff and not over():
-                    changed |= _queue(j, _legacy_files(svc, loc, over))
+                    changed |= _queue(j, _legacy_files(svc, loc, cutoff, over))
             except Exception as exc:  # noqa: BLE001 — retry next step
                 log.warning("backup prune: listing failed (%s); will retry", exc)
     if changed:
