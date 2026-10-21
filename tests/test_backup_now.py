@@ -212,8 +212,8 @@ def test_progress_prints_across_files_of_one_item_and_resets_per_item(tmp_path):
     lines = out.splitlines()
     assert "Uploading: 50 of 100 MB (50%) · 2 waiting" in lines
     assert "Uploading: 100 of 100 MB (100%) · 2 waiting" in lines
-    assert "Next item: b" in lines
+    assert "Uploading the next set of changes (2 waiting)" in lines
     # Item b starts again from 0% and prints at its own steps.
     assert lines.index("Uploading: 0 of 100 MB (0%) · 2 waiting",
-                       lines.index("Next item: b")) > 0
+                       lines.index("Uploading the next set of changes (2 waiting)")) > 0
     assert "Uploading: 40 of 100 MB (40%) · 2 waiting" in lines

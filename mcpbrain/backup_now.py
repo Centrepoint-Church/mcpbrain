@@ -149,7 +149,8 @@ def main(argv=None, *, client=None, home=None, sleep=time.sleep,
                 item = running.get("item")
                 if item != last_item:
                     if last_item is not None:
-                        out(f"Next item: {item}")
+                        out("Uploading the next set of changes"
+                            + (f" ({pending} waiting)" if pending else ""))
                     last_item = item
                     last_pct = -10
                     shown = None
