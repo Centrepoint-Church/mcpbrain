@@ -1443,7 +1443,7 @@ def test_outbox_full_records_a_clear_error_and_keeps_uploading(tmp_path, bk, mon
     assert out["captured"] is False and out["skipped"] == "outbox_full"
     state = _backup_state(bk)
     assert state["consecutive_failures"] == 1
-    assert state["last_error"].startswith("outbox full: ")
+    assert state["last_error"].startswith("capture paused: ")
     assert "MB waiting to upload" in state["last_error"]
     assert daemon._last_backup is None, "a full outbox advanced the cadence"
 
@@ -1507,7 +1507,7 @@ def test_outbox_full_handler_never_raises(tmp_path, bk, monkeypatch):
     monkeypatch.setattr(daemon_module.backup_outbox, "outbox_bytes", unreadable)
     out = daemon.maybe_backup()
     assert out["skipped"] == "outbox_full"
-    assert "outbox full: ? MB" in _backup_state(bk)["last_error"]
+    assert "capture paused: ? MB" in _backup_state(bk)["last_error"]
 
 
 def test_upload_discard_is_recorded_as_last_discard(tmp_path, bk):

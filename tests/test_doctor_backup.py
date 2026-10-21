@@ -60,10 +60,10 @@ def test_doctor_warns_when_outbox_full(tmp_path, monkeypatch):
 def test_doctor_shows_a_recent_discard(tmp_path):
     home = _home(tmp_path, restore_point=time.time(), last_success=time.time(),
                  last_discard={"at": time.time() - 2 * 3600, "item": "x",
-                               "reason": "unreadable"})
+                               "reason": "local file seg does not match its recorded sha256"})
     _, msg = _doctor(home)
     assert ("⚠️  Backup           a damaged local backup was discarded 2h ago "
-            "(unreadable); a fresh full backup was started") in msg
+            "(a backup file on this computer was damaged); a fresh full backup was started") in msg
 
 
 def test_doctor_hides_an_old_discard(tmp_path):
@@ -90,3 +90,13 @@ def test_doctor_backup_lines_work_with_daemon_down(tmp_path):
     home = _home(tmp_path)  # configured, no state file at all
     _, msg = _doctor(home)
     assert "No backup yet" in msg
+
+
+def test_discard_reasons_are_plain_english():
+    f = doctor._discard_reason
+    assert f("base-0001 mismatched on Drive 3 times in a row (x)") == \
+        "the upload kept failing its check"
+    assert f("local files missing") == "a backup file on this computer was damaged"
+    assert f("corrupt local file found while merging: x") == \
+        "a backup file on this computer was damaged"
+    assert f(None) == "it could not be read"

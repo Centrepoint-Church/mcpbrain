@@ -3052,8 +3052,8 @@ class Daemon:
                 mb = f"{backup_outbox.outbox_bytes(home) / 1_000_000:,.0f}"
             except Exception:  # noqa: BLE001 — the handler must never raise
                 mb = "?"
-            err = (f"outbox full: {mb} MB waiting to upload; capture "
-                   "paused until the upload drains it")
+            err = (f"capture paused: {mb} MB waiting to upload; the next backup "
+                   "starts when they finish")
             # The transition into "full" is recorded once; the pause then
             # re-checks cheaply (see the gate above) instead of re-raising,
             # re-logging and re-recording a failed attempt every iteration.

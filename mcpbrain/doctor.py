@@ -657,6 +657,17 @@ _DISCARD_SHOWN_S = 7 * 86400
 _DELETE_FAILURE_MIN = 3
 
 
+def _discard_reason(raw) -> str:
+    """Plain-English reason for a discarded local backup file (the uploader's
+    internal reason strings are for the log, not for a person)."""
+    r = str(raw or "").lower()
+    if "mismatched on drive" in r:
+        return "the upload kept failing its check"
+    if any(k in r for k in ("corrupt", "sha256", "missing", "gap")):
+        return "a backup file on this computer was damaged"
+    return "it could not be read"
+
+
 def backup_extra_lines(home, now: float | None = None) -> list[str]:
     """Extra ⚠️ Backup lines read from LOCAL files only (works with the daemon
     down; never calls Drive): a damaged local backup the daemon discarded in
@@ -675,7 +686,7 @@ def backup_extra_lines(home, now: float | None = None) -> list[str]:
         at = disc = None
     if at is not None and 0 <= now - at <= _DISCARD_SHOWN_S:
         from mcpbrain.probes import _ago
-        reason = disc.get("reason") or "unreadable"
+        reason = _discard_reason(disc.get("reason"))
         out.append(f"⚠️  {'Backup':<16} a damaged local backup was discarded "
                    f"{_ago(now - at)} ({reason}); a fresh full backup was started")
     try:

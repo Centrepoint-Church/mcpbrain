@@ -23,6 +23,8 @@ from mcpbrain.control_client import ControlClient, DaemonUnavailable
 # stops watching; the backup carries on in the daemon.
 WAIT_LIMIT_S = 3 * 3600
 POLL_S = 5.0
+# Consecutive failed status polls before the command stops watching.
+LOST_POLLS = 3
 
 
 def _read_state(home) -> dict:
@@ -101,18 +103,36 @@ def main(argv=None, *, client=None, home=None, sleep=time.sleep,
 
     shown = None
     last_pct = -10
+    told_paused = False
+    lost = 0
     deadline = clock() + WAIT_LIMIT_S
+    retry = ("mcpbrain keeps retrying in the background. "
+             "Run `mcpbrain backup` again to retry now.")
     try:
         while clock() < deadline:
             try:
                 status = client.status()
+                lost = 0
             except DaemonUnavailable:
-                status = {}
+                lost += 1
+                if lost >= LOST_POLLS:
+                    out("Lost contact with mcpbrain; the backup carries on in "
+                        "the background. Check it with: mcpbrain doctor")
+                    return 0
+                sleep(POLL_S)
+                continue
             running = status.get("backup_running")
             requested = bool(status.get("backup_requested"))
-            pending = (status.get("backup") or {}).get("pending")
+            info = status.get("backup") or {}
+            pending = info.get("pending")
             state = _read_state(home)
             success = _num(state, "last_success")
+            err = str(info.get("last_error") or state.get("last_error") or "")
+            paused = requested and not running and err.startswith("capture paused")
+            if paused and not told_paused:
+                out(f"Earlier changes ({_mb(info.get('pending_bytes'))} MB) are "
+                    f"still uploading; this backup will start when they finish.")
+                told_paused = True
             if not requested and not running and not pending:
                 if success > before:
                     out(f"✅ Backed up. Restore point "
@@ -121,8 +141,7 @@ def main(argv=None, *, client=None, home=None, sleep=time.sleep,
                 if _num(state, "last_attempt") > before_attempt and \
                         (state.get("consecutive_failures") or 0) > 0:
                     out(f"⚠️  Backup failed: {state.get('last_error') or 'unknown error'}")
-                    out("The daemon retries automatically within the hour. "
-                        "Run `mcpbrain backup` again to retry now.")
+                    out(retry)
                     return 1
             if running and running.get("phase") == "upload" and running.get("total"):
                 pct = int(100 * (running.get("sent") or 0) / running["total"])
@@ -130,12 +149,11 @@ def main(argv=None, *, client=None, home=None, sleep=time.sleep,
                     out(_upload_line(running, pending))
                     shown = "upload"
                     last_pct = pct - pct % 10
-            elif (not running and pending and not requested
+            elif (not running and not requested and pending
                   and (state.get("consecutive_failures") or 0) > 0
                   and _num(state, "last_attempt") > before_attempt):
                 out(f"⚠️  Backup failed: {state.get('last_error') or 'unknown error'}")
-                out("The daemon retries automatically within the hour. "
-                    "Run `mcpbrain backup` again to retry now.")
+                out(retry)
                 return 1
             sleep(POLL_S)
     except KeyboardInterrupt:

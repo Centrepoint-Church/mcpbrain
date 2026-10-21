@@ -18,7 +18,8 @@ class _Client:
     poll pops the next backup_running value and runs `on_poll`."""
 
     def __init__(self, *, requested=None, running=(), on_poll=None, down=False,
-                 old=False, requested_polls=0, pending=lambda n: 0):
+                 old=False, requested_polls=0, pending=lambda n: 0,
+                 info=lambda n: {}, flaky=lambda n: False):
         self.requested = requested if requested is not None else {"requested": True}
         self.running = list(running)
         self.on_poll = on_poll
@@ -27,6 +28,9 @@ class _Client:
         self.polls = 0
         self.requested_polls = requested_polls
         self.pending = pending
+        self.info = info
+        self.flaky = flaky
+        self.calls = 0
 
     def request_backup(self):
         if self.down or self.old:
@@ -36,12 +40,15 @@ class _Client:
     def status(self):
         if self.down:
             raise DaemonUnavailable("x")
+        self.calls += 1
+        if self.flaky(self.calls):
+            raise DaemonUnavailable("x")
         self.polls += 1
         if self.on_poll:
             self.on_poll(self.polls)
         return {"backup_running": self.running.pop(0) if self.running else None,
                 "backup_requested": self.polls <= self.requested_polls,
-                "backup": {"pending": self.pending(self.polls)}}
+                "backup": {"pending": self.pending(self.polls), **self.info(self.polls)}}
 
 
 def _state(home, **kw):
@@ -130,13 +137,58 @@ def test_no_wait_returns_after_the_request(tmp_path):
     assert client.polls == 0
 
 
-def test_outbox_full_is_reported_as_a_failure(tmp_path):
+_PAUSED = {"last_error": "capture paused: 2,000 MB waiting to upload; the next "
+                         "backup starts when they finish",
+           "pending_bytes": 2_000_000_000}
+
+
+def test_paused_by_full_outbox_tells_once_then_succeeds_after_drain(tmp_path):
+    _state(tmp_path, last_attempt=100.0, last_success=90.0, consecutive_failures=1)
+
+    def drain(n):
+        if n == 6:
+            _state(tmp_path, last_attempt=300.0, last_success=300.0,
+                   restore_point=300.0, consecutive_failures=0)
+
+    client = _Client(
+        requested_polls=5, on_poll=drain,
+        running=[None, None, None,
+                 {"phase": "upload", "sent": 1_000_000_000, "total": 2_000_000_000}],
+        pending=lambda n: 3 if n < 6 else 0,
+        info=lambda n: _PAUSED if n < 6 else {})
+    code, out = _run(tmp_path, client)
+    assert code == 0
+    assert out.count("Earlier changes (2,000 MB) are still uploading; this backup "
+                     "will start when they finish.") == 1
+    assert "Uploading: 1,000 of 2,000 MB (50%) · 3 waiting" in out
+    assert "✅ Backed up." in out
+    assert "Backup failed" not in out
+
+
+def test_paused_until_the_deadline_prints_the_still_running_message(tmp_path):
+    _state(tmp_path, last_attempt=100.0, last_success=90.0, consecutive_failures=1)
+    client = _Client(requested_polls=10**9, pending=lambda n: 3, info=lambda n: _PAUSED)
+    code, out = _run(tmp_path, client)
+    assert code == 0
+    assert out.count("Earlier changes") == 1
+    assert "Still running after a long time" in out
+    assert "keeps retrying" not in out
+
+
+def test_failure_message_wording(tmp_path):
     _state(tmp_path, last_attempt=100.0, last_success=90.0, consecutive_failures=0)
-
-    def full(n):
-        _state(tmp_path, last_attempt=200.0, last_success=90.0, consecutive_failures=1,
-               last_error="outbox full: 2000 MB waiting to upload")
-
-    code, out = _run(tmp_path, _Client(pending=lambda n: 3, on_poll=full))
+    code, out = _run(tmp_path, _Client(on_poll=lambda n: _state(
+        tmp_path, last_attempt=200.0, last_success=90.0, consecutive_failures=1,
+        last_error="boom")))
     assert code == 1
-    assert "outbox full" in out
+    assert "mcpbrain keeps retrying in the background" in out
+    assert "within the hour" not in out
+
+
+def test_lost_contact_mid_wait_exits_cleanly(tmp_path):
+    _state(tmp_path, last_attempt=100.0, last_success=90.0)
+    client = _Client(requested_polls=10**9, flaky=lambda c: c >= 2)
+    code, out = _run(tmp_path, client)
+    assert code == 0
+    assert "Lost contact with mcpbrain" in out
+    assert "Backed up" not in out
