@@ -100,3 +100,16 @@ def test_discard_reasons_are_plain_english():
     assert f("corrupt local file found while merging: x") == \
         "a backup file on this computer was damaged"
     assert f(None) == "it could not be read"
+
+
+@pytest.mark.parametrize("bad", ["{not json", "[1, 2]"])
+def test_doctor_never_moves_an_unreadable_journal(tmp_path, bad):
+    """doctor is read-only: load_journal would set a bad journal aside."""
+    home = _home(tmp_path, restore_point=time.time(), last_success=time.time())
+    (tmp_path / "backup").mkdir()
+    journal = tmp_path / "backup" / "journal.json"
+    journal.write_text(bad)
+    _, msg = _doctor(home)
+    assert journal.read_text() == bad
+    assert not (tmp_path / "backup" / "journal.json.bad").exists()
+    assert "Drive will not let" not in msg

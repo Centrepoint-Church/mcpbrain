@@ -690,8 +690,11 @@ def backup_extra_lines(home, now: float | None = None) -> list[str]:
         out.append(f"⚠️  {'Backup':<16} a damaged local backup was discarded "
                    f"{_ago(now - at)} ({reason}); a fresh full backup was started")
     try:
-        from mcpbrain import backup_uploader
-        fails = backup_uploader.load_journal(home).get("delete_failures") or {}
+        # Read the JSON directly: backup_uploader.load_journal sets an
+        # unreadable journal aside, and doctor must have no side effects.
+        import json
+        j = json.loads((Path(home) / "backup" / "journal.json").read_text())
+        fails = (j.get("delete_failures") if isinstance(j, dict) else None) or {}
         n = sum(1 for v in fails.values()
                 if isinstance(v, dict) and (v.get("count") or 0) >= _DELETE_FAILURE_MIN)
     except Exception:  # noqa: BLE001 -- a diagnostic must never break doctor
