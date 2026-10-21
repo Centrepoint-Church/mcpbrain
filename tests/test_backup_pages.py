@@ -293,3 +293,54 @@ def test_read_segment_detects_truncated_body(tmp_path):
     # intact passes
     _hand_segment(tmp_path / "ok", key, full, hdr)
     assert len(list(bp.read_segment(tmp_path / "ok", key)[1])) == 3
+
+
+def _git_records(tmp_path):
+    rec = tmp_path / "rec"
+    (rec / ".git" / "refs" / "heads").mkdir(parents=True)
+    (rec / ".git" / "refs" / "tags").mkdir()
+    (rec / ".git" / "HEAD").write_text("ref: refs/heads/main\n")
+    (rec / ".git" / "index.lock").write_text("in flight")
+    (rec / "notes.lock").write_text("a user file, not git's")
+    (rec / "a.md").write_text("hello")
+    cfg = tmp_path / "config.json"
+    cfg.write_text("{}")
+    return rec, cfg
+
+
+def test_records_skip_git_lock_files_but_keep_empty_dirs(tmp_path):
+    rec, cfg = _git_records(tmp_path)
+    fp = bp.records_fingerprint(rec, cfg)
+    (rec / ".git" / "index.lock").write_text("changed while git runs")
+    assert bp.records_fingerprint(rec, cfg) == fp
+    key = backup.generate_escrow_key()
+    out = tmp_path / "records-000001"
+    bp.records_tar(rec, cfg, out, key)
+    restored = tmp_path / "restored"
+    backup.restore(out, tmp_path / "none.sqlite3", key, records_dir=restored,
+                   config_path=tmp_path / "cfg-out.json")
+    assert (restored / "a.md").read_text() == "hello"
+    assert (restored / "notes.lock").exists()
+    assert not (restored / ".git" / "index.lock").exists()
+    assert (restored / ".git" / "refs" / "heads").is_dir()   # empty dirs survive
+    assert (restored / ".git" / "refs" / "tags").is_dir()
+
+
+def test_records_tolerate_a_file_vanishing_mid_walk(tmp_path, monkeypatch):
+    rec, cfg = _git_records(tmp_path)
+    real = bp._record_entries
+
+    def with_ghost(records_dir):
+        return real(records_dir) + [("ghost.md", rec / "ghost.md", False)]
+    monkeypatch.setattr(bp, "_record_entries", with_ghost)
+    fp = bp.records_fingerprint(rec, cfg)
+    monkeypatch.setattr(bp, "_record_entries", real)
+    assert fp == bp.records_fingerprint(rec, cfg)
+    monkeypatch.setattr(bp, "_record_entries", with_ghost)
+    key = backup.generate_escrow_key()
+    out = tmp_path / "records-000001"
+    bp.records_tar(rec, cfg, out, key)
+    plain = backup.decrypt_file(out, tmp_path / "plain.tgz", key)
+    with tarfile.open(plain) as t:
+        names = t.getnames()
+    assert "records/a.md" in names and "records/ghost.md" not in names

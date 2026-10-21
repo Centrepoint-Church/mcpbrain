@@ -337,17 +337,37 @@ def read_segment(path, key: bytes) -> tuple[dict, "_PageIter"]:
     return header, it
 
 
+def _skip_record(rel: str) -> bool:
+    """git's transient `*.lock` files (index.lock, HEAD.lock, ref locks) come
+    and go under a running git command: never fingerprinted or packed."""
+    parts = rel.split("/")
+    return parts[-1].endswith(".lock") and ".git" in parts[:-1]
+
+
+def _record_entries(records_dir):
+    """Sorted (rel, path, is_dir) under records_dir, directories included (an
+    empty `.git/refs` must survive a restore), git lock files skipped."""
+    records_dir = Path(records_dir)
+    found = []
+    for root, dirs, files in os.walk(records_dir):
+        for name in dirs:
+            p = Path(root) / name
+            found.append((p.relative_to(records_dir).as_posix(), p, True))
+        for name in files:
+            p = Path(root) / name
+            rel = p.relative_to(records_dir).as_posix()
+            if not _skip_record(rel):
+                found.append((rel, p, False))
+    return sorted(found)
+
+
 def _record_files(records_dir, config_path):
     """Yield (arcname, path) for every file, sorted — same set records_tar packs."""
     records_dir = Path(records_dir) if records_dir else None
     if records_dir and records_dir.exists():
-        found = []
-        for root, _dirs, files in os.walk(records_dir):
-            for fn in files:
-                p = Path(root) / fn
-                rel = p.relative_to(records_dir).as_posix()
-                found.append((f"{backup._RECORDS_ARC}/{rel}", p))
-        yield from sorted(found)
+        for rel, p, is_dir in _record_entries(records_dir):
+            if not is_dir:
+                yield f"{backup._RECORDS_ARC}/{rel}", p
     if config_path and Path(config_path).exists():
         yield backup._CONFIG_ARC, Path(config_path)
 
@@ -361,10 +381,14 @@ def records_fingerprint(records_dir, config_path) -> str:
     outer = hashlib.sha256()
     for arc, p in _record_files(records_dir, config_path):
         h = hashlib.sha256()
-        with p.open("rb") as f:
-            for blk in iter(lambda: f.read(1 << 20), b""):
-                h.update(blk)
-        outer.update(json.dumps([arc, p.stat().st_size, h.hexdigest()]).encode())
+        try:
+            with p.open("rb") as f:
+                for blk in iter(lambda: f.read(1 << 20), b""):
+                    h.update(blk)
+            size = p.stat().st_size
+        except FileNotFoundError:
+            continue    # vanished mid-walk (git gc, a rename): not there now
+        outer.update(json.dumps([arc, size, h.hexdigest()]).encode())
         outer.update(b"\n")
     return outer.hexdigest()
 
@@ -380,7 +404,13 @@ def records_tar(records_dir, config_path, out_path, key: bytes) -> tuple[str, in
     with backup.open_encrypted(out_path, key) as enc:
         with tarfile.open(fileobj=enc, mode="w|gz") as tar:
             if records_dir and Path(records_dir).exists():
-                tar.add(records_dir, arcname=backup._RECORDS_ARC)
+                tar.add(records_dir, arcname=backup._RECORDS_ARC, recursive=False)
+                for rel, p, _is_dir in _record_entries(records_dir):
+                    try:
+                        tar.add(p, arcname=f"{backup._RECORDS_ARC}/{rel}",
+                                recursive=False)
+                    except FileNotFoundError:
+                        continue   # vanished mid-walk: skip, never fail the capture
             if config_path and Path(config_path).exists():
                 tar.add(config_path, arcname=backup._CONFIG_ARC)
     h = hashlib.sha256()
