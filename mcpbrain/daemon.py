@@ -105,6 +105,10 @@ DEFAULT_BACKUP_INTERVAL_S = 3600
 # still bounds a backup that can never succeed to a handful of attempts a day,
 # not the every-cycle re-snapshot of the 2026-08-04 incident.
 BACKUP_RETRY_BASE_S = 3600
+# An install whose outbox stays empty (nothing changes, nothing commits) still
+# runs one prune pass this often, so chains past retain_days do not sit on
+# Drive forever just because no new commit triggered the post-commit prune.
+IDLE_PRUNE_INTERVAL_S = 86400
 _CLICKUP_SYNC_INTERVAL_S: float = 300.0
 
 # Spool prepare bounds. The per-cycle thread ceiling now lives in config
@@ -1158,6 +1162,14 @@ class Daemon:
         # Consecutive failed upload steps in THIS process: at 2 the Drive
         # service and upload transport are rebuilt (see upload_backup_step).
         self._upload_failures = 0
+        # Outbox-full pause (see maybe_backup): wall time the outbox was found
+        # full (None = not full) and the monotonic time of the last cheap
+        # re-check. While set, capture neither sweeps nor copies.
+        self._outbox_full_since: float | None = None
+        self._outbox_full_checked: float | None = None
+        # Wall time of the last prune pass: an idle install still prunes
+        # expired chains once a day (IDLE_PRUNE_INTERVAL_S).
+        self._last_prune_wall: float | None = None
         # Periodic community detection is OFF unless communities_interval_s is set.
         # Tiered like resolve: OFF by default; time-based cadence via self._clock.
         self._communities_interval_s: float | None = communities_interval_s
@@ -2958,6 +2970,19 @@ class Daemon:
         if getattr(self, "_restore_pending", False):
             return {"captured": False, "skipped": "restore_pending"}
 
+        # Outbox full: paused. Re-check CHEAPLY (outbox_bytes only -- no
+        # sweep, no copy) at most every BACKUP_RETRY_BASE_S here; the upload
+        # step re-checks after every step it runs, which is what normally
+        # lifts the pause. Recorded in backup_state ONCE, on the transition
+        # into full (see the OutboxFull handler), never per iteration.
+        if getattr(self, "_outbox_full_since", None) is not None:
+            checked = getattr(self, "_outbox_full_checked", None)
+            if checked is not None and self._clock() - checked < BACKUP_RETRY_BASE_S:
+                return {"captured": False, "skipped": "outbox_full"}
+            if self._outbox_still_full(backup_cfg):
+                return {"captured": False, "skipped": "outbox_full"}
+            log.info("backup outbox drained below its cap; capture resumes")
+
         # getattr: an instance built without __init__ has neither (same
         # convention as _last_backup_wall below).
         requested_ev = getattr(self, "_backup_requested", None)
@@ -3022,11 +3047,19 @@ class Daemon:
             log.warning("backup capture skipped this cycle: %s; will retry next "
                         "cycle", exc)
             return {"captured": False, "skipped": "lock_busy"}
-        except backup_outbox.OutboxFull:
-            mb = backup_outbox.outbox_bytes(home) / 1_000_000
-            err = (f"outbox full: {mb:,.0f} MB waiting to upload; capture "
+        except backup_outbox.OutboxFull as exc:
+            try:
+                mb = f"{backup_outbox.outbox_bytes(home) / 1_000_000:,.0f}"
+            except Exception:  # noqa: BLE001 — the handler must never raise
+                mb = "?"
+            err = (f"outbox full: {mb} MB waiting to upload; capture "
                    "paused until the upload drains it")
-            log.warning("backup capture: %s", err)
+            # The transition into "full" is recorded once; the pause then
+            # re-checks cheaply (see the gate above) instead of re-raising,
+            # re-logging and re-recording a failed attempt every iteration.
+            self._outbox_full_since = self._wall_clock()
+            self._outbox_full_checked = self._clock()
+            log.warning("backup capture: %s (%s)", err, exc)
             write_backup_state(home, ok=False, error=err)
             return {"captured": False, "error": err, "skipped": "outbox_full"}
         except Exception as exc:  # noqa: BLE001 — backup must never crash the loop
@@ -3070,6 +3103,21 @@ class Daemon:
         finally:
             self._bulk_lock.release()
 
+    def _outbox_still_full(self, cfg) -> bool:
+        """Cheap re-check of the outbox-full pause: one outbox_bytes read.
+        Clears the pause (returns False) once the outbox is under the cap;
+        an unreadable outbox counts as still full (re-checked later)."""
+        self._outbox_full_checked = self._clock()
+        try:
+            full = backup_outbox.outbox_bytes(str(app_dir())) >= cfg.settings.outbox_max_bytes
+        except Exception as exc:  # noqa: BLE001 — never raise out of the loop
+            log.warning("backup outbox size unreadable: %s", exc)
+            return True
+        if not full:
+            self._outbox_full_since = None
+            self._outbox_full_checked = None
+        return full
+
     def upload_backup_step(self) -> dict | None:
         """Ship outbox items to Drive for at most settings.upload_budget_s,
         then prune -- every loop iteration while backup is configured, whether
@@ -3091,9 +3139,16 @@ class Daemon:
         position for `/api/status` (`backup_running`).
 
         Prune (`backup_prune.prune_step`) runs with the remaining budget after
-        a step that committed, or while the journal holds pending deletions
-        (an interrupted prune continues); never on an idle iteration, so an
-        empty outbox costs no Drive calls.
+        a step that committed, while the journal holds pending deletions (an
+        interrupted prune continues), or -- on an otherwise idle install --
+        once per IDLE_PRUNE_INTERVAL_S (wall clock), so expired chains are
+        removed even when nothing new commits. Other idle iterations make no
+        Drive calls.
+
+        The drain request (`_backup_drain_requested`) is cleared once the
+        outbox is empty -- but never while the capture request
+        (`_backup_requested`) is still outstanding (a capture skipped for a
+        busy lock): the requested item has not even been written yet.
         """
         # One attribute read (atomic); the interval it is paired with is not
         # used here. getattr: a Daemon built without __init__ has none.
@@ -3107,15 +3162,20 @@ class Daemon:
         except Exception as exc:  # noqa: BLE001 — an unreadable outbox must not crash the loop
             log.warning("backup upload: outbox unreadable: %s", exc)
             return None
+        capture_ev = getattr(self, "_backup_requested", None)
+        capture_outstanding = bool(capture_ev is not None and capture_ev.is_set())
         journal_deletes = False
+        last_prune = getattr(self, "_last_prune_wall", None)
+        idle_prune_due = (last_prune is None
+                          or self._wall_clock() - last_prune >= IDLE_PRUNE_INTERVAL_S)
         if not pending:
-            if drain_ev is not None:
+            if drain_ev is not None and not capture_outstanding:
                 drain_ev.clear()
             try:
                 journal_deletes = bool(backup_uploader.load_journal(home)["pending_deletes"])
             except Exception:  # noqa: BLE001 — best-effort
                 journal_deletes = False
-            if not journal_deletes:
+            if not journal_deletes and not idle_prune_due:
                 return None
         requested = bool(drain_ev is not None and drain_ev.is_set())
         if (not requested and sys.platform == "darwin"
@@ -3123,7 +3183,8 @@ class Daemon:
             log.info("backup upload deferred: system is dark-waking")
             return None
 
-        transport = self._backup_transport(cfg)
+        # Prune-only iterations need no upload transport.
+        transport = self._backup_transport(cfg) if pending else None
         budget = float(cfg.settings.upload_budget_s)
         clock = getattr(self, "_upload_clock", time.monotonic)
         start = clock()
@@ -3174,9 +3235,15 @@ class Daemon:
             if result.committed:
                 self._backup_failures = 0
 
-        if (result is not None and result.committed) or journal_deletes:
+        # Every upload step re-checks the outbox-full pause (cheap), so a
+        # drained outbox resumes capture on the next iteration.
+        if getattr(self, "_outbox_full_since", None) is not None:
+            self._outbox_still_full(cfg)
+
+        if (result is not None and result.committed) or journal_deletes or idle_prune_due:
             remaining = budget - (clock() - start)
             if remaining > 0:
+                self._last_prune_wall = self._wall_clock()
                 try:
                     pr = backup_prune.prune_step(
                         home, drive_service=cfg.drive_service,
@@ -3197,7 +3264,7 @@ class Daemon:
 
         if result is None:
             return None
-        if drain_ev is not None and result.pending == 0:
+        if drain_ev is not None and result.pending == 0 and not capture_outstanding:
             drain_ev.clear()
         return {"committed": list(result.committed), "error": result.error,
                 "pending": result.pending, "pending_bytes": result.pending_bytes}

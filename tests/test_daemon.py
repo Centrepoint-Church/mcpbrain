@@ -1304,6 +1304,11 @@ def test_request_backup_kept_while_the_lock_is_busy(tmp_path, bk):
         r.join(5.0)
     assert daemon._r == {"captured": False, "skipped": "lock_busy"}
     assert daemon.status()["backup_requested"] is True
+    # The empty-outbox upload step must not drop the drain request while the
+    # requested capture is still outstanding.
+    daemon._last_prune_wall = daemon._wall_clock()
+    daemon.upload_backup_step()
+    assert daemon._backup_drain_requested.is_set()
     assert daemon.maybe_backup()["captured"] is True
     assert daemon.status()["backup_requested"] is False
 
@@ -1446,6 +1451,63 @@ def test_outbox_full_records_a_clear_error_and_keeps_uploading(tmp_path, bk, mon
     assert step["committed"] == [first]
     daemon._store.upsert_chunk("d-2", "more", "h2", {})
     assert daemon.maybe_backup()["captured"] is True
+
+
+def test_outbox_full_is_recorded_once_and_rechecked_cheaply(tmp_path, bk, monkeypatch):
+    """Two (or many) consecutive full iterations record backup_state ONCE and
+    leave consecutive_failures alone; while full, capture neither sweeps nor
+    copies -- only a cheap outbox_bytes re-check, at most every
+    BACKUP_RETRY_BASE_S, or after an upload step. Draining resumes capture."""
+    from mcpbrain.daemon import BACKUP_RETRY_BASE_S
+    cfg = _backup_config()
+    clock = _Clock()
+    daemon = _daemon(tmp_path, cfg, interval=86400.0, clock=clock)
+    daemon.maybe_backup()
+    daemon._last_backup = None
+    daemon._backup = replace(cfg, settings=_bo.Settings(outbox_max_bytes=1))
+
+    assert daemon.maybe_backup()["skipped"] == "outbox_full"
+    first = _backup_state(bk)
+    assert first["consecutive_failures"] == 1
+
+    calls = _spy_capture(monkeypatch)
+    sizes = []
+    real_size = _bo.outbox_bytes
+    monkeypatch.setattr(daemon_module.backup_outbox, "outbox_bytes",
+                        lambda h: sizes.append(1) or real_size(h))
+    for _ in range(5):
+        clock.advance(1.0)
+        assert daemon.maybe_backup() == {"captured": False, "skipped": "outbox_full"}
+    assert calls == [], "a full outbox re-ran capture (sweep + copy)"
+    assert sizes == [], "re-checked before BACKUP_RETRY_BASE_S"
+    assert _backup_state(bk) == first, "a repeat full iteration re-recorded state"
+
+    clock.advance(BACKUP_RETRY_BASE_S)
+    assert daemon.maybe_backup()["skipped"] == "outbox_full"
+    assert sizes == [1] and calls == []
+    assert _backup_state(bk) == first
+
+    # The upload step drains it and lifts the pause; capture resumes.
+    daemon.upload_backup_step()
+    assert daemon._outbox_full_since is None
+    daemon._store.upsert_chunk("d-2", "more", "h2", {})
+    assert daemon.maybe_backup()["captured"] is True
+    assert len(calls) == 1
+
+
+def test_outbox_full_handler_never_raises(tmp_path, bk, monkeypatch):
+    daemon = _daemon(tmp_path, _backup_config())
+
+    def full(*a, **k):
+        raise _bo.OutboxFull("full")
+
+    def unreadable(home):
+        raise OSError("outbox gone")
+    monkeypatch.setattr(daemon_module.backup_outbox, "capture", full)
+    monkeypatch.setattr(daemon_module.backup_outbox, "outbox_bytes", unreadable)
+    out = daemon.maybe_backup()
+    assert out["skipped"] == "outbox_full"
+    assert "outbox full: ? MB" in _backup_state(bk)["last_error"]
 
 
 def test_upload_discard_is_recorded_as_last_discard(tmp_path, bk):
@@ -1667,15 +1729,45 @@ def test_prune_runs_after_a_commit_and_surfaces_hold(tmp_path, bk, monkeypatch):
                                         "previous": {"chain": "c1", "base_bytes": 1000}}}
     monkeypatch.setattr(daemon_module.backup_prune, "prune_step", prune)
     cfg = _backup_config(settings=_bo.Settings(retain_days=3))
-    daemon = _daemon(tmp_path, cfg)
+    wall = _Clock(1_790_000_000.0)
+    daemon = _daemon(tmp_path, cfg, wall=wall)
+    daemon._last_prune_wall = wall()        # the daily idle prune just ran
     daemon.upload_backup_step()
-    assert pruned == [], "an idle iteration pruned"
+    assert pruned == [], "an idle iteration pruned before its daily slot"
     daemon.maybe_backup()
     daemon.upload_backup_step()
     assert len(pruned) == 1 and pruned[0]["retain_days"] == 3
     assert 0 < pruned[0]["budget_s"] <= 60
     held = daemon.status()["prune_held"]
     assert held["newest_bytes"] == 10 and held["largest_kept_bytes"] == 1000
+
+
+def test_idle_install_prunes_once_a_day(tmp_path, bk, monkeypatch):
+    """Nothing pending, nothing committing: expired chains must still go.
+    One budgeted prune pass per IDLE_PRUNE_INTERVAL_S of wall clock, and
+    none in between (an idle iteration otherwise makes no Drive call)."""
+    from mcpbrain.daemon import IDLE_PRUNE_INTERVAL_S
+    pruned = []
+    monkeypatch.setattr(daemon_module.backup_prune, "prune_step",
+                        lambda home, **kw: pruned.append(kw) or {"deleted": [], "held": None})
+    uploads = []
+    monkeypatch.setattr(daemon_module.backup_uploader, "upload_step",
+                        lambda *a, **k: uploads.append(1))
+    wall = _Clock(1_790_000_000.0)
+    daemon = _daemon(tmp_path, _backup_config(settings=_bo.Settings(retain_days=7)),
+                     wall=wall)
+
+    daemon.upload_backup_step()                  # first idle pass: prunes
+    assert len(pruned) == 1
+    assert pruned[0]["retain_days"] == 7 and 0 < pruned[0]["budget_s"] <= 60
+    assert pruned[0]["now"] == wall()
+    wall.advance(IDLE_PRUNE_INTERVAL_S - 1)
+    daemon.upload_backup_step()
+    assert len(pruned) == 1, "pruned again inside the day"
+    wall.advance(1)
+    daemon.upload_backup_step()
+    assert len(pruned) == 2, "the daily idle prune did not run"
+    assert uploads == [], "an idle prune started an upload"
 
 
 def test_status_backup_block_shape(tmp_path, bk):
