@@ -373,7 +373,7 @@ ones read both. First run after upgrade is a full base; other staff's installs
 upload for the first time. `bin/optimise_store.py` still uses
 `make_encrypted_snapshot` for its own local safety copy.
 
-**Live verification: pending** (controller fills in).
+**Live verification (2026-10-21, this machine, installed from the working tree via bootout → reinstall → clear __pycache__ → bootstrap):** first base 921 MB / 42 files captured and uploaded in 11 min 13 s and committed; the stale 790 MB `snapshot.enc` was removed after the commit; Drive layout `<backup drive>/<email>/chain-20261021-5d5299/` (42 base files + records + manifest, 923 MB); prune's `name contains 'base-'` query matched 42 of 42 on real Drive. A second `mcpbrain backup` 10 minutes later produced a 4.1 MB delta and finished in 43 s. A resumable upload stopped at 32 MiB of 40 MiB resumed from a fresh transport using only the saved session and verified by md5 on real Drive. `mcpbrain restore --check` picks the new chain; the 16 June 2026 legacy file is now the LAST fallback. A scratch restore rebuilt the store from base + delta in 2 min 50 s: `integrity_check` ok, 255,149 chunks / 33,025 entities, sha256 equal to the capture's `db_sha256`, records + config restored, staging cleaned up. Still to measure: the 24-hour delta size (sets `base_threshold`, now 2.0).
 
 ## Shipping caveats
 

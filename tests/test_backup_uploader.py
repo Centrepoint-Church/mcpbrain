@@ -531,6 +531,24 @@ def test_on_progress_reports_bytes(env):
 
 
 
+def test_progress_is_whole_item_and_monotonic_across_files(env):
+    base = env.cap()
+    seen = []
+    env.step(on_progress=seen.append)
+    files = [*base.segments, base.records]
+    assert len(files) >= 2
+    total = sum(f["size"] for f in files)
+    mine = [p for p in seen if p["item"] == base.name]
+    assert mine and all(p["total"] == total for p in mine)
+    sent = [p["sent"] for p in mine]
+    assert sent == sorted(sent)
+    assert sent[-1] == total
+    # Bytes of earlier files are counted once the next file starts.
+    assert any(p["file"] == base.records["name"] and p["sent"] >= files[0]["size"]
+               for p in mine)
+    assert mine[-1]["files_done"] == mine[-1]["files_total"] == len(files)
+
+
 # ---- review fix round 1 -------------------------------------------------
 
 def _flip(path, at=200):

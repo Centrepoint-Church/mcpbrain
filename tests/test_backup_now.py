@@ -192,3 +192,28 @@ def test_lost_contact_mid_wait_exits_cleanly(tmp_path):
     assert code == 0
     assert "Lost contact with mcpbrain" in out
     assert "Backed up" not in out
+
+
+def test_progress_prints_across_files_of_one_item_and_resets_per_item(tmp_path):
+    def run(item, sent):
+        return {"phase": "upload", "item": item, "sent": sent, "total": 100_000_000}
+
+    client = _Client(
+        requested_polls=1,
+        running=[None, run("a", 0), run("a", 50_000_000), run("a", 100_000_000),
+                 run("b", 0), run("b", 40_000_000)],
+        pending=lambda n: 2 if n < 8 else 0,
+        on_poll=lambda n: _state(tmp_path, last_attempt=200.0, last_success=200.0,
+                                 restore_point=200.0, consecutive_failures=0)
+        if n == 8 else None)
+    _state(tmp_path, last_attempt=100.0, last_success=90.0)
+    code, out = _run(tmp_path, client)
+    assert code == 0
+    lines = out.splitlines()
+    assert "Uploading: 50 of 100 MB (50%) · 2 waiting" in lines
+    assert "Uploading: 100 of 100 MB (100%) · 2 waiting" in lines
+    assert "Next item: b" in lines
+    # Item b starts again from 0% and prints at its own steps.
+    assert lines.index("Uploading: 0 of 100 MB (0%) · 2 waiting",
+                       lines.index("Next item: b")) > 0
+    assert "Uploading: 40 of 100 MB (40%) · 2 waiting" in lines

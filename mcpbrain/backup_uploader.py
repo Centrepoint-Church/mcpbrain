@@ -476,7 +476,11 @@ def _upload_item(home, svc, transport, key, j, loc, item: bo.Item, *, deadline,
     save_journal(home, j)
     ob = bo.outbox_dir(home)
 
-    for spec, _kind in _item_files(item):
+    all_files = _item_files(item)
+    item_total = sum(int(sp["size"]) for sp, _k in all_files)
+    files_total = len(all_files)
+
+    for spec, _kind in all_files:
         name = spec["name"]
         if "file_id" in (done.get(name) or {}):
             continue
@@ -487,8 +491,17 @@ def _upload_item(home, svc, transport, key, j, loc, item: bo.Item, *, deadline,
         best = {"offset": session.offset if session else 0, "moved": False}
 
         def report(sent, total, _item=item.name, _name=name):
-            state["progress"] = {"item": _item, "file": _name, "sent": sent,
-                                 "total": total}
+            # Whole-item progress: files already verified on Drive plus the
+            # bytes confirmed of this one. (`total` here is this file's size.)
+            others = [(sp, k) for sp, k in all_files if sp["name"] != _name]
+            verified = [sp for sp, _k in others
+                        if "file_id" in (done.get(sp["name"]) or {})]
+            state["progress"] = {
+                "item": _item, "file": _name,
+                "sent": sum(int(sp["size"]) for sp in verified) + int(sent),
+                "total": item_total,
+                "files_done": len(verified) + (1 if sent >= total else 0),
+                "files_total": files_total}
             if on_progress is not None:
                 on_progress(dict(state["progress"]))
 

@@ -103,6 +103,7 @@ def main(argv=None, *, client=None, home=None, sleep=time.sleep,
 
     shown = None
     last_pct = -10
+    last_item = None
     told_paused = False
     lost = 0
     deadline = clock() + WAIT_LIMIT_S
@@ -145,6 +146,13 @@ def main(argv=None, *, client=None, home=None, sleep=time.sleep,
                     return 1
             if running and running.get("phase") == "upload" and running.get("total"):
                 pct = int(100 * (running.get("sent") or 0) / running["total"])
+                item = running.get("item")
+                if item != last_item:
+                    if last_item is not None:
+                        out(f"Next item: {item}")
+                    last_item = item
+                    last_pct = -10
+                    shown = None
                 if shown != "upload" or pct >= last_pct + 10:
                     out(_upload_line(running, pending))
                     shown = "upload"
