@@ -591,7 +591,7 @@ def test_free_space_need_uses_logical_page_count(env, monkeypatch):
     assert cap() is not None
 
 
-@pytest.mark.parametrize("bad", ["{not json", '{"name": "x"}'])
+@pytest.mark.parametrize("bad", ["{not json", '{"name": "x"}', "[1, 2]", "42", "null"])
 def test_unparseable_sidecar_quarantined_and_files_kept(env, bad):
     home, store, _r, _c, cap = env
     item = cap()
@@ -618,3 +618,11 @@ def test_default_base_threshold_is_two_bases_of_deltas():
     ~15 captured hours; 2.0 bounds a restore at ~3x a base instead."""
     assert bo.Settings().base_threshold == 2.0
     assert bo.Settings.from_config({}).base_threshold == 2.0
+
+
+@pytest.mark.parametrize("bad", ["[1, 2]", "42", "null"])
+def test_non_object_sidecar_does_not_break_pending_items(env, bad):
+    home, _store, _r, _c, cap = env
+    item = cap()
+    (bo.outbox_dir(home) / "other.json").write_text(bad)
+    assert [i.name for i in bo.pending_items(home)] == [item.name]

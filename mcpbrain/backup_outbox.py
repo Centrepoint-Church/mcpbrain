@@ -235,7 +235,7 @@ def _read_sidecars(home) -> list[tuple[Path, Item]]:
     for p in sorted(ob.glob("*.json")):
         try:
             out.append((p, Item.from_json(p.read_text())))
-        except (ValueError, TypeError, KeyError):
+        except (ValueError, TypeError, KeyError, AttributeError):
             continue
     return out
 
@@ -264,7 +264,7 @@ def _quarantine_bad_sidecars(ob: Path) -> None:
     for p in sorted(ob.glob("*.json")):
         try:
             Item.from_json(p.read_text())
-        except (ValueError, TypeError, KeyError) as e:
+        except (ValueError, TypeError, KeyError, AttributeError) as e:
             bad = p.with_name(p.name + ".bad")
             os.replace(p, bad)
             log.warning("backup outbox: unreadable sidecar %s quarantined as %s "
