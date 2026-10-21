@@ -1,39 +1,16 @@
-"""The snapshot upload must be resumable, and 308 must survive the transport.
+"""308 must survive the transport.
 
-Live incident 2026-08-04. `backup._default_media` used `resumable=False`, so
-googleapiclient took the multipart path: it read the whole artifact with
-`getbytes(0, size)`, built the ENTIRE request body in one `io.BytesIO`
-(discovery.py `g.flatten(msgRoot)` -> `fp.getvalue()`), and PUT it in a single
-request. Google caps simple/multipart upload at **5 MB**; the snapshot was
-**4.24 GB**. Every attempt burned GBs of RAM and died with a broken pipe.
-
-Switching to resumable fixes both halves: googleapiclient streams the file in
-chunks (`_StreamSlice`) instead of buffering it, and the request sizes are
-legal. But resumable uploads only work if httplib2 lets Google's
-"308 Resume Incomplete" reach googleapiclient, which is what the second test
-here pins -- see `auth._google_http`.
+Resumable uploads only work if httplib2 lets Google's "308 Resume Incomplete"
+reach the caller -- see `auth._google_http`. (The 2026-08-04 incident that
+made the old full-snapshot upload resumable is history: the incremental
+layout uploads through drive_resumable.)
 """
 import http.server
 import threading
 
 import pytest
 
-from mcpbrain import auth, backup
-
-
-def test_snapshot_upload_is_resumable_and_streams_from_disk(tmp_path):
-    """A multi-GB artifact cannot go up as one non-resumable multipart body."""
-    artifact = tmp_path / "snapshot.enc"
-    artifact.write_bytes(b"ciphertext" * 100)
-
-    media = backup._default_media(artifact)
-
-    assert media.resumable() is True, (
-        "non-resumable upload is capped at 5MB by Google and buffers the whole "
-        "artifact in memory")
-    assert media.has_stream() is True, (
-        "googleapiclient only streams (_StreamSlice) when the media exposes a "
-        "stream; without it, it calls getbytes() and buffers the whole file")
+from mcpbrain import auth
 
 
 class _ResumeIncompleteHandler(http.server.BaseHTTPRequestHandler):

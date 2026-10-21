@@ -20,15 +20,14 @@ def write_backup_state(home, *, ok: bool, error: str | None = None,
                        restore_point: float | None = None) -> dict:
     """Record the outcome of a backup ATTEMPT to ``backup_state.json``.
 
-    The encrypted artifact is written locally BEFORE the upload, so
-    ``snapshot.enc``'s mtime is refreshed by every failed run and cannot
-    distinguish "backed up" from "encrypted, then failed to upload". Uploads
-    fail intermittently rather than outright (97 failures / 52 successes,
-    2026-06-25 -> 2026-08-04, arriving in storms of dozens), which is exactly
-    the shape an mtime check cannot see: the probe read "Backup: On" straight
-    through the 2026-08-03 storm when nothing was reaching Drive. This file is
-    the only durable record of whether a backup actually LANDED;
-    ``probes.probe_backup`` keys off it.
+    Capture writes items into the local outbox long before they reach Drive,
+    so no local file's mtime can distinguish "backed up" from "captured, then
+    failed to upload". Uploads fail intermittently rather than outright (the
+    old full-snapshot path: 97 failures / 52 successes, 2026-06-25 ->
+    2026-08-04, in storms of dozens) -- exactly the shape a file-time check
+    cannot see. This file is the only durable record of whether a backup
+    actually LANDED (a manifest committed on Drive); ``probes.probe_backup``
+    keys off it.
 
     ``restore_point`` is the CAPTURE time (wall clock) of the newest committed
     restore point. With incremental backup a commit can land hours after its

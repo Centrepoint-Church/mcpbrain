@@ -1,11 +1,9 @@
-"""Restore-on-first-run from the latest encrypted Drive snapshot (Task 2.5).
+"""Restore-on-first-run from the newest restore point on Drive.
 
-When the daemon starts with an EMPTY store but a configured backup, it pulls the
-latest encrypted snapshot from Drive, decrypts+restores it as the live store,
-then lets the normal loop delta-sync. These tests cover the daemon trigger
-(maybe_restore_on_first_run) and the backup composition primitive
-(download_and_restore), written against the REAL shipped signatures:
-find_latest_snapshot(service, shared_drive_id, user_id).
+When the daemon starts with an EMPTY store but a configured backup, it
+restores the newest restore point (backup_restore.restore_latest) as the live
+store, then lets the normal loop delta-sync. These tests cover the daemon
+trigger (maybe_restore_on_first_run / _restore_on_first_run_classified).
 """
 
 from mcpbrain.store import Store
@@ -207,65 +205,6 @@ def test_run_restores_before_migrate(monkeypatch, tmp_path):
     assert order == ["restore", "migrate"], (
         "restore must run before migrate so the backend check sees restored data"
     )
-
-
-def test_download_and_restore_composes_primitives(monkeypatch, tmp_path):
-    """Download to a temp .enc, decrypt into a STAGING file (store untouched),
-    then -- inside the store's restoring gate, after a busy-checked WAL
-    checkpoint -- replace the live store with the staging file."""
-    from pathlib import Path
-
-    bc = FakeBC()
-    bc.out_path = tmp_path / "snapshot.enc"
-    store = Store(str(tmp_path / "live.sqlite3"), dim=384)
-    calls = {}
-
-    def fake_download(service, file_id, dest_path, *, downloader_factory=None):
-        calls["download"] = (service, file_id, dest_path)
-        return dest_path
-
-    def fake_restore(encrypted_path, dest_store_path, key):
-        calls["restore"] = (encrypted_path, dest_store_path, key)
-        Path(dest_store_path).write_bytes(b"restored-store")
-        return dest_store_path
-
-    gates = []
-    real_gate = store.restoring_gate
-
-    def gate():
-        gates.append(1)
-        return real_gate()
-    monkeypatch.setattr(store, "restoring_gate", gate)
-    monkeypatch.setattr(bmod, "download_snapshot", fake_download)
-    monkeypatch.setattr(bmod, "restore", fake_restore)
-
-    result = bmod.download_and_restore(bc, store, "file-123")
-
-    store_parent = Path(store.path).parent
-    download_service, download_file_id, download_dest = calls["download"]
-    download_dest = Path(download_dest)
-
-    # Downloads to a dedicated temp file, NOT the backup-upload artifact path.
-    assert download_service == "DRIVE"
-    assert download_file_id == "file-123"
-    assert download_dest != Path(bc.out_path)
-    assert download_dest.parent == store_parent
-    assert download_dest.suffix == ".enc"
-    assert download_dest.name.startswith(".restore-")
-
-    # restore decrypts FROM that temp file into a staging file, not the store.
-    restore_src, restore_dest, restore_key = calls["restore"]
-    assert Path(restore_src) == download_dest
-    assert Path(restore_dest) != Path(store.path)
-    assert Path(restore_dest).parent == store_parent
-    assert restore_key == bc.key
-
-    # The staging file was swapped in, under the gate.
-    assert gates == [1]
-    assert result == Path(store.path)
-    assert Path(store.path).read_bytes() == b"restored-store"
-    assert not list(store_parent.glob(".restore-*"))
-
 
 
 def _empty_store_with_failing_restore(monkeypatch, tmp_path, exc):

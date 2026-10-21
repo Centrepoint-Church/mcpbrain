@@ -669,15 +669,16 @@ def test_swap_refused_while_a_reader_holds_the_store_and_nothing_corrupts(tmp_pa
         snap.upsert_chunk(doc_id=f"s{i}", text="snap", content_hash=f"s{i}", metadata={})
     sqlite3.connect(str(snap.path)).execute("PRAGMA wal_checkpoint(TRUNCATE)").close()
 
-    monkeypatch.setattr(bmod, "download_snapshot", lambda svc, fid, dest: dest)
-    monkeypatch.setattr(bmod, "restore",
-                        lambda enc, stage, key: shutil.copyfile(snap.path, stage))
-
-    class BC:
-        drive_service, key = "DRIVE", b"k"
+    def swap():
+        stage = tmp_path / ".restore-x.stage"
+        shutil.copyfile(snap.path, stage)
+        try:
+            bmod.swap_in_store(stage, live.path, gate=live.restoring_gate)
+        finally:
+            stage.unlink(missing_ok=True)
 
     with pytest.raises(bmod.RestoreBusyError):
-        bmod.download_and_restore(BC(), live, "F")
+        swap()
     reader.rollback()
     reader.close()
 
@@ -692,7 +693,7 @@ def test_swap_refused_while_a_reader_holds_the_store_and_nothing_corrupts(tmp_pa
     assert not list(tmp_path.glob(".restore-*"))
 
     # With the reader gone the same swap goes through cleanly.
-    bmod.download_and_restore(BC(), live, "F")
+    swap()
     assert integrity(live.path) == "ok"
     assert live.chunk_count() == 3
     con = sqlite3.connect(str(live.path))

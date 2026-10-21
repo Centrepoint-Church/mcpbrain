@@ -89,9 +89,7 @@ def test_escrow_key_to_drive_passes_num_retries_on_list_and_create():
     This runs inside `mcpbrain setup`, so a transient Errno-49-class failure
     on the folder list (or on the key upload itself) failed backup-enable
     outright on a fresh install. The bodies are MediaInMemoryUpload buffers,
-    not resumable streams, so a retry just resends the same bytes -- none of
-    backup._MEDIA_NUM_RETRIES' "cannot re-seek a retried chunk" problem
-    applies here.
+    not resumable streams, so a retry just resends the same bytes.
     """
     calls: list = []
 

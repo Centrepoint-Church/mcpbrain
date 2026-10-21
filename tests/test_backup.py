@@ -25,9 +25,7 @@ from mcpbrain.backup import (
     encrypt_file,
     decrypt_file,
     make_encrypted_snapshot,
-    upload_snapshot,
     restore,
-    find_latest_snapshot,
     download_snapshot,
 )
 
@@ -200,7 +198,6 @@ def test_snapshot_leaves_no_partial_artifact_when_the_copy_fails(tmp_path, monke
     make_encrypted_snapshot."""
     import sqlite3
 
-    import pytest
 
     import mcpbrain.backup as backup_mod
 
@@ -365,7 +362,6 @@ def test_encrypt_decrypt_roundtrip_recovers_identical_bytes(tmp_path):
 def test_decrypt_with_wrong_key_raises_invalid_token(tmp_path):
     from cryptography.fernet import InvalidToken
 
-    import pytest
 
     key_a = generate_escrow_key()
     key_b = generate_escrow_key()
@@ -436,7 +432,6 @@ def test_make_encrypted_snapshot_accepts_str_paths(tmp_path):
 def test_tampered_ciphertext_raises_invalid_token(tmp_path):
     from cryptography.fernet import InvalidToken
 
-    import pytest
 
     key = generate_escrow_key()
     src = tmp_path / "plain.bin"
@@ -600,7 +595,6 @@ def test_legacy_v2_archive_still_rejects_truncation_and_reordering(tmp_path):
     """
     from cryptography.fernet import InvalidToken
 
-    import pytest
 
     key = generate_escrow_key()
     original = b"C" * 20_000
@@ -629,7 +623,6 @@ def test_unknown_magic_raises_unsupported_archive(tmp_path):
     consumed the wrong number of header bytes. Anything that is not a magic we
     know, and not a Fernet token, has to stop the read.
     """
-    import pytest
 
     from mcpbrain.backup import UnsupportedArchive
 
@@ -669,7 +662,6 @@ def test_truncated_archive_is_rejected(tmp_path):
     """
     from cryptography.fernet import InvalidToken
 
-    import pytest
 
     key = generate_escrow_key()
     src = tmp_path / "plain.bin"
@@ -687,7 +679,6 @@ def test_reordered_frames_are_rejected(tmp_path):
     """Swapping two frames must be detected — each frame binds its own index."""
     from cryptography.fernet import InvalidToken
 
-    import pytest
 
     key = generate_escrow_key()
     src = tmp_path / "plain.bin"
@@ -718,7 +709,6 @@ def test_spliced_frames_from_two_v3_archives_are_rejected(tmp_path):
     """
     from cryptography.fernet import InvalidToken
 
-    import pytest
 
     from mcpbrain.backup import _ARCHIVE_MAGIC_V3
 
@@ -781,7 +771,6 @@ def test_aborted_write_leaves_an_artifact_decrypt_rejects(tmp_path):
     """
     from cryptography.fernet import InvalidToken
 
-    import pytest
 
     from mcpbrain.backup import open_encrypted
 
@@ -816,7 +805,6 @@ def test_aborted_bundle_snapshot_leaves_an_artifact_decrypt_rejects(tmp_path,
 
     from cryptography.fernet import InvalidToken
 
-    import pytest
 
     store = Store(tmp_path / "live.sqlite3", dim=4)
     store.init()
@@ -1015,7 +1003,6 @@ def test_snapshot_refuses_to_start_without_free_space(tmp_path, monkeypatch):
     far more than the backup. Checking first turns that into one logged, backed
     off failure per interval.
     """
-    import errno
 
     import pytest
 
@@ -1075,284 +1062,7 @@ def test_free_space_check_does_not_need_statvfs(tmp_path, monkeypatch):
     assert out.exists() and out.stat().st_size > 0
 
 
-# --- Task 5.3: upload encrypted snapshot to a Shared Drive --------------------
-
-
-class _FakeCreate:
-    """Records the kwargs of a single files().create call and returns a canned
-    id from .execute(). The fake distinguishes a folder-create (body has
-    mimeType == folder) from a file-upload create by inspecting the body."""
-
-    def __init__(self, calls, canned_id, executes=None):
-        self.calls = calls
-        self.canned_id = canned_id
-        self.executes = executes if executes is not None else []
-
-    def execute(self, num_retries=0):
-        self.executes.append(num_retries)
-        return {"id": self.canned_id}
-
-    def next_chunk(self, num_retries=0):
-        # A resumable media create, driven chunk by chunk (one chunk here).
-        self.executes.append(num_retries)
-        return None, {"id": self.canned_id}
-
-
-class _FakeList:
-    def __init__(self, calls, canned, executes=None):
-        self.calls = calls
-        self.canned = canned
-        self.executes = executes if executes is not None else []
-
-    def execute(self, num_retries=0):
-        self.executes.append(num_retries)
-        return self.canned
-
-
-class FakeFiles:
-    """Mimics the chained googleapiclient pattern: service.files().list(**kw)
-    .execute() and service.files().create(**kw).execute(). Records every call so
-    tests can assert on kwargs, and branches its create response on whether the
-    body is a folder (mimeType == application/vnd.google-apps.folder)."""
-
-    FOLDER_MIME = "application/vnd.google-apps.folder"
-
-    def __init__(self, list_response, folder_id="folder-new", file_id="file-123"):
-        self.list_response = list_response
-        self.folder_id = folder_id
-        self.file_id = file_id
-        self.list_calls = []
-        self.create_calls = []
-        # num_retries passed to each list(...).execute(), in call order.
-        self.list_retries = []
-        # num_retries passed to each create(...).execute(), in call order.
-        self.execute_retries = []
-
-    def list(self, **kw):
-        self.list_calls.append(kw)
-        return _FakeList(self.list_calls, self.list_response, executes=self.list_retries)
-
-    def create(self, **kw):
-        self.create_calls.append(kw)
-        body = kw.get("body", {})
-        if body.get("mimeType") == self.FOLDER_MIME:
-            return _FakeCreate(self.create_calls, self.folder_id,
-                               self.execute_retries)
-        return _FakeCreate(self.create_calls, self.file_id, self.execute_retries)
-
-
-class FakeService:
-    def __init__(self, files):
-        self._files = files
-
-    def files(self):
-        return self._files
-
-
-def _fake_media(path):
-    return ("MEDIA", path)
-
-
-def test_upload_creates_folder_when_missing_then_uploads(tmp_path):
-    src = tmp_path / "snap.enc"
-    src.write_bytes(b"ciphertext")
-
-    files = FakeFiles(list_response={"files": []})
-    service = FakeService(files)
-
-    result = upload_snapshot(
-        service, src, "drive-XYZ", "sam", media_factory=_fake_media
-    )
-
-    # Folder was missing → exactly two create calls: folder, then file.
-    folder_creates = [
-        c
-        for c in files.create_calls
-        if c["body"].get("mimeType") == FakeFiles.FOLDER_MIME
-    ]
-    file_creates = [
-        c
-        for c in files.create_calls
-        if c["body"].get("mimeType") != FakeFiles.FOLDER_MIME
-    ]
-    assert len(folder_creates) == 1
-    assert len(file_creates) == 1
-
-    fc = folder_creates[0]
-    assert fc["body"]["name"] == "sam"
-    assert fc["body"]["mimeType"] == FakeFiles.FOLDER_MIME
-    assert fc["body"]["parents"] == ["drive-XYZ"]
-    assert fc["supportsAllDrives"] is True
-
-    up = file_creates[0]
-    assert up["body"]["name"] == "snap.enc"
-    assert up["body"]["parents"] == ["folder-new"]
-    assert up["supportsAllDrives"] is True
-    assert up.get("media_body") is not None
-
-    assert result == "file-123"
-
-
-def test_upload_does_not_ask_the_library_to_retry_media_chunks(tmp_path):
-    """num_retries MUST be 0 now that the upload is resumable.
-
-    googleapiclient's media-retry loop (HttpRequest.next_chunk:
-    `for retry_num in range(num_retries + 1)`) re-sends the SAME _StreamSlice
-    object, and _StreamSlice seeks only in __init__ — so a retried chunk reads
-    b"" and puts 0 bytes on the wire against a Content-Length of up to 100MB.
-    The connection then blocks until the socket timeout, which for the Drive
-    service is 600s. maybe_backup runs on the cycle thread holding the bulk
-    lock with _backup_in_progress set, which tells the watchdog to DEFER
-    recovery — so one transient 5xx would wedge the daemon for ~10 minutes with
-    the watchdog explicitly muzzled. The cadence retry is the real backoff.
-    """
-    src = tmp_path / "snap.enc"
-    src.write_bytes(b"ciphertext")
-    files = FakeFiles(list_response={"files": [{"id": "folder-1", "name": "sam"}]})
-
-    upload_snapshot(FakeService(files), src, "drive-XYZ", "sam",
-                    media_factory=_fake_media)
-
-    assert files.execute_retries == [0], (
-        "media create asked the library to retry chunks it cannot re-seek")
-
-
-def test_upload_to_folder_does_not_ask_the_library_to_retry_media_chunks(tmp_path):
-    """Same defect, same fix, on the folder-based upload path."""
-    from mcpbrain.backup import upload_to_folder
-
-    src = tmp_path / "cache.enc"
-    src.write_bytes(b"ciphertext")
-    files = FakeFiles(list_response={"files": []})
-
-    upload_to_folder(FakeService(files), src, "folder-1",
-                     media_factory=_fake_media)
-
-    assert files.execute_retries == [0]
-
-
-def test_upload_reuses_existing_folder_no_folder_create(tmp_path):
-    src = tmp_path / "snap.enc"
-    src.write_bytes(b"ciphertext")
-
-    files = FakeFiles(
-        list_response={"files": [{"id": "folder-existing", "name": "sam"}]}
-    )
-    service = FakeService(files)
-
-    result = upload_snapshot(
-        service, src, "drive-XYZ", "sam", media_factory=_fake_media
-    )
-
-    # No folder-create call — only the file upload create.
-    folder_creates = [
-        c
-        for c in files.create_calls
-        if c["body"].get("mimeType") == FakeFiles.FOLDER_MIME
-    ]
-    assert folder_creates == []
-    assert len(files.create_calls) == 1
-
-    up = files.create_calls[0]
-    assert up["body"]["parents"] == ["folder-existing"]
-    assert result == "file-123"
-
-
-def test_upload_sets_supports_all_drives_on_every_call(tmp_path):
-    src = tmp_path / "snap.enc"
-    src.write_bytes(b"ciphertext")
-
-    files = FakeFiles(list_response={"files": []})
-    service = FakeService(files)
-
-    upload_snapshot(service, src, "drive-XYZ", "sam", media_factory=_fake_media)
-
-    # list + both create variants must set supportsAllDrives=True.
-    for call in files.list_calls:
-        assert call["supportsAllDrives"] is True
-    for call in files.create_calls:
-        assert call["supportsAllDrives"] is True
-    # Sanity: there were two create calls (folder + file).
-    assert len(files.create_calls) == 2
-
-
-def test_upload_uses_injected_media_factory(tmp_path):
-    src = tmp_path / "snap.enc"
-    src.write_bytes(b"ciphertext")
-
-    files = FakeFiles(list_response={"files": [{"id": "f-1", "name": "sam"}]})
-    service = FakeService(files)
-
-    upload_snapshot(service, src, "drive-XYZ", "sam", media_factory=_fake_media)
-
-    up = files.create_calls[0]
-    # The fake media tuple must have reached media_body — proof no real
-    # MediaFileUpload import happened.
-    assert up["media_body"] == ("MEDIA", str(src))
-
-
-def test_upload_accepts_str_path_and_uses_basename(tmp_path):
-    src = tmp_path / "nested" / "snap.enc"
-    src.parent.mkdir(parents=True)
-    src.write_bytes(b"ciphertext")
-
-    files = FakeFiles(list_response={"files": [{"id": "f-1", "name": "sam"}]})
-    service = FakeService(files)
-
-    upload_snapshot(
-        service, str(src), "drive-XYZ", "sam", media_factory=_fake_media
-    )
-
-    up = files.create_calls[0]
-    assert up["body"]["name"] == "snap.enc"
-
-
-def test_upload_list_query_targets_per_user_folder_in_drive(tmp_path):
-    src = tmp_path / "snap.enc"
-    src.write_bytes(b"ciphertext")
-
-    files = FakeFiles(list_response={"files": []})
-    service = FakeService(files)
-
-    upload_snapshot(service, src, "drive-XYZ", "sam", media_factory=_fake_media)
-
-    lc = files.list_calls[0]
-    assert "sam" in lc["q"]
-    assert FakeFiles.FOLDER_MIME in lc["q"]
-    assert "drive-XYZ" in lc["q"]
-    assert lc["driveId"] == "drive-XYZ"
-    assert lc["corpora"] == "drive"
-    assert lc["includeItemsFromAllDrives"] is True
-
-
-def test_upload_rejects_user_id_with_query_unsafe_chars(tmp_path):
-    """A user_id containing an apostrophe (or backslash) would break the
-    single-quoted Drive query, so upload_snapshot must reject it before any
-    Drive call is made. A normal email user_id must still work."""
-    import pytest
-
-    src = tmp_path / "snap.enc"
-    src.write_bytes(b"ciphertext")
-
-    files = FakeFiles(list_response={"files": []})
-    service = FakeService(files)
-
-    with pytest.raises(ValueError, match="unsafe in a Drive query"):
-        upload_snapshot(
-            service, src, "drive-1", "o'brien@example.com", media_factory=_fake_media
-        )
-    # No Drive calls should have been made before the guard tripped.
-    assert files.list_calls == []
-    assert files.create_calls == []
-
-    # A normal email user_id still uploads cleanly.
-    result = upload_snapshot(
-        service, src, "drive-1", "normal@example.com", media_factory=_fake_media
-    )
-    assert result == "file-123"
-
-
-# --- Task 5.4: restore + find/download snapshot + delta-sync roundtrip --------
+# --- Task 5.4: restore + download snapshot + delta-sync roundtrip -------------
 
 import base64
 
@@ -1566,7 +1276,6 @@ def test_restore_wrong_key_raises_before_overwriting_dest(tmp_path):
     """A wrong escrow key must raise InvalidToken (Fernet authenticates)."""
     from cryptography.fernet import InvalidToken
 
-    import pytest
 
     store = Store(tmp_path / "live.sqlite3", dim=4)
     store.init()
@@ -1708,94 +1417,6 @@ def test_snapshot_wipe_restore_delta_sync_roundtrip(tmp_path):
     assert advanced != SNAPSHOT_CURSOR, "cursor must move past the snapshot point"
 
 
-# --- find_latest_snapshot -----------------------------------------------------
-
-class _FLReq:
-    def __init__(self, result):
-        self._r = result
-
-    def execute(self, num_retries=0):
-        return self._r
-
-
-class _FLFiles:
-    """Fake files() that returns folder_response on the first list (folder
-    lookup) and files_response on the second (file listing). Records list
-    kwargs for assertion."""
-
-    def __init__(self, folder_response, files_response=None):
-        self._folder_response = folder_response
-        self._files_response = files_response
-        self.list_calls = []
-
-    def list(self, **kw):
-        self.list_calls.append(kw)
-        # First call is the folder lookup (q references the FOLDER_MIME).
-        if len(self.list_calls) == 1:
-            return _FLReq(self._folder_response)
-        return _FLReq(self._files_response or {"files": []})
-
-
-class _FLService:
-    def __init__(self, files):
-        self._files = files
-
-    def files(self):
-        return self._files
-
-
-def test_find_latest_snapshot_returns_newest_by_created_time():
-    folder_resp = {"files": [{"id": "folder-sam", "name": "sam"}]}
-    files_resp = {
-        "files": [
-            {"id": "snap-old", "name": "a.enc", "createdTime": "2026-05-01T10:00:00Z"},
-            {"id": "snap-new", "name": "b.enc", "createdTime": "2026-05-30T10:00:00Z"},
-        ]
-    }
-    files = _FLFiles(folder_resp, files_resp)
-    service = _FLService(files)
-
-    result = find_latest_snapshot(service, "drive-XYZ", "sam")
-    assert result == "snap-new"
-
-    # Both list calls must set the Shared Drive params.
-    for call in files.list_calls:
-        assert call["supportsAllDrives"] is True
-        assert call["includeItemsFromAllDrives"] is True
-        assert call["corpora"] == "drive"
-        assert call["driveId"] == "drive-XYZ"
-
-
-def test_find_latest_snapshot_returns_none_when_folder_absent():
-    folder_resp = {"files": []}  # per-user folder doesn't exist
-    files = _FLFiles(folder_resp)
-    service = _FLService(files)
-
-    assert find_latest_snapshot(service, "drive-XYZ", "sam") is None
-    # Only the folder lookup ran — no second listing.
-    assert len(files.list_calls) == 1
-
-
-def test_find_latest_snapshot_returns_none_when_folder_empty():
-    folder_resp = {"files": [{"id": "folder-sam", "name": "sam"}]}
-    files_resp = {"files": []}  # folder exists but holds nothing
-    files = _FLFiles(folder_resp, files_resp)
-    service = _FLService(files)
-
-    assert find_latest_snapshot(service, "drive-XYZ", "sam") is None
-
-
-def test_find_latest_snapshot_rejects_unsafe_user_id():
-    import pytest
-
-    files = _FLFiles({"files": []})
-    service = _FLService(files)
-    with pytest.raises(ValueError, match="unsafe in a Drive query"):
-        find_latest_snapshot(service, "drive-XYZ", "o'brien@example.com")
-    # Guard trips before any Drive call.
-    assert files.list_calls == []
-
-
 # --- download_snapshot --------------------------------------------------------
 
 class _DLMediaRequest:
@@ -1867,122 +1488,6 @@ def test_download_snapshot_writes_bytes_via_injected_factory(tmp_path):
     assert call["supportsAllDrives"] is True
     # The injected factory received the get_media request object.
     assert isinstance(captured["request"], _DLMediaRequest)
-
-
-# --- snapshot retention (prune) ---------------------------------------------
-
-class _FakeDelete:
-    def __init__(self, deleted, file_id, executes=None):
-        self.deleted = deleted
-        self.file_id = file_id
-        self.executes = executes if executes is not None else []
-
-    def execute(self, num_retries=0):
-        self.executes.append(num_retries)
-        self.deleted.append(self.file_id)
-        return {}
-
-
-class FakeFilesPrune:
-    """Fake Drive files() for prune_snapshots: a folder lookup, a file list
-    (newest-first sortable createdTime), and delete() recording ids."""
-    FOLDER_MIME = "application/vnd.google-apps.folder"
-
-    def __init__(self, snapshot_files):
-        self._snaps = snapshot_files
-        self.deleted = []
-        self.list_retries = []
-        self.delete_retries = []
-
-    def list(self, **kw):
-        q = kw.get("q", "")
-        if self.FOLDER_MIME in q:
-            return _FakeList([], {"files": [{"id": "folder-1"}]}, executes=self.list_retries)
-        return _FakeList([], {"files": list(self._snaps)}, executes=self.list_retries)
-
-    def delete(self, *, fileId, supportsAllDrives=False):
-        return _FakeDelete(self.deleted, fileId, self.delete_retries)
-
-
-def _snap(i, day):
-    return {"id": f"snap-{i}", "name": "snapshot.enc",
-            "createdTime": f"2026-06-{day:02d}T00:00:00Z", "modifiedTime": ""}
-
-
-def test_prune_keeps_newest_n_deletes_rest():
-    from mcpbrain.backup import prune_snapshots
-    # 5 snapshots, days 1..5; keep newest 3 → delete days 1 and 2 (snap-1, snap-2)
-    files = [_snap(i, i) for i in range(1, 6)]
-    svc = FakeService(FakeFilesPrune(files))
-    deleted = prune_snapshots(svc, "drive-X", "sam", keep=3)
-    assert deleted == 2
-    assert set(svc._files.deleted) == {"snap-1", "snap-2"}
-
-
-def test_prune_noop_when_within_keep():
-    from mcpbrain.backup import prune_snapshots
-    files = [_snap(i, i) for i in range(1, 4)]  # 3 files
-    svc = FakeService(FakeFilesPrune(files))
-    assert prune_snapshots(svc, "drive-X", "sam", keep=7) == 0
-    assert svc._files.deleted == []
-
-
-def test_prune_keep_zero_is_noop():
-    from mcpbrain.backup import prune_snapshots
-    files = [_snap(i, i) for i in range(1, 4)]
-    svc = FakeService(FakeFilesPrune(files))
-    assert prune_snapshots(svc, "drive-X", "sam", keep=0) == 0
-    assert svc._files.deleted == []
-
-
-def test_prune_holds_off_when_newest_is_drastically_smaller():
-    """A near-empty newest snapshot (a store refilled from scratch) must not
-    rotate out the larger, good ones."""
-    from mcpbrain.backup import prune_snapshots
-    files = [{**_snap(i, i), "size": "4000000000"} for i in range(1, 5)]
-    files.append({**_snap(5, 5), "size": "1000000"})
-    svc = FakeService(FakeFilesPrune(files))
-    assert prune_snapshots(svc, "drive-X", "sam", keep=3) == 0
-    assert svc._files.deleted == []
-
-
-def test_prune_still_runs_for_a_moderate_shrink():
-    from mcpbrain.backup import prune_snapshots
-    files = [{**_snap(i, i), "size": "4000000000"} for i in range(1, 5)]
-    files.append({**_snap(5, 5), "size": "2300000000"})   # a VACUUM-sized shrink
-    svc = FakeService(FakeFilesPrune(files))
-    assert prune_snapshots(svc, "drive-X", "sam", keep=3) == 2
-
-
-def test_upload_snapshot_folder_lookup_and_create_pass_num_retries(tmp_path):
-    from mcpbrain.backup import upload_snapshot, _NUM_RETRIES, _MEDIA_NUM_RETRIES
-
-    src = tmp_path / "snap.enc"
-    src.write_bytes(b"ciphertext")
-    files = FakeFiles(list_response={"files": []})
-    service = FakeService(files)
-
-    upload_snapshot(service, src, "drive-XYZ", "sam", media_factory=_fake_media)
-
-    # Folder lookup list uses _NUM_RETRIES.
-    assert files.list_retries == [_NUM_RETRIES]
-    # Folder create uses _NUM_RETRIES; media file upload uses _MEDIA_NUM_RETRIES.
-    assert files.execute_retries == [_NUM_RETRIES, _MEDIA_NUM_RETRIES]
-
-
-def test_prune_snapshots_list_and_delete_pass_num_retries():
-    from mcpbrain.backup import prune_snapshots, _NUM_RETRIES
-
-    files = [_snap(i, i) for i in range(1, 6)]
-    fake_files = FakeFilesPrune(files)
-    svc = FakeService(fake_files)
-
-    prune_snapshots(svc, "drive-X", "sam", keep=3)
-
-    # Folder lookup list and file list both use _NUM_RETRIES.
-    assert fake_files.list_retries == [_NUM_RETRIES, _NUM_RETRIES]
-    # Delete calls also use _NUM_RETRIES.
-    assert fake_files.delete_retries == [_NUM_RETRIES, _NUM_RETRIES]
 
 
 # --- Task 2: the artifact carries an intact vector index -----------------------
@@ -2062,7 +1567,6 @@ def test_snapshot_rejects_an_artifact_whose_vectors_do_not_resolve(tmp_path, mon
     """The runtime guard: snapshot() must not hand back an artifact whose
     vector index does not resolve. Simulated by corrupting the artifact between
     the copy and the check."""
-    import pytest
 
     import mcpbrain.backup as backup_mod
     from mcpbrain.store import _open_db
@@ -2182,7 +1686,6 @@ def test_verify_artifact_still_raises_for_a_non_table_chunk_missing_its_vector(t
     PROSE chunk marked embedded=1 whose vector does not resolve is genuine
     vec0 loss and must still raise, even when a legitimately vector-less
     table chunk sits alongside it."""
-    import pytest
 
     from mcpbrain.backup import _verify_artifact
     from mcpbrain.store import _open_db
@@ -2217,7 +1720,6 @@ def test_verify_artifact_with_home_and_flag_off_catches_corruption_on_a_fresh_ta
     genuine corruption, not the designed state, and must still raise."""
     import json
 
-    import pytest
 
     from mcpbrain.backup import _verify_artifact
     from mcpbrain.chunking import CHUNKER_VERSION
@@ -2271,7 +1773,6 @@ def test_verify_artifact_raises_on_genuine_chunks_corruption(tmp_path, monkeypat
     """
     import sqlite3
 
-    import pytest
 
     import mcpbrain.backup as backup_mod
 
@@ -2358,99 +1859,3 @@ def test_live_bytes_does_not_create_file_for_missing_store(tmp_path):
         assert not missing_path.exists(), (
             f"_live_bytes created a stray file at {missing_path}; "
             "sqlite3.connect must not auto-create on a missing path")
-
-
-# --- resuming a dropped upload in place ---------------------------------------
-
-
-class _Status:
-    def __init__(self, sent, total):
-        self.resumable_progress = sent
-        self.total_size = total
-
-
-class _ScriptedUpload:
-    """A resumable request whose next_chunk follows a script: an exception is
-    raised, an int is a chunk landing at that byte offset, a dict finishes."""
-
-    def __init__(self, script, total=100):
-        self.script = list(script)
-        self.total = total
-        self.calls = []
-
-    def next_chunk(self, num_retries=0):
-        self.calls.append(num_retries)
-        step = self.script.pop(0)
-        if isinstance(step, BaseException):
-            raise step
-        if isinstance(step, dict):
-            return None, step
-        return _Status(step, self.total), None
-
-
-def test_dropped_chunks_are_resumed_not_restarted():
-    """Live 2026-10-15..18: Errno 49, broken pipe and a read timeout each threw
-    away a 768MB upload. A transient chunk failure now resumes the session."""
-    from mcpbrain.backup import _drive_media_upload
-
-    req = _ScriptedUpload([
-        25, OSError(errno.EADDRNOTAVAIL, "Can't assign requested address"),
-        50, BrokenPipeError(32, "Broken pipe"), TimeoutError("The read operation timed out"),
-        75, {"id": "done"}])
-    slept, progress = [], []
-    out = _drive_media_upload(req, sleep=slept.append,
-                              on_progress=lambda s, t: progress.append(s))
-    assert out == {"id": "done"}
-    assert progress == [25, 50, 75]
-    assert slept == [5, 5, 15], "backoff resets once a chunk lands"
-    assert set(req.calls) == {0}, "never asks the library to retry a drained slice"
-
-
-def test_a_permanent_chunk_error_is_raised_at_once():
-    from googleapiclient.errors import HttpError
-    from mcpbrain.backup import _drive_media_upload
-
-    class _Resp(dict):
-        status = 403
-        reason = "Forbidden"
-
-    req = _ScriptedUpload([HttpError(_Resp(), b"{}")])
-    slept = []
-    with pytest.raises(HttpError):
-        _drive_media_upload(req, sleep=slept.append)
-    assert slept == []
-
-
-def test_a_link_that_stays_down_gives_up_after_the_backoff():
-    from mcpbrain.backup import _MEDIA_RESUME_BACKOFF_S, _drive_media_upload
-
-    n = len(_MEDIA_RESUME_BACKOFF_S)
-    req = _ScriptedUpload([TimeoutError("timed out")] * (n + 1))
-    slept = []
-    with pytest.raises(TimeoutError):
-        _drive_media_upload(req, sleep=slept.append)
-    assert slept == list(_MEDIA_RESUME_BACKOFF_S)
-
-
-def test_a_500_on_a_chunk_is_resumed():
-    """Google documents 500 on a resumable chunk as 'resume the upload'."""
-    from googleapiclient.errors import HttpError
-    from mcpbrain.backup import _drive_media_upload
-
-    class _Resp(dict):
-        status = 500
-        reason = "Internal"
-
-    req = _ScriptedUpload([HttpError(_Resp(), b"{}"), {"id": "ok"}])
-    assert _drive_media_upload(req, sleep=lambda s: None) == {"id": "ok"}
-
-
-def test_default_media_uses_small_resumable_chunks(tmp_path):
-    from mcpbrain.backup import _MEDIA_CHUNK_BYTES, _default_media
-
-    f = tmp_path / "x.enc"
-    f.write_bytes(b"x")
-    media = _default_media(f)
-    assert media.resumable() is True
-    assert media.chunksize() == _MEDIA_CHUNK_BYTES
-    assert _MEDIA_CHUNK_BYTES % (256 * 1024) == 0

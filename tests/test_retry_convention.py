@@ -33,10 +33,8 @@ _MODULES = [
     "mcpbrain/sync/attachments.py",
 ]
 
-# The one deliberate exception: a retried chunk of the resumable media
-# upload can't re-seek a non-seekable stream. It already passes
-# num_retries=_MEDIA_NUM_RETRIES (not a bare call), so it's not caught by
-# this scan at all -- nothing to exempt here.
+# The resumable upload (drive_resumable) drives its own retries over a raw
+# transport and makes no googleapiclient execute() call -- nothing to exempt.
 
 
 def _bare_execute_calls(path: Path) -> list[int]:

@@ -12,9 +12,11 @@ derived store — which holds chunk text, i.e. the user's actual mail/doc bodies
 never leaves the machine in cleartext. make_encrypted_snapshot() is the path a
 Drive upload (Task 5.3) should use: the only artifact it produces is encrypted.
 
-Drive upload (Task 5.3) ships the encrypted artifact to a per-user folder under
-an org Shared Drive. The Drive API resource is INJECTED (so tests mock it) and
-every call sets supportsAllDrives=True, which Shared Drives require.
+Uploads are no longer done here: the incremental layout (backup_outbox,
+backup_uploader, drive_resumable) replaced the full-snapshot upload. This
+module keeps the encryption, the legacy snapshot reader, the escrow-key
+download and the store swap. The Drive API resource is INJECTED (so tests mock
+it) and every call sets supportsAllDrives=True, which Shared Drives require.
 
 Restore + delta-sync is the reinstall recovery path. Every restore entry point
 goes through backup_restore.restore_latest (the newest restore point across the
@@ -23,8 +25,7 @@ decrypts+places a legacy one), then a normal sync cycle (run_sync_cycle from
 mcpbrain.sync). The restored store carries its sync cursors, so the delta-sync
 resumes from the snapshot point and catches everything that changed since.
 
-Scope: snapshot + checkpoint + encryption + Shared Drive upload + restore/
-find/download. store.py remains the sole schema owner — this module adds no
+Scope: snapshot + checkpoint + encryption + restore/download + store swap. store.py remains the sole schema owner — this module adds no
 schema and performs no data writes beyond the checkpoint PRAGMA. Sync logic is
 NOT reimplemented here: the delta-sync step reuses run_sync_cycle.
 """
@@ -744,86 +745,12 @@ def _guard_user_id(user_id: str) -> None:
 
     user_id is caller-controlled and interpolated into a single-quoted Drive
     `q` filter; an apostrophe or backslash would break the parse or alter the
-    query structure. Both upload_snapshot and find_latest_snapshot rely on this.
+    query structure. backup_location relies on this.
     """
     if "'" in user_id or "\\" in user_id:
         raise ValueError(
             f"user_id contains characters unsafe in a Drive query: {user_id!r}"
         )
-
-
-def _default_media(path):
-    """Lazy default media factory — imports googleapiclient only when an upload
-    actually runs, so `import mcpbrain.backup` does not require the SDK.
-
-    RESUMABLE. Google caps simple and multipart upload at **5 MB**; anything
-    larger must go up resumably. This used to pass ``resumable=False`` on the
-    theory that a single PUT dodged httplib2's 308 bug — but that made
-    googleapiclient take the multipart path, which reads the whole artifact via
-    ``getbytes(0, size)`` and flattens the entire request body into one
-    ``io.BytesIO``. Once the store outgrew the "~750MB" this was sized for, a
-    4.24 GB single PUT became multi-GB of allocation and a coin-flip on the
-    wire: 97 failures against 52 successes between 2026-06-25 and 2026-08-04,
-    arriving in storms (57 in one day) rather than steadily.
-
-    Resumable fixes both halves: ``MediaFileUpload`` exposes a stream, so
-    googleapiclient sends bounded ``_StreamSlice`` chunks instead of buffering
-    the artifact, and each request is a legal size. The httplib2 308 bug is
-    real, and is handled at the transport instead — see ``auth._google_http``,
-    which un-registers 308 as a redirect code so googleapiclient's own
-    ``_process_response`` sees it. ``execute()`` drives the chunk loop itself.
-
-    Callers must still pass the long socket timeout
-    (``timeout_s=DEFAULT_HTTP_TIMEOUT_S`` /
-    ``drive_timeout_s=DEFAULT_HTTP_TIMEOUT_S``) to
-    ``build_service``/``build_google_services``. A mid-upload network blip is
-    resumed in place by ``_drive_media_upload``; only a failure that outlasts
-    its backoff fails the run.
-    """
-    from googleapiclient.http import MediaFileUpload
-
-    return MediaFileUpload(str(path), resumable=True, chunksize=_MEDIA_CHUNK_BYTES)
-
-
-# num_retries for a RESUMABLE media create. Zero, deliberately.
-#
-# googleapiclient's media-retry loop cannot retry a streamed chunk correctly.
-# `HttpRequest.next_chunk` builds one `_StreamSlice` and then loops
-# `for retry_num in range(num_retries + 1)`, re-sending that SAME object;
-# `_StreamSlice` seeks only in `__init__`, and once the first attempt has read
-# the slice, `read()` computes `n = end - cur == 0` and returns b"". So a
-# retried chunk puts 0 bytes on the wire against a `Content-Length` of up to
-# 100MB, and the connection blocks until the socket timeout —
-# `auth.DEFAULT_HTTP_TIMEOUT_S` (600s) for the Drive service.
-#
-# That cost lands in the worst possible place: `daemon.maybe_backup` runs on the
-# cycle thread HOLDING the bulk lock, with `_backup_in_progress` set, which the
-# watchdog's `_recover_from_stall` reads as "do not recover". One transient 5xx
-# mid-upload would therefore wedge the daemon for ~10 minutes with the watchdog
-# explicitly muzzled. This is a regression the non-resumable path did not have:
-# it built `self.body` once, so its retries genuinely re-sent the bytes.
-#
-# Retrying is instead done by _drive_media_upload, which drives `next_chunk`
-# by hand: after a failed chunk googleapiclient enters its error state, and the
-# NEXT `next_chunk` call asks Drive how many bytes it holds (an empty PUT with
-# `Content-Range: bytes */size`) and builds a fresh slice from there -- a real
-# resume, not a resend of a drained stream.
-_MEDIA_NUM_RETRIES = 0
-
-# Resumable chunk size. googleapiclient's default is 100MB, so one dropped
-# connection threw away up to 100MB of upload; on a flaky link (a phone
-# hotspot, live 2026-10-15..18: Errno 49, broken pipe, read timeout -- four
-# daily backups in a row lost a 768MB upload) a smaller chunk loses less per
-# drop. Must be a multiple of 256KiB.
-_MEDIA_CHUNK_BYTES = 32 * 1024 * 1024
-
-# Waits between resume attempts after a transient chunk failure. The count
-# resets whenever a chunk lands, so this bounds consecutive failures WITHOUT
-# progress, not the upload's total retries: a link that drops every few
-# chunks still finishes, a link that is down gives up in ~8 minutes and
-# leaves the next attempt to the cadence. Kept short because the upload runs
-# holding the bulk lock (see daemon._backup_under_bulk_lock).
-_MEDIA_RESUME_BACKOFF_S = (5, 15, 30, 60, 120, 240)
 
 
 def _is_transient_upload_error(exc) -> bool:
@@ -838,125 +765,15 @@ def _is_transient_upload_error(exc) -> bool:
     return _is_transient(exc) or _http_status(exc) == 500
 
 
-def _drive_media_upload(request, *, on_progress=None, sleep=time.sleep):
-    """Run a resumable media `request` to completion, resuming after transient
-    chunk failures (see _MEDIA_NUM_RETRIES for why the library cannot do this
-    itself). Returns the final response body.
-
-    `on_progress(sent_bytes, total_bytes)` is called after every chunk that
-    lands. A permanent error, or one that outlasts _MEDIA_RESUME_BACKOFF_S with
-    no chunk landing in between, is raised.
-    """
-    failures = 0
-    response = None
-    while response is None:
-        try:
-            status, response = request.next_chunk(num_retries=_MEDIA_NUM_RETRIES)
-        except Exception as exc:
-            if (failures >= len(_MEDIA_RESUME_BACKOFF_S)
-                    or not _is_transient_upload_error(exc)):
-                raise
-            delay = _MEDIA_RESUME_BACKOFF_S[failures]
-            failures += 1
-            log.warning("upload chunk failed (%s); resuming in %ss (attempt %d/%d)",
-                        exc, delay, failures, len(_MEDIA_RESUME_BACKOFF_S))
-            sleep(delay)
-            continue
-        failures = 0
-        if status is not None and on_progress is not None:
-            on_progress(status.resumable_progress, status.total_size)
-    return response
-
-# Every OTHER Drive call in this module is a plain metadata list/create/delete
-# or an in-memory-body upload — none has _MEDIA_NUM_RETRIES' "can't re-seek a
-# stream" problem, so all of them retry. googleapiclient's own num_retries
-# param already does randomized exponential backoff on exactly this error
+# Every Drive call in this module is a plain metadata list or a download --
+# none re-sends a drained upload stream (the resumable upload lives in
+# drive_resumable, which drives its own retries), so all of them retry.
+# googleapiclient's own num_retries param already does randomized exponential backoff on exactly this error
 # class (SSL errors, socket timeouts, ConnectionError, OSError generally —
 # confirmed against googleapiclient.http._retry_request), so no new retry
 # logic is written here, just the parameter every other call in this codebase
 # that already retries (sync/gmail.py, sync/attachments.py) also passes.
 _NUM_RETRIES = 5
-
-
-def upload_snapshot(
-    service, file_path, shared_drive_id: str, user_id: str, *, media_factory=None,
-    on_progress=None,
-) -> str:
-    """Upload an (already-encrypted) snapshot to <shared_drive>/<user_id>/ on a
-    Shared Drive. Finds or creates the per-user folder, uploads file_path into
-    it, and returns the created file id.
-
-    SAFETY: callers MUST pass the ENCRYPTED artifact from make_encrypted_snapshot
-    (Task 5.2), never a raw plaintext snapshot — no cleartext mail/doc bodies
-    may reach the Shared Drive. This function uploads whatever file_path points
-    at and does not encrypt; wiring that guarantee (a CLI/daemon backup trigger
-    that chains make_encrypted_snapshot -> upload_snapshot) is a Phase 6 job.
-
-    `service` is a Google Drive API resource (googleapiclient discovery build
-    result), INJECTED so tests can mock it. Every Drive call sets
-    supportsAllDrives=True (Shared Drives require it). `media_factory(path) ->
-    media_body` builds the upload body; defaults to a lazy MediaFileUpload
-    import so importing this module does not require googleapiclient. Accepts
-    str or Path for file_path.
-    """
-    _guard_user_id(user_id)
-
-    file_path = Path(file_path)
-    media_factory = media_factory or _default_media
-
-    # 1. Find the per-user folder directly under the shared drive root.
-    q = (
-        f"name = '{user_id}' and mimeType = '{FOLDER_MIME}' "
-        f"and trashed = false and '{shared_drive_id}' in parents"
-    )
-    resp = (
-        service.files()
-        .list(
-            q=q,
-            corpora="drive",
-            driveId=shared_drive_id,
-            includeItemsFromAllDrives=True,
-            supportsAllDrives=True,
-            fields="files(id, name)",
-        )
-        .execute(num_retries=_NUM_RETRIES)
-    )
-    files = resp.get("files", [])
-
-    # 2. Reuse an existing folder, else create it under the shared drive.
-    if files:
-        # Multiple same-named folders shouldn't occur under normal operation; take the first.
-        folder_id = files[0]["id"]
-    else:
-        folder_id = (
-            service.files()
-            .create(
-                body={
-                    "name": user_id,
-                    "mimeType": FOLDER_MIME,
-                    "parents": [shared_drive_id],
-                },
-                supportsAllDrives=True,
-                fields="id",
-            )
-            .execute(num_retries=_NUM_RETRIES)["id"]
-        )
-
-    # 3. Upload the artifact into the per-user folder (resumable, chunk-streamed
-    # — see _default_media), resuming in place after a dropped chunk — see
-    # _drive_media_upload. Pass a str path to the factory (matches
-    # MediaFileUpload(str(path))).
-    media = media_factory(str(file_path))
-    created = _drive_media_upload(
-        service.files().create(
-            body={"name": file_path.name, "parents": [folder_id]},
-            media_body=media,
-            supportsAllDrives=True,
-            fields="id",
-        ),
-        on_progress=on_progress,
-    )
-    return created["id"]
 
 
 def restore(encrypted_path, dest_store_path, key: bytes, *,
@@ -1023,166 +840,10 @@ def restore(encrypted_path, dest_store_path, key: bytes, *,
     return dest_store_path
 
 
-def find_latest_snapshot(service, shared_drive_id: str, user_id: str) -> str | None:
-    """Return the id of the newest snapshot in <shared_drive>/<user_id>/, or None.
-
-    Mirrors upload_snapshot's folder convention: a per-user folder named
-    user_id directly under shared_drive_id. Lists that folder's files and
-    returns the most recent by createdTime (modifiedTime breaks ties), or None
-    if the per-user folder is absent or holds no files.
-
-    `service` is an injected Google Drive API resource (tests mock it). Every
-    list call sets corpora="drive", driveId, includeItemsFromAllDrives=True and
-    supportsAllDrives=True — Shared Drives require them. Guards user_id the same
-    way upload_snapshot does.
-    """
-    _guard_user_id(user_id)
-
-    # 1. Find the per-user folder directly under the shared drive root.
-    folder_q = (
-        f"name = '{user_id}' and mimeType = '{FOLDER_MIME}' "
-        f"and trashed = false and '{shared_drive_id}' in parents"
-    )
-    folder_resp = (
-        service.files()
-        .list(
-            q=folder_q,
-            corpora="drive",
-            driveId=shared_drive_id,
-            includeItemsFromAllDrives=True,
-            supportsAllDrives=True,
-            fields="files(id, name)",
-        )
-        .execute(num_retries=_NUM_RETRIES)
-    )
-    folders = folder_resp.get("files", [])
-    if not folders:
-        return None
-    folder_id = folders[0]["id"]
-
-    # 2. List the snapshot files inside the per-user folder, newest first.
-    files_q = f"'{folder_id}' in parents and trashed = false"
-    files_resp = (
-        service.files()
-        .list(
-            q=files_q,
-            corpora="drive",
-            driveId=shared_drive_id,
-            includeItemsFromAllDrives=True,
-            supportsAllDrives=True,
-            fields="files(id, name, createdTime, modifiedTime)",
-        )
-        .execute(num_retries=_NUM_RETRIES)
-    )
-    files = files_resp.get("files", [])
-    if not files:
-        return None
-
-    # Newest first. createdTime is RFC3339 (lexicographically sortable);
-    # modifiedTime breaks ties. Missing fields sort oldest.
-    files.sort(
-        key=lambda f: (f.get("createdTime", ""), f.get("modifiedTime", "")),
-        reverse=True,
-    )
-    return files[0]["id"]
-
-
-# A newest snapshot under this fraction of the largest one it would keep is
-# suspicious (e.g. a store refilled from scratch after a skipped restore), so the
-# prune holds off: deleting the older, larger snapshots is the irreversible step.
-PRUNE_MIN_NEWEST_RATIO = 0.5
-
-
-def prune_snapshots(service, shared_drive_id: str, user_id: str, *, keep: int,
-                    held: dict | None = None) -> int:
-    """Delete all but the newest `keep` snapshots in <shared_drive>/<user_id>/.
-
-    Bounds the daily full-snapshot uploads so they don't grow without limit
-    (~750MB/day otherwise). Sorts by the same (createdTime, modifiedTime) key
-    find_latest_snapshot uses, so the snapshot a restore would pick is always
-    among those kept. Best-effort: a delete failure is logged and skipped, never
-    raised. keep <= 0 means "keep everything" (no-op). Returns the count deleted.
-    """
-    _guard_user_id(user_id)
-    if keep <= 0:
-        return 0
-
-    folder_q = (
-        f"name = '{user_id}' and mimeType = '{FOLDER_MIME}' "
-        f"and trashed = false and '{shared_drive_id}' in parents"
-    )
-    folders = (
-        service.files()
-        .list(q=folder_q, corpora="drive", driveId=shared_drive_id,
-              includeItemsFromAllDrives=True, supportsAllDrives=True,
-              fields="files(id)")
-        .execute(num_retries=_NUM_RETRIES)
-        .get("files", [])
-    )
-    if not folders:
-        return 0
-    folder_id = folders[0]["id"]
-
-    files = (
-        service.files()
-        .list(q=f"'{folder_id}' in parents and trashed = false", corpora="drive",
-              driveId=shared_drive_id, includeItemsFromAllDrives=True,
-              supportsAllDrives=True,
-              fields="files(id, name, createdTime, modifiedTime, size)")
-        .execute(num_retries=_NUM_RETRIES)
-        .get("files", [])
-    )
-    files.sort(key=lambda f: (f.get("createdTime", ""), f.get("modifiedTime", "")),
-               reverse=True)
-    small = _newest_suspiciously_small(files) if len(files) > keep else None
-    if small:
-        log.warning("prune_snapshots: newest snapshot %s is under %d%% of the largest "
-                    "older one; not pruning, so the older snapshots stay restorable",
-                    files[0].get("name"), int(PRUNE_MIN_NEWEST_RATIO * 100))
-        if held is not None:
-            held.update(small)
-        return 0
-
-    deleted = 0
-    for f in files[keep:]:
-        try:
-            (
-                service.files()
-                .delete(fileId=f["id"], supportsAllDrives=True)
-                .execute(num_retries=_NUM_RETRIES)
-            )
-            deleted += 1
-        except Exception as exc:  # noqa: BLE001 — pruning must never break a backup
-            log.warning("prune_snapshots: could not delete %s (%s): %s",
-                        f.get("name"), f["id"], exc)
-    if deleted:
-        log.info("prune_snapshots: deleted %d old snapshot(s), kept newest %d",
-                 deleted, keep)
-    return deleted
-
-
-def _newest_suspiciously_small(files) -> dict | None:
-    """{newest_bytes, largest_kept_bytes} when files[0] (newest) is under
-    PRUNE_MIN_NEWEST_RATIO of the largest older snapshot, else None.
-    Missing/unparseable sizes never trigger it."""
-    def _size(f):
-        try:
-            return int(f.get("size"))
-        except (TypeError, ValueError):
-            return None
-    newest = _size(files[0])
-    older = [n for n in (_size(f) for f in files[1:]) if n]
-    if not newest or not older:
-        return None
-    if newest < PRUNE_MIN_NEWEST_RATIO * max(older):
-        return {"newest_bytes": newest, "largest_kept_bytes": max(older)}
-    return None
-
-
 def _default_downloader(fh, request):
     """Lazy default downloader factory — imports googleapiclient only when a
     download actually runs, so `import mcpbrain.backup` does not require the
-    SDK. Mirrors the _default_media lazy-import pattern."""
+    SDK."""
     from googleapiclient.http import MediaIoBaseDownload
 
     return MediaIoBaseDownload(fh, request)
@@ -1191,45 +852,13 @@ def _default_downloader(fh, request):
 # --- Folder-based Drive helpers (escrow folder lives INSIDE a Shared Drive) ---
 # The escrow/fleet folders are plain folders nested in a Shared Drive, not Shared
 # Drive roots — so their contents must be queried by parent with corpora=allDrives
-# (a folder id is NOT a valid driveId). upload_snapshot/find_latest_snapshot above
-# stay driveId-based for the legacy <shared-drive-root>/<user> convention.
+# (a folder id is NOT a valid driveId).
 
 def _list_in_drives(service, q: str, *, fields="files(id, name, createdTime, modifiedTime)") -> list[dict]:
     return service.files().list(
         q=q, spaces="drive", corpora="allDrives",
         includeItemsFromAllDrives=True, supportsAllDrives=True, fields=fields,
     ).execute(num_retries=_NUM_RETRIES).get("files", [])
-
-
-def ensure_subfolder(service, parent_folder_id: str, name: str) -> str:
-    """Return the id of subfolder `name` under parent_folder_id, creating it if absent."""
-    found = _list_in_drives(
-        service,
-        f"name = '{name}' and mimeType = '{FOLDER_MIME}' and trashed = false "
-        f"and '{parent_folder_id}' in parents",
-        fields="files(id, name)")
-    if found:
-        return found[0]["id"]
-    return service.files().create(
-        body={"name": name, "mimeType": FOLDER_MIME, "parents": [parent_folder_id]},
-        supportsAllDrives=True, fields="id").execute(num_retries=_NUM_RETRIES)["id"]
-
-
-def upload_to_folder(service, file_path, parent_folder_id: str, *,
-                     name=None, media_factory=None) -> str:
-    """Upload file_path directly into parent_folder_id (a folder anywhere, incl.
-    inside a Shared Drive). Returns the created file id.
-
-    Resumes after a dropped chunk the same way upload_snapshot does — see
-    _drive_media_upload.
-    """
-    file_path = Path(file_path)
-    media = (media_factory or _default_media)(str(file_path))
-    created = _drive_media_upload(service.files().create(
-        body={"name": name or file_path.name, "parents": [parent_folder_id]},
-        media_body=media, supportsAllDrives=True, fields="id",
-    ))
-    return created["id"]
 
 
 def download_snapshot(service, file_id: str, dest_path, *, downloader_factory=None) -> Path:
@@ -1303,50 +932,3 @@ def swap_in_store(stage, dest, *, gate=None) -> None:
     with (gate or nullcontext)():
         _checkpoint_for_swap(dest)
         os.replace(stage, dest)
-
-
-def download_and_restore(bc, store, file_id, *, gate=None) -> Path:
-    """Download an encrypted snapshot from Drive and restore it as the live store.
-
-    Three steps, only the last one gated:
-      1. download_snapshot (Drive -> a dedicated temp .enc file);
-      2. restore() decrypts it into a STAGING file beside the store -- the slow
-         part, done while the live store is untouched;
-      3. inside `gate` (the daemon's restoring gate: control API 503s, every
-         Store connection refused; defaults to store.restoring_gate), the live
-         store's WAL is checkpointed with busy == 0 REQUIRED
-         (RestoreBusyError otherwise -- a reader in another process holds it),
-         then the staging file is os.replace()d over the store.
-    A wrong key or tampered artifact raises cryptography.fernet.InvalidToken in
-    step 2, before the store is touched. Returns the restored store Path.
-
-    The download lands in a dedicated temp file under the store's parent dir
-    (same filesystem as the store, so the final replace is atomic), NOT
-    bc.out_path: that is the stable path maybe_backup writes its periodic
-    upload artifact to. Both temp files are always removed in a finally.
-    """
-    from contextlib import nullcontext
-    dest = Path(store.path)
-    temps = []
-    for suffix in (".enc", ".stage"):
-        fd, tmp = tempfile.mkstemp(dir=str(dest.parent), prefix=".restore-", suffix=suffix)
-        # mkstemp already creates 0600 on most platforms; set it explicitly to
-        # stay consistent with the rest of the codebase.
-        if hasattr(os, "fchmod"):  # POSIX-only; mkstemp is already owner-only on Windows
-            os.fchmod(fd, 0o600)
-        os.close(fd)
-        temps.append(Path(tmp))
-    enc, stage = temps
-    if gate is None:
-        gate = getattr(store, "restoring_gate", None) or nullcontext
-    try:
-        download_snapshot(bc.drive_service, file_id, enc)
-        restore(enc, stage, bc.key)
-        swap_in_store(stage, dest, gate=gate)
-        return dest
-    finally:
-        for t in temps:
-            try:
-                t.unlink()
-            except OSError:
-                pass

@@ -5,8 +5,7 @@ from mcpbrain import backup, config
 
 # see mcpbrain.backup._NUM_RETRIES for the full rationale. The escrow upload
 # here is a MediaInMemoryUpload (a fixed in-memory byte buffer, not a
-# resumable stream), so it has none of _MEDIA_NUM_RETRIES' "a retried chunk
-# cannot re-seek" problem — a retry just resends the same bytes. This flow
+# resumable stream), so a retry just resends the same bytes. This flow
 # runs during `mcpbrain setup`, where a transient Errno-49-class blip on the
 # very first Drive call would otherwise fail backup-enable outright.
 _NUM_RETRIES = 5
