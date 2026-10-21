@@ -441,6 +441,44 @@ Windows box with a **non-author** `@centrepoint.church` Google account.
   `mcpbrain restore --check` names the NEW chain (`chain-…`), not a legacy
   single-file backup; restoring into a scratch path (not the live store)
   passes `integrity_check` and the db sha256 equals the manifest's.
+  Scratch restore — run with the INSTALLED tool's python from a neutral
+  directory (inside the repo, `import mcpbrain` picks up the working tree). It
+  calls `backup_restore.restore_latest` with a scratch `dest_store` and a plain
+  `os.replace` swap, so it never touches the live store, records or config; it
+  only stages downloads under `<app dir>/backup/restore/` and removes them.
+  `restore_latest` refuses to place the file unless its sha256 equals the
+  manifest's `db_sha256` and `integrity_check` is ok, so a printed result proves
+  both; the label must start with `chain-`.
+
+  Windows (PowerShell):
+
+  ```powershell
+  cd ~
+  @'
+  import hashlib, os, sqlite3, tempfile
+  from pathlib import Path
+  from mcpbrain import backup_restore, config, daemon
+  home = str(config.app_dir())
+  bc, _ = daemon._backup_from_config(home)
+  assert bc is not None, "backup is not configured or Google is unreachable"
+  scratch = Path(tempfile.mkdtemp(prefix="mcpbrain-qa-restore-"))
+  dest = scratch / "brain.sqlite3"
+  r = backup_restore.restore_latest(
+      home, bc.drive_service, bc.key, dest_store=dest,
+      records_dir=scratch / "records", config_path=scratch / "config.json",
+      swap=lambda s, d: os.replace(s, d))
+  con = sqlite3.connect(f"{dest.as_uri()}?mode=ro", uri=True)
+  print("restored:", r.used.kind, r.used.label, "captured", r.used.captured_at)
+  print("fallbacks:", r.fallbacks)
+  print("integrity_check:", con.execute("PRAGMA integrity_check").fetchone()[0])
+  con.close()
+  print("sha256:", hashlib.sha256(dest.read_bytes()).hexdigest())
+  print("scratch dir (delete when done):", scratch)
+  '@ | & "$(uv tool dir)\mcpbrain\Scripts\python.exe" -
+  ```
+
+  macOS: `cd ~ && "$(uv tool dir)/mcpbrain/bin/python" - <<'PY'` … the same
+  lines … `PY`. Delete the printed scratch dir afterwards.
 - [ ] **10. `mcpbrain doctor` runs and its auto-fixes work on Windows** —
   restart/re-register via schtasks (`schtasks /end`+`/run`, `/create /f`).
 
