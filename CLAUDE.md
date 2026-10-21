@@ -314,6 +314,63 @@ list of the rest (`reference/*`, `MEMORY.md`, `CLAUDE.md`, `memory.md`) to fetch
 tool and `resources/list`, so they cannot disagree. Both instruction texts now
 say "call brain_owner_context". **28 tools** after release (was 27).
 
+## Incremental backup (2026-10-19, source-only, NOT released)
+
+Spec `docs/superpowers/specs/2026-10-19-incremental-backup-design.md`; operator
+notes in `docs/RELEASE-RUNBOOK.md` ("Backup and restore").
+
+**Why.** (1) Every backup was a full ~750 MB `VACUUM INTO` upload; on a hotspot it
+failed four days running (2026-10-15..18) and left the store unprotected.
+(2) Uploads and auto-restore used different folders: auto-restore read
+`<escrow folder>/<email>/`, which held only the **16 June 2026** backup, so a new
+laptop would have restored a four-month-old brain. (3) The wizard path
+(`enable_backup`) wrote an escrow FOLDER id into `backup.shared_drive_id`, which
+Drive rejects as a drive id, so three other staff had **no backups at all**.
+(4) Review found the escrow-key overwrite hazard: re-running setup could replace
+the Drive key and strand every existing backup.
+
+**Layout.** Capture (hourly, `Connection.backup()` copy, per-page blake2b digests
+vs `pages.idx`) writes changed pages as encrypted zlib segments to
+`app_dir()/backup/outbox/`; a separate time-boxed upload (Drive resumable
+protocol, offsets in `journal.json`) commits each item with a manifest. Drive:
+`<backup drive>/<email>/chain-YYYYMMDD-xxxxxx/` (folder named by the chain id).
+Modules: `backup_location`, `backup_pages`, `backup_outbox`, `drive_resumable`,
+`backup_uploader`, `backup_prune`, `backup_restore`, `backup_state`, `backup_now`.
+
+**Rulings (the code is authoritative where the spec differs).**
+- Prune TRASHES (`trashed=True`), not permanent delete: works for Content
+  managers, keeps 30-day recovery. A refused file is retried each prune and shown
+  in doctor after 3 refusals.
+- The Drive escrow key is canonical and never overwritten: setup adopts an
+  existing one and refuses if the local key differs; the file is named by the
+  lower-cased email.
+- `/api/backup/auto` returns 503 retry only on transient detection failures.
+- Restore picks the newest restore point by capture time across the new layout
+  and all legacy folders; transient download or local disk errors abort rather
+  than fall back to an older point; only damaged backups fall back. Records and
+  config are placed atomically; a records failure after the store swap is a
+  "partial restore" shown in status/doctor/wizard.
+- Capture skips an empty store; a full outbox pauses capture (recorded once) and
+  `mcpbrain backup` explains it; idle installs prune once a day; a discarded
+  damaged local backup forces a fresh base and shows in doctor for 7 days.
+
+**Measurements (live store, 2026-10-19).** Two `VACUUM INTO` snapshots 1 h-ish
+apart: only 14% (1 day) to 25% (25 min) of pages unchanged, because it renumbers
+pages. Two `Connection.backup()` copies 1 h apart: **97.9% unchanged, 18 MB**
+upload at page granularity (larger blocks cost far more: 32 KiB 37 MB, 1 MiB
+265 MB). `backup()` 5 s vs `VACUUM INTO` 84 s on the 2 GB store. zlib-6 81 MB vs
+zstd-3 77 MB on scattered pages; stdlib zlib used, no new dependency.
+
+**NOT done, on purpose:** local rollback points (disk was ~90% full), fuzzy
+(piecewise) base capture, content-addressed dedup across chains.
+
+**Rollout notes.** Mixed fleet is safe: old daemons read only legacy files, new
+ones read both. First run after upgrade is a full base; other staff's installs
+upload for the first time. `bin/optimise_store.py` still uses
+`make_encrypted_snapshot` for its own local safety copy.
+
+**Live verification: pending** (controller fills in).
+
 ## Shipping caveats
 
 - **Current state (2026-09-29): the four version files (+ `uv.lock`) are at

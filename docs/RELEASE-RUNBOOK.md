@@ -50,7 +50,8 @@ prompt — the canonical copy lives in `plugin/INSTALL.md`:
    brain to Claude Desktop** by writing `mcpbrain` into the Desktop MCP config
    (`claude_desktop_config.json`, with the absolute install path), and opens the
    browser wizard. Backup/recovery is automatic in the wizard — no manual
-   `restore`/bootstrap step.
+   `restore`/bootstrap step (the wizard restores the newest restore point and
+   starts the hourly backup; see "Backup and restore" below).
 4. The colleague completes the wizard (Google sign-in + identity + timezone).
    The assistant then creates the four **Local** scheduled tasks itself (Sonnet
    4.6 + Auto permission mode) in the same session — the colleague no longer
@@ -278,7 +279,94 @@ On a Mac that is NOT your dev box, with a **non-author** `@centrepoint.church` a
   automatically; the four Local scheduled tasks are created; `brain_search`
   returns a result with a `score` field; the hourly enrich task drains
   `enrich_inbox`; `mcpbrain doctor` runs and its auto-fixes work; and
-  `mcpbrain restore` round-trips a snapshot.
+  `mcpbrain backup` commits a restore point and `mcpbrain restore --check`
+  names it (see "Backup and restore").
+
+## Backup and restore (incremental, from the 2026-10-19 design)
+
+Spec: `docs/superpowers/specs/2026-10-19-incremental-backup-design.md`. The code
+is authoritative where they differ.
+
+**What runs.** Every `capture_interval_s` (default 3600) the daemon copies the
+store with `Connection.backup()` (page-stable; `VACUUM INTO` renumbers pages
+and defeats page diffs), hashes it page by page and writes only changed pages
+as encrypted segments to a local outbox. A separate, time-boxed step uploads the
+outbox to Drive by the resumable protocol and commits each item with an
+encrypted manifest. Capture and upload are independent: a laptop offline for
+days keeps capturing (deltas merge before upload) and resumes uploading where
+it stopped. An empty store is never captured.
+
+**Local files, all under `app_dir()/backup/`:** `outbox/` (segments + sidecar
+`.json` per item; the sidecar rename is the commit), `work/` (the page-stable
+copy during a capture), `pages.idx` (per-page digests of the last capture),
+`capture.json` (where the chain is up to), `journal.json` (upload sessions,
+confirmed offsets, committed seq, pending deletions), `restore/` (download
+staging). Losing `pages.idx`/`capture.json`/an outbox item only makes the next
+capture a full base; it never produces a wrong restore point. A damaged local
+backup file is discarded, a fresh base is forced, and doctor shows it for 7
+days. `backup_state.json` (in `app_dir()`) holds last success / restore point /
+errors.
+
+**Drive layout:** `<backup shared drive>/<account email, lower-cased>/chain-YYYYMMDD-xxxxxx/`
+holding `base-*`, `delta-*`, `records-*` and `manifest-<chain>-<seq>`. The chain
+folder is named by the chain id. A manifest is self-contained. The escrow key
+is `<escrow folder>/<email>.key`; the copy on Drive is canonical and never
+overwritten: setup adopts an existing Drive key and refuses if the local key
+differs. `backup_location.resolve` is the single resolver for upload, prune and
+every restore path; legacy single-file backups
+(`<drive root>/<backup.user_id>/` and `<escrow folder>/<email>/`) stay
+restorable.
+
+**Prune** trashes (`files().update(trashed=True)`, 30-day recovery in Drive
+trash) rather than deleting, so it works with Content-manager rights. Chains
+with a restore point newer than `retain_days` (default 7) and the newest chain
+are kept; legacy files go once the new layout has a committed point older than
+`retain_days`. A file Drive refuses to trash is retried on each prune; doctor
+warns after 3 refusals. `prune_held` pauses pruning if the newest base is under
+half the previous one.
+
+**Reading `mcpbrain doctor` / `mcpbrain backup`:**
+- `Backup  restore point <age> · N waiting to upload (size)` is healthy.
+  Warnings: newest restore point older than 2 days; uploads failing for a day;
+  outbox over `outbox_max_bytes` (2 GB) — capture PAUSES (recorded once, un-uploaded
+  items are never dropped); `mcpbrain backup` says so in plain words and waits
+  sensibly through a pause.
+- `a damaged local backup was discarded …` — a fresh full backup was started.
+- `N old backup file(s) Drive will not let mcpbrain remove` — fix the backup
+  folder's permissions.
+- `partial restore` (also in status and the wizard) — the store was restored but
+  the records/config step failed after the swap; re-run the restore.
+- `restore pending` — Google was unreachable at start on an empty store; sync and
+  backups are held (nothing overwrites the empty store) until it is reachable.
+
+`mcpbrain backup` captures now and follows until the item is committed (Ctrl-C
+leaves it running in the daemon). `mcpbrain restore --check` shows which restore
+point and location would be used, without touching anything.
+
+**Restore rules.** The newest restore point by capture time across the new
+layout and every legacy folder wins. Transient download errors and local disk
+errors abort (retry later) rather than fall back to an older point; only a
+damaged backup falls back (previous manifest, previous chain, then legacy).
+Records and config are placed atomically; `/api/backup/auto` answers 503 (retry)
+only on transient detection failures. All store swaps go through
+`backup.swap_in_store`.
+
+**Attended restore** (CLI refuses while the daemon runs; `--force` does not bypass):
+
+```bash
+launchctl bootout gui/$(id -u)/com.mcpbrain
+mcpbrain restore --check        # confirm the chain named is the one you expect
+mcpbrain restore                # --force to replace an existing store
+launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/com.mcpbrain.plist
+```
+
+Then confirm `/api/status` and `mcpbrain doctor` (integrity ok). After a restore
+the next capture is a base.
+
+**Not the same thing:** `bin/optimise_store.py` (section 7) still makes its own
+local encrypted safety copy with `backup.make_encrypted_snapshot`; that is not a
+restore point and is never uploaded. An optimise rebuild or swap makes the next
+capture a base.
 
 ## 5. Windows QA (MANDATORY pre-ship gate) — Hardware & installer validation
 
@@ -349,7 +437,10 @@ Windows box with a **non-author** `@centrepoint.church` Google account.
 - [ ] **7. `brain_search` returns** a result (with a `score` field).
 - [ ] **8. Hourly enrich task drains `enrich_inbox`** — drop a pending batch and
   confirm it is consumed (now via `brain_enrich_pull`/`brain_enrich_push`).
-- [ ] **9. `mcpbrain restore` round-trips a snapshot.**
+- [ ] **9. Backup round-trips.** `mcpbrain backup` captures and uploads;
+  `mcpbrain restore --check` names the NEW chain (`chain-…`), not a legacy
+  single-file backup; restoring into a scratch path (not the live store)
+  passes `integrity_check` and the db sha256 equals the manifest's.
 - [ ] **10. `mcpbrain doctor` runs and its auto-fixes work on Windows** —
   restart/re-register via schtasks (`schtasks /end`+`/run`, `/create /f`).
 
