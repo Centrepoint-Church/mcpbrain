@@ -698,3 +698,23 @@ def test_coalescing_stays_inside_the_budget(env, monkeypatch):
     env.step(budget_s=150, clock=clock)
     assert len(calls) == 2
     assert all(d == 150 for d in calls)
+
+
+def test_discard_drops_capture_state_only_for_its_own_chain(env):
+    """An OLD chain's broken item must not force a new base on the current
+    chain: capture.json goes only when it describes the discarded chain."""
+    item = env.cap()
+    state_path = bo.backup_dir(env.home) / "capture.json"
+    st = json.loads(state_path.read_text())
+    st["chain"] = "chain-20991231-ffffff"          # the current chain is another one
+    state_path.write_text(json.dumps(st))
+    j = bu.load_journal(env.home)
+    bu._discard_from(env.home, j, item, "test")
+    assert state_path.exists()
+    assert bo.pending_items(env.home) == []
+
+    _insert(env.store, 5)
+    item = env.cap()                               # state now names item's chain
+    assert json.loads(state_path.read_text())["chain"] == item.chain
+    bu._discard_from(env.home, bu.load_journal(env.home), item, "test")
+    assert not state_path.exists()

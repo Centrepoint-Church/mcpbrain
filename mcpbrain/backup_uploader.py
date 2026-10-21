@@ -288,8 +288,12 @@ def _discard_from(home, j: dict, item: bo.Item, why: str,
         _forget_counters(j, it.name)
     save_journal(home, j)
     # capture.json first: a crash after it but before the sidecars go still
-    # leaves the next capture a base.
-    _drop_capture_state(home)
+    # leaves the next capture a base. Only when it describes THIS chain: an
+    # old chain's broken item must not force a needless new base on the
+    # current one.
+    state = bo._load_state(home)
+    if state is None or state.chain == item.chain:
+        _drop_capture_state(home)
     for it in victims:
         _delete_local(home, it)
     log.warning("backup chain %s: discarded %s and %d later item(s) (%s); "
