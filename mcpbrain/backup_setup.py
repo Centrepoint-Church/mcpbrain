@@ -64,15 +64,15 @@ def enable_backup(home: str, *, drive_service, user_id: str) -> dict:
 
     # Fernet.generate_key() returns urlsafe-base64-encoded bytes; decode to str.
     key_str = key_bytes.decode() if isinstance(key_bytes, bytes) else key_bytes
-    return config.write_config(home, {
-        "backup": {
-            "escrow_key": key_str,
-            "shared_drive_id": shared_drive_id,
-            "user_id": user_id,
-            "interval_s": 3600,
-            "retain": 7,
-        }
-    })
+    # MERGE into the existing block (write_config replaces nested dicts):
+    # re-running setup must not reset tuned keys such as capture_interval_s,
+    # retain_days, base_threshold, upload_budget_s or outbox_max_bytes.
+    block = dict(config.read_config(home).get("backup") or {})
+    block.update({"escrow_key": key_str, "shared_drive_id": shared_drive_id,
+                  "user_id": user_id})
+    block.setdefault("interval_s", 3600)
+    block.setdefault("retain", 7)
+    return config.write_config(home, {"backup": block})
 
 
 def _drive_id_of(drive_service, folder_id: str) -> str:

@@ -254,3 +254,34 @@ def test_enable_backup_reads_the_key_under_the_original_case_email(tmp_path, mon
     backup_setup.enable_backup(str(tmp_path), drive_service=object(), user_id="u")
     assert seen == ["Dana.Okafor@Example.org"]
     assert uploads[0][0] == "dana.okafor@example.org"
+
+
+def test_enable_keeps_tuned_backup_keys(tmp_path, monkeypatch):
+    """Re-running setup must merge into the backup block, not replace it."""
+    from mcpbrain import config
+    monkeypatch.setenv("MCPBRAIN_HOME", str(tmp_path))
+    monkeypatch.setattr(backup_setup, "_resolve_shared_drive", lambda svc, **kw: "S")
+    monkeypatch.setattr(backup_setup, "_drive_id_of", lambda svc, fid: "DRIVE")
+    monkeypatch.setattr(backup_setup, "_escrow_key_to_drive", lambda *a, **kw: None)
+    tuned = {"capture_interval_s": 1800, "retain_days": 14, "base_threshold": 3.0,
+             "upload_budget_s": 120, "outbox_max_bytes": 5_000_000_000,
+             "interval_s": 7200, "retain": 3}
+    config.write_config(str(tmp_path), {"backup": {"escrow_key": "K=", **tuned}})
+    monkeypatch.setattr(restore, "_download_escrow_key", lambda svc, folder, name: b"K=")
+    block = backup_setup.enable_backup(str(tmp_path), drive_service=object(),
+                                       user_id="u")["backup"]
+    for k, v in tuned.items():
+        assert block[k] == v, k
+    assert block["escrow_key"] == "K=" and block["shared_drive_id"] == "DRIVE"
+    assert block["user_id"] == "u"
+    assert config.read_config(str(tmp_path))["backup"] == block
+
+
+def test_enable_fresh_block_gets_defaults(tmp_path, monkeypatch):
+    monkeypatch.setenv("MCPBRAIN_HOME", str(tmp_path))
+    monkeypatch.setattr(backup_setup, "_resolve_shared_drive", lambda svc, **kw: "S")
+    monkeypatch.setattr(backup_setup, "_drive_id_of", lambda svc, fid: "DRIVE")
+    monkeypatch.setattr(backup_setup, "_escrow_key_to_drive", lambda *a, **kw: None)
+    block = backup_setup.enable_backup(str(tmp_path), drive_service=object(),
+                                       user_id="u")["backup"]
+    assert block["interval_s"] == 3600 and block["retain"] == 7
