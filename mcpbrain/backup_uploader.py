@@ -94,6 +94,9 @@ class StepResult:
     # {"item", "reason"}: a restore point thrown away, which the daemon
     # records as backup_state `last_discard` so a person can see it.
     discarded: list[dict] = field(default_factory=list)
+    # True when this step confirmed at least one byte on Drive or committed
+    # an item: the daemon keeps uploading back-to-back while it is (R38).
+    moved: bool = False
 
 
 def journal_path(home):
@@ -429,7 +432,8 @@ def upload_step(home, *, drive_service, transport, key, budget_s,
         except OSError as exc:
             log.warning("backup journal write failed: %s", exc)
         write_backup_state(home, ok=False, error=error)
-    return _result(home, committed, state["progress"], error, discarded)
+    return _result(home, committed, state["progress"], error, discarded,
+                   moved=bool(state["moved"] or committed))
 
 
 def _coalesce(home, key, j: dict, *, deadline, clock, sink=None) -> None:
@@ -586,7 +590,8 @@ def _commit(home, svc, key, j: dict, item: bo.Item, folder: str, wall) -> None:
     _finish_local(home, item)
 
 
-def _result(home, committed, progress, error, discarded=None) -> StepResult:
+def _result(home, committed, progress, error, discarded=None, *,
+            moved: bool = False) -> StepResult:
     items = bo.pending_items(home)
     ob = bo.outbox_dir(home)
     pending_bytes = 0
@@ -598,4 +603,4 @@ def _result(home, committed, progress, error, discarded=None) -> StepResult:
                 pass
     return StepResult(committed=committed, progress=progress, error=error,
                       pending=len(items), pending_bytes=pending_bytes,
-                      discarded=list(discarded or []))
+                      discarded=list(discarded or []), moved=moved)

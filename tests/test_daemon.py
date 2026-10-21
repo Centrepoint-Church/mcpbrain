@@ -2295,3 +2295,87 @@ def test_maybe_backup_without_wall_twin_falls_back_to_monotonic():
     assert not hasattr(d, "_last_backup_wall")
 
     assert d.maybe_backup() is None  # not due, and no AttributeError
+
+
+# R38: upload duty cycle -----------------------------------------------------
+
+def test_progressing_upload_marks_more_work_until_error_or_empty(tmp_path, bk, monkeypatch):
+    cfg = _backup_config()
+    daemon = _daemon(tmp_path, cfg)
+    assert daemon.maybe_backup()["captured"] is True
+    results = iter([
+        _bu.StepResult([], {"sent": 5}, None, 1, 10, moved=True),    # progress
+        _bu.StepResult([], None, "offline", 1, 10),                  # error
+        _bu.StepResult([], None, None, 1, 10, moved=False),          # no progress
+        _bu.StepResult(["i"], None, None, 0, 0, moved=True),         # drained
+    ])
+    monkeypatch.setattr(daemon_module.backup_uploader, "upload_step",
+                        lambda home, **kw: next(results))
+    seen = []
+    for _ in range(4):
+        daemon.upload_backup_step()
+        seen.append(daemon._backup_more_work)
+    assert seen == [True, False, False, False]
+
+
+def test_backup_request_keeps_loop_busy_until_drained(tmp_path, bk, monkeypatch):
+    cfg = _backup_config()
+    daemon = _daemon(tmp_path, cfg)
+    daemon.maybe_backup()
+    daemon._backup_drain_requested.set()
+    results = iter([
+        _bu.StepResult([], None, None, 1, 10, moved=False),   # requested: keep going
+        _bu.StepResult([], None, "boom", 1, 10),              # error: stop
+    ])
+    monkeypatch.setattr(daemon_module.backup_uploader, "upload_step",
+                        lambda home, **kw: next(results))
+    daemon.upload_backup_step()
+    assert daemon._backup_more_work is True
+    daemon.upload_backup_step()
+    assert daemon._backup_more_work is False
+
+
+def test_run_loop_does_not_wait_interval_while_uploads_progress(tmp_path, monkeypatch):
+    """With pending items and a progressing uploader, consecutive iterations
+    wait the 1 s more-work timeout, not interval_s; once it stops making
+    progress the loop waits the interval again."""
+    dm = Daemon.__new__(Daemon)
+    dm._lock = threading.Lock()
+    dm._stop = threading.Event()
+    dm._pause = threading.Event()
+    dm._bulk_lock = threading.Lock()
+    dm._progress = {}
+    dm._progress_lock = threading.Lock()
+    dm._clock = lambda: 0.0
+    dm._interval_s = 300.0
+    dm._pending_update = False
+    dm._maintenance_thread = None
+    waits = []
+
+    class Wake:
+        def clear(self):
+            pass
+
+        def set(self):
+            pass
+
+        def wait(self, timeout=None):
+            waits.append(timeout)
+            if len(waits) >= 4:
+                dm._stop.set()
+            return False
+    dm._wake = Wake()
+    progress = iter([True, True, False, False])
+
+    def step():
+        dm._backup_more_work = next(progress)
+    monkeypatch.setattr(dm, "_start_maintenance_thread", lambda: None)
+    monkeypatch.setattr(dm, "_startup_restore", lambda: None)
+    monkeypatch.setattr(dm, "_migrate_embed_backend_safe", lambda: None)
+    monkeypatch.setattr(dm, "run_one", lambda: {"more_work": False})
+    monkeypatch.setattr(dm, "ensure_services", lambda: {})
+    monkeypatch.setattr(dm, "_retry_google_builds", lambda: None)
+    monkeypatch.setattr(dm, "_backup_under_bulk_lock", step)
+    monkeypatch.setattr(daemon_module, "write_daemon_heartbeat", lambda home: None)
+    dm.run()
+    assert waits == [1.0, 1.0, 300.0, 300.0]

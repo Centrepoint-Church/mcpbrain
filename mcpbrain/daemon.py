@@ -3152,6 +3152,7 @@ class Daemon:
         """
         # One attribute read (atomic); the interval it is paired with is not
         # used here. getattr: a Daemon built without __init__ has none.
+        self._backup_more_work = False
         cfg = getattr(self, "_backup", None)
         if cfg is None or getattr(self, "_restore_pending", False):
             return None
@@ -3264,6 +3265,13 @@ class Daemon:
 
         if result is None:
             return None
+        # R38: keep uploading back-to-back (the loop's 1 s more-work wait)
+        # while items are pending and this step moved bytes without an error,
+        # or `mcpbrain backup` asked to drain; stop on an error or no progress
+        # so a dead link waits the normal interval.
+        self._backup_more_work = bool(
+            result.error is None and result.pending > 0
+            and (getattr(result, "moved", False) or requested))
         if drain_ev is not None and result.pending == 0 and not capture_outstanding:
             drain_ev.clear()
         return {"committed": list(result.committed), "error": result.error,
@@ -5263,7 +5271,11 @@ class Daemon:
                 # Re-wake promptly when the cycle yielded mid-work, so a large
                 # backlog still drains at close to full speed while the loop
                 # keeps reaching the maintenance/heartbeat section every minute.
-                more = bool((cycle_result or {}).get("more_work"))
+                # Also while a backup upload is making progress (R38), so a
+                # short laptop window uploads back-to-back, not one step per
+                # interval.
+                more = (bool((cycle_result or {}).get("more_work"))
+                        or bool(getattr(self, "_backup_more_work", False)))
                 self._wake.wait(timeout=1.0 if more else self._interval_s)
 
         if self._pending_update:
