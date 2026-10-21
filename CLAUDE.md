@@ -350,6 +350,10 @@ Modules: `backup_location`, `backup_pages`, `backup_outbox`, `drive_resumable`,
   than fall back to an older point; only damaged backups fall back. Records and
   config are placed atomically; a records failure after the store swap is a
   "partial restore" shown in status/doctor/wizard.
+- A new base is taken when the delta bytes since the base exceed
+  `base_threshold` × the base; default **2.0** (R37, was 0.5: at ~18 MB/h churn
+  0.5 meant a ~750 MB base every ~15 captured hours). Re-tune after the 24 h live
+  measurement.
 - Capture skips an empty store; a full outbox pauses capture (recorded once) and
   `mcpbrain backup` explains it; idle installs prune once a day; a discarded
   damaged local backup forces a fresh base and shows in doctor for 7 days.

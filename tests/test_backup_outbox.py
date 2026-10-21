@@ -611,3 +611,10 @@ def test_unparseable_sidecar_quarantined_and_files_kept(env, bad):
     _insert(store)
     cap()
     assert orphan.exists()
+
+
+def test_default_base_threshold_is_two_bases_of_deltas():
+    """R37: at ~18 MB/h of churn a 0.5 threshold forced a ~750 MB base every
+    ~15 captured hours; 2.0 bounds a restore at ~3x a base instead."""
+    assert bo.Settings().base_threshold == 2.0
+    assert bo.Settings.from_config({}).base_threshold == 2.0

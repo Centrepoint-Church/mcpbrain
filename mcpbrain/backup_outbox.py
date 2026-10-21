@@ -95,7 +95,7 @@ class Settings:
     """The `backup` config block, with the plan's defaults."""
     capture_interval_s: float = 3600
     retain_days: float = 7
-    base_threshold: float = 0.5
+    base_threshold: float = 2.0
     upload_budget_s: float = 60
     outbox_max_bytes: int = 2_000_000_000
 

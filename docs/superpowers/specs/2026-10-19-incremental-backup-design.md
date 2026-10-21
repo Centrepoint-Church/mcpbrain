@@ -118,7 +118,7 @@ are swept. Cost of redoing: seconds.
 
 **Base or delta.** A capture is a **base** (every page) when: there is no
 chain; `page_size` changed; or the chain's committed delta bytes exceed
-`base_threshold` (default 0.5) × the chain's base bytes. Otherwise it is a
+`base_threshold` (default 2.0, R37) × the chain's base bytes. Otherwise it is a
 **delta** against the previous capture. A base is just a large item; it is
 written locally in seconds and uploaded in many short sessions like anything
 else.
@@ -241,7 +241,7 @@ store only.)
 ### 7. Configuration (`backup` block)
 
 New keys with defaults: `capture_interval_s` 3600, `retain_days` 7,
-`base_threshold` 0.5, `upload_budget_s` 60, `outbox_max_bytes` 2_000_000_000.
+`base_threshold` 2.0 (R37), `upload_budget_s` 60, `outbox_max_bytes` 2_000_000_000.
 `interval_s` is ignored for capture (it was the full-upload cadence) and kept
 readable for older daemons. `escrow_key`, `shared_drive_id`, `user_id` keep
 their meaning; `user_id` only names a legacy folder now.
