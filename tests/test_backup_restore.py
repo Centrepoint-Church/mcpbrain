@@ -618,3 +618,70 @@ def test_candidates_unwraps_transient_errors(env):
     env.server.on_download.append(boom)
     with pytest.raises(httplib2.ServerNotFoundError):
         br.candidates(env.home, env.svc, KEY)
+
+
+# ---- final review: local trouble is never evidence against a restore point
+
+
+def test_local_disk_error_writing_decrypted_manifest_propagates(env, monkeypatch):
+    """ENOSPC writing the decrypted manifest (.plain) used to mark the
+    manifest unreadable and demote to an older point."""
+    env.cap_up()
+    esc_person = env.folder("owner@example.org", "ESC")
+    env.legacy(esc_person, datetime(2026, 6, 16, tzinfo=timezone.utc).timestamp())
+    real = backup.decrypt_file
+
+    def full(src, dst, key):
+        if str(dst).endswith(".plain"):
+            raise OSError(errno.ENOSPC, "No space left on device")
+        return real(src, dst, key)
+    monkeypatch.setattr(br.backup, "decrypt_file", full)
+    swaps = []
+    with pytest.raises(OSError) as ei:
+        env.restore(swap=lambda s, d: swaps.append(1))
+    assert ei.value.errno == errno.ENOSPC
+    assert swaps == []
+
+
+@pytest.mark.parametrize("msg,code", [
+    ("disk I/O error", errno.EIO),
+    ("unable to open database file", errno.EIO),
+    ("database or disk is full", errno.ENOSPC),
+])
+def test_integrity_local_sqlite_error_is_os_error(tmp_path, monkeypatch, msg, code):
+    db = _make_db(tmp_path / "s.sqlite3")
+
+    def connect(*a, **k):
+        raise sqlite3.OperationalError(msg)
+    monkeypatch.setattr(br.sqlite3, "connect", connect)
+    with pytest.raises(OSError) as ei:
+        br._integrity(db)
+    assert ei.value.errno == code
+    assert br._is_local_env_error(ei.value)
+
+
+def test_integrity_corruption_is_still_bad(tmp_path, monkeypatch):
+    db = _make_db(tmp_path / "s.sqlite3")
+
+    def connect(*a, **k):
+        raise sqlite3.DatabaseError("database disk image is malformed")
+    monkeypatch.setattr(br.sqlite3, "connect", connect)
+    with pytest.raises(br._Bad):
+        br._integrity(db)
+
+
+def test_local_disk_error_in_integrity_check_propagates_without_fallback(env, monkeypatch):
+    env.cap_up()
+    esc_person = env.folder("owner@example.org", "ESC")
+    env.legacy(esc_person, datetime(2026, 6, 16, tzinfo=timezone.utc).timestamp())
+    real = br.sqlite3.connect
+
+    def connect(target, *a, **k):
+        if "immutable=1" in str(target):
+            raise sqlite3.OperationalError("disk I/O error")
+        return real(target, *a, **k)
+    monkeypatch.setattr(br.sqlite3, "connect", connect)
+    swaps = []
+    with pytest.raises(OSError):
+        env.restore(swap=lambda s, d: swaps.append(1))
+    assert swaps == []

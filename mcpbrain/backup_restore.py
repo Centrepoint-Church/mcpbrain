@@ -38,6 +38,7 @@ leaving what is verified for the next call.
 """
 from __future__ import annotations
 
+import errno
 import gzip
 import hashlib
 import heapq
@@ -207,6 +208,10 @@ def _manifest(svc, key, home, chain: _Chain, seq: int, file_id: str,
                 plain.unlink(missing_ok=True)
         except (_Bad, _Transient, RestoreIncomplete):
             raise
+        except OSError as exc:
+            if _is_local_env_error(exc):
+                raise      # e.g. ENOSPC writing .plain: this disk, not the manifest
+            raise _Bad(f"manifest unreadable: {type(exc).__name__}: {exc}") from exc
         except Exception as exc:  # noqa: BLE001 — undecryptable = broken candidate
             raise _Bad(f"manifest unreadable: {type(exc).__name__}: {exc}") from exc
         finally:
@@ -365,6 +370,23 @@ def _fetch(svc, home, spec: dict, *, deadline, clock) -> Path:
 
 # ---------------------------------------------------------------- verify + place
 
+# sqlite messages that mean THIS machine's trouble (SQLITE_IOERR, CANTOPEN,
+# FULL), not a corrupt restore point ("malformed", "not a database").
+_SQLITE_LOCAL = (("database or disk is full", errno.ENOSPC),
+                 ("disk i/o error", errno.EIO),
+                 ("unable to open database file", errno.EIO))
+
+
+def _sqlite_local_errno(exc: BaseException) -> int | None:
+    if not isinstance(exc, sqlite3.OperationalError):
+        return None
+    msg = str(exc).lower()
+    for text, code in _SQLITE_LOCAL:
+        if text in msg:
+            return code
+    return None
+
+
 def _integrity(path: Path) -> None:
     if not path.is_file() or path.stat().st_size == 0:
         raise _Bad("restore point carried no store")
@@ -376,6 +398,10 @@ def _integrity(path: Path) -> None:
         finally:
             con.close()
     except sqlite3.Error as exc:
+        local = _sqlite_local_errno(exc)
+        if local is not None:
+            # This machine's disk, not the restore point: never fall back on it.
+            raise OSError(local, f"could not check the restored store: {exc}") from exc
         raise _Bad(f"integrity_check failed: {exc}") from exc
     if rows != ["ok"]:
         raise _Bad(f"integrity_check failed: {'; '.join(map(str, rows[:5]))}")
