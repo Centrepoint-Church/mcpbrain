@@ -46,10 +46,12 @@ class FakeDrive:
         self.hidden_from_ordered: set[str] = set()  # omitted from ordered listings
         self.incomplete: set[str] = set()          # parents listed incompleteSearch
 
-    def add(self, fid, name, parent, *, created, folder=False):
+    def add(self, fid, name, parent, *, created, folder=False, size=None):
         self.items[fid] = {"id": fid, "name": name, "parents": [parent],
                            "mimeType": FOLDER_MIME if folder else "application/octet-stream",
                            "createdTime": _iso(created), "modifiedTime": _iso(created)}
+        if size is not None:
+            self.items[fid]["size"] = str(size)
         return fid
 
     def files(self):
@@ -294,9 +296,9 @@ def test_unparseable_uncommitted_chain_is_kept(tmp_path):
 
 # R15: chain folders the journal does not know -------------------------------
 
-def _unknown(d, fid, newest_file_age_days):
+def _unknown(d, fid, newest_file_age_days, base_size=None):
     d.add(fid, f"chain-20260101-{fid}", PERSON, created=NOW - 60 * DAY, folder=True)
-    d.add(fid + "-f1", "base-0000", fid, created=NOW - 60 * DAY)
+    d.add(fid + "-f1", "base-0000", fid, created=NOW - 60 * DAY, size=base_size)
     d.add(fid + "-f2", "delta-000002-0000", fid,
           created=NOW - newest_file_age_days * DAY)
 
@@ -461,3 +463,41 @@ def test_fresh_legacy_file_kept_after_coverage(tmp_path):
     _journal(tmp_path, {"chain-a": _chain("fa", NOW - 8 * DAY, NOW)})
     out = _step(tmp_path, d, loc=_loc(legacy=["legacy"]))
     assert out["deleted"] == ["old"]
+
+
+# Final review: unknown chains get the same size hold ------------------------
+
+def test_unknown_chain_with_much_larger_base_is_held(tmp_path):
+    """An empty-store base after a failed restore must not get the old, big
+    chain trashed as 'unknown'."""
+    _journal(tmp_path, {"chain-z": _chain("fz", NOW - 2 * DAY, NOW, base=1000)})
+    d = _drive_with("fz")
+    _unknown(d, "ubig", 20, base_size=2000)     # newest 1000 < 0.5 * 2000? no: equal
+    _unknown(d, "uhuge", 20, base_size=5000)    # 1000 < 2500: held
+    _unknown(d, "usmall", 20, base_size=1500)   # 1000 >= 750: deletable
+    out = _step(tmp_path, d)
+    assert "uhuge" not in d.deleted
+    assert sorted(out["deleted"]) == ["ubig", "usmall"]
+    assert out["held"]["previous"] == {"chain": "chain-20260101-uhuge", "base_bytes": 5000}
+    assert out["held"]["newest"] == {"chain": "chain-z", "base_bytes": 1000}
+    j = bu.load_journal(tmp_path)
+    assert "uhuge" not in j["pending_deletes"]
+
+
+def test_unknown_chain_base_listing_incomplete_is_kept(tmp_path):
+    _journal(tmp_path, {"chain-z": _chain("fz", NOW - 2 * DAY, NOW, base=1000)})
+    d = _drive_with("fz")
+    _unknown(d, "uold", 20, base_size=10)
+    real_list = d.list
+
+    def list_(q, **kw):
+        ex = real_list(q, **kw)
+        if "name contains 'base-'" not in q:
+            return ex
+
+        def run():
+            return {**ex.execute(), "incompleteSearch": True}
+        return _Exec(run)
+    d.list = list_
+    out = _step(tmp_path, d)
+    assert out["deleted"] == [] and "uold" not in d.deleted

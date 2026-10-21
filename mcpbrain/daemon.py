@@ -5393,14 +5393,40 @@ def _restore_on_first_run_classified(store, home, *, gate=None):
             log.error("restore-on-first-run: the store was restored but the records "
                       "repo / config.json could not be placed: %s", exc)
             return ("partial", exc)
-        if _is_transient_google_error(exc):
+        if _is_transient_probe_error(exc):
+            # Any Drive 5xx too (R20 re-raises it): never a reason to lift the
+            # hold and let sync fill the empty store over the backup.
             log.warning("restore-on-first-run: not restored yet (transient): %s", exc)
             return ("transient", exc)
+        if backup_restore._is_local_env_error(exc):
+            # This machine's disk (ENOSPC, EIO...): keep holding, retry later.
+            held = _local_restore_error(exc, home)
+            log.warning("restore-on-first-run: not restored yet: %s", held)
+            return ("transient", held)
         raise
     log.info("restored store from %s %s (captured %s)%s", result.used.kind,
              result.used.label, result.used.captured_at,
              f" after {len(result.fallbacks)} fallback(s)" if result.fallbacks else "")
     return ("restored", None)
+
+
+def _local_restore_error(exc: OSError, home) -> Exception:
+    """A plain-English restore_pending reason for a local disk failure,
+    chaining the original."""
+    import errno
+    import shutil
+    if getattr(exc, "errno", None) in (errno.ENOSPC, errno.EDQUOT):
+        try:
+            free_gb = shutil.disk_usage(home).free / 1e9
+            msg = (f"not enough disk space to restore: only {free_gb:.1f} GB free; "
+                   "free some space and mcpbrain retries")
+        except OSError:
+            msg = "not enough disk space to restore; free some space and mcpbrain retries"
+    else:
+        msg = f"restore blocked by a local disk error (will retry): {exc}"
+    err = RuntimeError(msg)
+    err.__cause__ = exc
+    return err
 
 
 def _is_transient_probe_error(exc) -> bool:

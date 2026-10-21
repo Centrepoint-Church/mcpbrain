@@ -42,7 +42,10 @@ folders (R12). A duplicate manifest from a crash goes with its folder.
 
 **Hold.** If the newest committed chain's base is under `_HOLD_RATIO` of the
 previous committed chain's base, something may have shrunk the store; nothing
-at all is deleted and the result carries `held`.
+at all is deleted and the result carries `held`. The same size test applies to
+each unknown chain folder (its `base-*` files, one listing): an unknown chain
+whose base the newest is under `_HOLD_RATIO` of is kept and reported in
+`held`, while other deletions go ahead.
 
 **Journal.** A chain's entry is removed when its folder's deletion completes,
 and each live chain's `files` keeps only its newest records entry (the only
@@ -65,7 +68,8 @@ _NUM_RETRIES = backup._NUM_RETRIES
 _HOLD_RATIO = 0.5
 _DAY = 86400.0
 _CHAIN_ID = re.compile(r"^chain-(\d{8})-[0-9a-f]+$")
-_LIST_FIELDS = "nextPageToken, files(id, name, mimeType, createdTime, modifiedTime)"
+_LIST_FIELDS = ("nextPageToken, files(id, name, mimeType, createdTime, modifiedTime, "
+                "size)")
 
 
 def _classify(exc: Exception) -> str:
@@ -216,10 +220,34 @@ def _newest_activity(svc, folder: dict, *, drive_id: str,
     return max(known) if known else None
 
 
-def _unknown_chains(svc, j: dict, loc, committed, cutoff, over) -> list[str]:
+def _base_bytes(svc, folder: dict, *, drive_id: str) -> int | None:
+    """Total size of a chain folder's `base-*` files (one listing), or None
+    when the listing is incomplete (keep)."""
+    files, complete = _list(svc, f"'{folder['id']}' in parents and trashed = false "
+                                 "and name contains 'base-'", drive_id=drive_id)
+    if not complete:
+        return None
+    total = 0
+    for f in files:
+        if str(f.get("name", "")).startswith("base-"):
+            try:
+                total += int(f.get("size") or 0)
+            except (TypeError, ValueError):
+                pass
+    return total
+
+
+def _unknown_chains(svc, j: dict, loc, committed, cutoff, over,
+                    holds: list | None = None) -> list[str]:
+    """Unknown chain folders old enough to go. One whose base is at least
+    1/_HOLD_RATIO times the newest committed chain's base is KEPT and
+    appended to `holds`: the store may have shrunk (an empty-store base after
+    a failed restore), so the bigger old chain is the one worth keeping."""
     if not committed or not loc.folder_id:
         return []
-    newest_start = float(committed[-1][1]["first_captured_at"])
+    newest_chain, newest_entry = committed[-1]
+    newest_start = float(newest_entry["first_captured_at"])
+    newest_base = int(newest_entry.get("base_bytes") or 0)
     known = {e.get("folder_id") for e in j["chains"].values() if isinstance(e, dict)}
     folders, _ = _list(svc, f"'{loc.folder_id}' in parents and "
                             f"mimeType = '{backup.FOLDER_MIME}' and trashed = false",
@@ -232,6 +260,19 @@ def _unknown_chains(svc, j: dict, loc, committed, cutoff, over) -> list[str]:
             continue
         newest = _newest_activity(svc, f, drive_id=loc.drive_id, cutoff=cutoff)
         if newest is not None and newest < cutoff and newest_start > newest:
+            base = _base_bytes(svc, f, drive_id=loc.drive_id)
+            if base is None:
+                continue   # incomplete listing: cannot judge the size, keep
+            if base > 0 and newest_base < _HOLD_RATIO * base:
+                log.warning("backup prune: keeping unknown chain folder %s (%s): its "
+                            "base is %d bytes, the newest chain %s base only %d",
+                            f.get("name"), f["id"], base, newest_chain, newest_base)
+                if holds is not None:
+                    holds.append({"newest": {"chain": newest_chain,
+                                             "base_bytes": newest_base},
+                                  "previous": {"chain": str(f.get("name")),
+                                               "base_bytes": base}})
+                continue
             log.info("backup prune: unknown chain folder %s (%s) newest activity "
                      "%s, before the retention cutoff %s; queued", f.get("name"),
                      f["id"], _rfc3339(newest), _rfc3339(cutoff))
@@ -292,6 +333,7 @@ def prune_step(home, *, drive_service, retain_days: float, now: float,
         return {"deleted": deleted, "held": held}
 
     changed = _trim_records(j)
+    holds: list[dict] = []
     if retain_days and retain_days > 0:
         cutoff = now - float(retain_days) * _DAY
         changed |= _queue(j, _eligible_chains(j, committed, cutoff))
@@ -308,7 +350,7 @@ def prune_step(home, *, drive_service, retain_days: float, now: float,
         if loc is not None and not over():
             try:
                 changed |= _queue(j, _unknown_chains(svc, j, loc, committed,
-                                                     cutoff, over))
+                                                     cutoff, over, holds))
                 oldest = (float(committed[0][1]["first_captured_at"])
                           if committed else None)
                 if oldest is not None and oldest < cutoff and not over():
@@ -348,4 +390,6 @@ def prune_step(home, *, drive_service, retain_days: float, now: float,
             log.info("backup prune: trashed chain %s (folder %s)", chain, fid)
         deleted.append(fid)
         bu.save_journal(home, j)
-    return {"deleted": deleted, "held": None}
+    held = (max(holds, key=lambda h: h["previous"]["base_bytes"])
+            if holds else None)
+    return {"deleted": deleted, "held": held}

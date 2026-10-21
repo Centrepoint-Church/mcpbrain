@@ -266,3 +266,66 @@ def test_download_and_restore_composes_primitives(monkeypatch, tmp_path):
     assert Path(store.path).read_bytes() == b"restored-store"
     assert not list(store_parent.glob(".restore-*"))
 
+
+
+def _empty_store_with_failing_restore(monkeypatch, tmp_path, exc):
+    s = Store(str(tmp_path / "b.sqlite3"), dim=384)
+    s.init()
+    monkeypatch.setattr(dmod, "_backup_from_config", lambda home: (FakeBC(), 3600))
+
+    def boom(*a, **k):
+        raise exc
+    monkeypatch.setattr(dmod.backup_restore, "restore_latest", boom)
+    return s
+
+
+def test_drive_500_during_restore_keeps_holding(monkeypatch, tmp_path):
+    """A plain 500 is not in the reflow transient set, but R20 re-raises it
+    from the download: lifting the hold on it would let sync fill the empty
+    store and later prune trash the real backup."""
+    import httplib2
+    from googleapiclient.errors import HttpError
+    err = HttpError(httplib2.Response({"status": 500}), b"server error")
+    s = _empty_store_with_failing_restore(monkeypatch, tmp_path, err)
+    status, exc = dmod._restore_on_first_run_classified(s, str(tmp_path))
+    assert status == "transient" and exc is err
+
+
+def test_disk_full_during_restore_keeps_holding_with_plain_reason(monkeypatch, tmp_path):
+    import errno
+    err = OSError(errno.ENOSPC, "No space left on device")
+    s = _empty_store_with_failing_restore(monkeypatch, tmp_path, err)
+    status, exc = dmod._restore_on_first_run_classified(s, str(tmp_path))
+    assert status == "transient"
+    assert str(exc).startswith("not enough disk space to restore: only ")
+    assert "GB free" in str(exc) and exc.__cause__ is err
+
+
+def test_local_io_error_during_restore_keeps_holding(monkeypatch, tmp_path):
+    import errno
+    s = _empty_store_with_failing_restore(monkeypatch, tmp_path,
+                                          OSError(errno.EIO, "Input/output error"))
+    status, exc = dmod._restore_on_first_run_classified(s, str(tmp_path))
+    assert status == "transient" and "local disk error" in str(exc)
+
+
+def test_disk_full_hold_writes_reason_to_marker(monkeypatch, tmp_path):
+    """End to end through the daemon's start-up restore: the marker carries
+    the plain-English reason and the hold stays on."""
+    import errno
+    from mcpbrain import config
+    monkeypatch.setattr(config, "app_dir", lambda: tmp_path)
+    s = _empty_store_with_failing_restore(monkeypatch, tmp_path,
+                                          OSError(errno.ENOSPC, "No space left"))
+    d = dmod.Daemon.__new__(dmod.Daemon)
+    import threading
+    d._store = s
+    d._stop = threading.Event()
+    d._clock = lambda: 0.0
+    d._restore_wait_s = 0.0
+    d._restore_pending = False
+    d._restore_backoff = None
+    d._startup_restore()
+    marker = dmod._read_restore_pending(str(tmp_path))
+    assert d._restore_pending is True
+    assert marker and marker["reason"].startswith("not enough disk space to restore")
