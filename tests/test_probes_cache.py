@@ -74,153 +74,79 @@ def test_refresh_connection_cache_unknown_name(tmp_path):
     assert probes.refresh_connection_cache(_home(tmp_path, {}), "nope") is None
 
 
-# ---------- probe_backup staleness / empty-file tests ----------
+# ---------- probe_backup ----------
+
+import time  # noqa: E402
 
 _BACKUP_CFG = {"backup": {"dest": "s3://some-bucket"}}
 
 
-def test_backup_ok_with_fresh_nonempty_snapshot(tmp_path):
-    """A recent, non-empty snapshot.enc → ok."""
+def _bstate(tmp_path, **kw):
+    (tmp_path / "backup_state.json").write_text(json.dumps(kw))
+
+
+def test_backup_no_backup_yet_without_state_file(tmp_path):
     home = _home(tmp_path, _BACKUP_CFG)
-    snap = tmp_path / "snapshot.enc"
-    snap.write_bytes(b"data")
-    # mtime is current by default (just created) — well within any staleness window
+    (tmp_path / "snapshot.enc").write_bytes(b"data")  # stale leftover: ignored
+    r = probes.probe_backup(home)
+    assert r["state"] == "needs_action"
+    assert "no backup yet" in r["detail"].lower()
+
+
+def test_probe_uses_restore_point(tmp_path):
+    """restore_point (capture time) is the signal, even when last_success is old."""
+    home = _home(tmp_path, _BACKUP_CFG)
+    _bstate(tmp_path, restore_point=time.time() - 2 * 3600,
+            last_success=time.time() - 30 * 86400, consecutive_failures=0)
     r = probes.probe_backup(home)
     assert r["state"] == "ok"
-    assert r["last_verified"] is not None
+    assert "restore point 2h ago" in r["detail"]
 
 
-def test_backup_needs_action_zero_byte_snapshot(tmp_path):
-    """A 0-byte snapshot.enc → needs_action regardless of mtime."""
+def test_probe_falls_back_to_last_success(tmp_path):
     home = _home(tmp_path, _BACKUP_CFG)
-    snap = tmp_path / "snapshot.enc"
-    snap.write_bytes(b"")
-    r = probes.probe_backup(home)
-    assert r["state"] == "needs_action"
-    assert "empty" in r["detail"].lower()
-
-
-def test_backup_needs_action_when_uploads_keep_failing(tmp_path):
-    """A fresh snapshot.enc does NOT mean the backup reached Drive.
-
-    The artifact is encrypted locally BEFORE the upload, so every failed
-    attempt still refreshes snapshot.enc's mtime -- the probe stayed green
-    through the 2026-08-03 storm (57 failed uploads in one day) because each
-    failure refreshed the very file being probed. The probe must key off the
-    last recorded SUCCESS.
-    """
-    import json
-    import time
-    home = _home(tmp_path, _BACKUP_CFG)
-    (tmp_path / "snapshot.enc").write_bytes(b"data")  # fresh, as a failed run leaves it
-    (tmp_path / "backup_state.json").write_text(json.dumps({
-        "last_success": time.time() - (30 * 86400),
-        "consecutive_failures": 412,
-        "last_error": "Broken pipe",
-    }))
-
-    r = probes.probe_backup(home)
-
-    assert r["state"] == "needs_action"
-    assert "412" in r["detail"] or "fail" in r["detail"].lower()
-
-
-def test_backup_ok_when_last_upload_succeeded_recently(tmp_path):
-    """A recorded recent success is the positive signal."""
-    import json
-    import time
-    home = _home(tmp_path, _BACKUP_CFG)
-    (tmp_path / "snapshot.enc").write_bytes(b"data")
-    (tmp_path / "backup_state.json").write_text(json.dumps({
-        "last_success": time.time() - 3600,
-        "consecutive_failures": 0,
-    }))
-
+    _bstate(tmp_path, last_success=time.time() - 3600, consecutive_failures=0)
     assert probes.probe_backup(home)["state"] == "ok"
 
 
-def test_backup_probe_uses_the_configured_interval(tmp_path):
-    """The staleness window must derive from backup.interval_s.
-
-    probe_backup read `interval_seconds`, a key NOTHING in the repo has ever
-    written (the writer at backup_setup.py and the daemon's loader both use
-    `interval_s`). The branch has been dead since it landed on 2026-06-10, so
-    the window was always the 7-day default -- on this box, 7x more lenient
-    than the configured 86400. A backup could be six days stale and read "On".
-    """
-    import json
-    import time
-    home = _home(tmp_path, {"backup": {"dest": "x", "interval_s": 3600}})
-    (tmp_path / "snapshot.enc").write_bytes(b"data")
-    (tmp_path / "backup_state.json").write_text(json.dumps({
-        "last_success": time.time() - (3 * 3600),   # 3h, past 2x the 1h interval
-        "consecutive_failures": 2,
-    }))
-
+def test_backup_stale_restore_point_needs_action(tmp_path):
+    home = _home(tmp_path, _BACKUP_CFG)
+    _bstate(tmp_path, restore_point=time.time() - 3 * 86400, consecutive_failures=0)
     assert probes.probe_backup(home)["state"] == "needs_action"
 
 
-def test_backup_probe_tolerates_a_single_missed_interval(tmp_path):
-    """One transient miss must not flag — two consecutive should.
+def test_backup_needs_action_when_uploads_keep_failing(tmp_path):
+    home = _home(tmp_path, _BACKUP_CFG)
+    _bstate(tmp_path, restore_point=time.time() - 3600,
+            last_success=time.time() - 30 * 3600, consecutive_failures=5,
+            last_error="Broken pipe")
+    r = probes.probe_backup(home)
+    assert r["state"] == "needs_action"
+    assert "fail" in r["detail"].lower()
 
-    Deliberately 2x the interval, not 1x: a single failed run is routine (on
-    2026-08-04 alone there were transient WAL-busy and broken-pipe failures
-    that self-corrected on the next attempt), and flagging each one trains
-    people to ignore the indicator.
-    """
-    import json
-    import time
-    home = _home(tmp_path, {"backup": {"dest": "x", "interval_s": 3600}})
-    (tmp_path / "snapshot.enc").write_bytes(b"data")
-    (tmp_path / "backup_state.json").write_text(json.dumps({
-        "last_success": time.time() - 5400,   # 1.5h — one interval missed
-        "consecutive_failures": 1,
-    }))
 
+def test_backup_one_recent_failure_is_tolerated(tmp_path):
+    home = _home(tmp_path, _BACKUP_CFG)
+    _bstate(tmp_path, restore_point=time.time() - 3600,
+            last_success=time.time() - 3600, consecutive_failures=1)
     assert probes.probe_backup(home)["state"] == "ok"
 
 
 def test_backup_needs_action_when_state_file_is_corrupt(tmp_path):
-    """A backup_state.json that EXISTS but is unparseable must never degrade
-    to the snapshot.enc-mtime fallback -- that mtime is refreshed by every
-    FAILED upload too, so falling back would silently read an ongoing
-    failure storm as "On". A corrupt file is 'not fresh', full stop; only an
-    ABSENT file may fall back to the mtime heuristic."""
     home = _home(tmp_path, _BACKUP_CFG)
-    snap = tmp_path / "snapshot.enc"
-    snap.write_bytes(b"data")  # fresh and non-empty: would read "ok" via mtime
     (tmp_path / "backup_state.json").write_text("{not valid json")
-    r = probes.probe_backup(home)
-    assert r["state"] == "needs_action"
+    assert probes.probe_backup(home)["state"] == "needs_action"
 
 
 def test_last_backup_success_none_when_state_file_is_corrupt(tmp_path):
     home = _home(tmp_path, _BACKUP_CFG)
-    snap = tmp_path / "snapshot.enc"
-    snap.write_bytes(b"data")
     (tmp_path / "backup_state.json").write_text("{not valid json")
     assert probes.last_backup_success(home) is None
 
 
-def test_last_backup_success_falls_back_to_mtime_when_state_file_absent(tmp_path):
-    """The absent case, unlike the corrupt case, is still allowed to fall
-    back to snapshot.enc's mtime."""
+def test_last_backup_success_ignores_snapshot_file(tmp_path):
     home = _home(tmp_path, _BACKUP_CFG)
-    snap = tmp_path / "snapshot.enc"
-    snap.write_bytes(b"data")
-    assert probes.last_backup_success(home) is not None
-
-
-def test_backup_needs_action_stale_snapshot(tmp_path):
-    """A snapshot older than the staleness window → needs_action."""
-    import os
-    import time
-    home = _home(tmp_path, _BACKUP_CFG)
-    snap = tmp_path / "snapshot.enc"
-    snap.write_bytes(b"data")
-    # Backdate mtime by 10 days (well beyond default 7-day window)
-    old_time = time.time() - (10 * 86400)
-    os.utime(str(snap), (old_time, old_time))
-    r = probes.probe_backup(home)
-    assert r["state"] == "needs_action"
-    assert "stale" in r["detail"].lower()
+    (tmp_path / "snapshot.enc").write_bytes(b"data")
+    assert probes.last_backup_success(home) is None
+    _bstate(tmp_path, last_success=123.0)
+    assert probes.last_backup_success(home) == 123.0

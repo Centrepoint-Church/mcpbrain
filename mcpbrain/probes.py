@@ -138,86 +138,85 @@ def verify_connections(home, store=None) -> dict:
     return verified
 
 
-_BACKUP_DEFAULT_WINDOW = 7 * 86400  # 7 days in seconds
-# Tolerate one missed run before flagging; see probe_backup's window comment.
-_BACKUP_WINDOW_MULTIPLE = 2
+# A restore point newer than this is healthy. The daemon captures hourly, so
+# two days means many consecutive captures or uploads have not landed.
+_BACKUP_HEALTHY_S = 2 * 86400
+# Uploads that keep failing for this long are flagged even while the newest
+# restore point is still inside the healthy window.
+_BACKUP_FAILING_S = 86400
+
+
+def _ago(seconds: float) -> str:
+    seconds = max(0.0, seconds)
+    if seconds < 90:
+        return "just now"
+    if seconds < 5400:
+        return f"{int(round(seconds / 60))}m ago"
+    if seconds < 2 * 86400:
+        return f"{int(round(seconds / 3600))}h ago"
+    return f"{int(seconds // 86400)}d ago"
+
+
+def _mb(n) -> str:
+    return f"{(n or 0) / 1_000_000:,.0f} MB"
+
+
+def _outbox_summary(home, cfg_backup) -> tuple[int, int, bool]:
+    """(items waiting, bytes waiting, outbox full). Local reads only."""
+    from mcpbrain import backup_outbox
+    try:
+        n = len(backup_outbox.pending_items(home))
+        b = backup_outbox.outbox_bytes(home)
+        cap = backup_outbox.Settings.from_config(
+            cfg_backup if isinstance(cfg_backup, dict) else {}).outbox_max_bytes
+    except Exception:  # noqa: BLE001 -- a probe must never raise
+        return 0, 0, False
+    return n, b, bool(cap and b >= cap)
 
 
 def probe_backup(home) -> dict:
+    """Backup health from local files only (backup_state.json + the outbox);
+    never a Drive call. The newest restore point is the signal: `restore_point`
+    (capture time), else `last_success` for a state file from an older daemon."""
+    import time
+
     cfg = config.read_config(home)
     if not cfg.get("backup"):
         return _state("not_started", "Backup off")
-    snap = Path(home) / "snapshot.enc"
-    if not snap.exists():
-        return _state("needs_action", "No backup snapshot found")
-    try:
-        st = snap.stat()
-    except OSError:
-        return _state("needs_action", "Cannot read backup snapshot")
-    if st.st_size == 0:
-        return _state("needs_action", "Backup file is empty")
-    # Staleness window: 2x the configured backup interval, else 7 days.
-    #
-    # Reads `interval_s` — the key backup_setup writes and the daemon's own
-    # loader reads. This branch used to read `interval_seconds`, which NOTHING
-    # in the repo has ever written, so it was dead from the day it landed
-    # (2026-06-10) and the window silently stayed at the 7-day default: 7x more
-    # lenient than a configured 86400, meaning a backup could be six days stale
-    # and still report "On".
-    #
-    # 2x, not 1x, deliberately: a single failed run is routine and self-corrects
-    # on the next attempt (2026-08-04 saw transient WAL-busy and broken-pipe
-    # failures that did), and flagging every one of those trains people to
-    # ignore the indicator. Two consecutive misses is the real signal.
-    backup_cfg = cfg["backup"]
-    window = _BACKUP_DEFAULT_WINDOW
-    if isinstance(backup_cfg, dict):
-        try:
-            configured = float(backup_cfg["interval_s"])
-        except (KeyError, TypeError, ValueError):
-            configured = 0.0
-        if configured > 0:
-            window = int(configured * _BACKUP_WINDOW_MULTIPLE)
-    import time
-
-    # Prefer the recorded UPLOAD outcome over snapshot.enc's mtime. The artifact
-    # is encrypted locally before the upload, so a failed run still leaves a
-    # fresh snapshot.enc and the mtime check reads "On" regardless -- it stayed
-    # green straight through the 2026-08-03 failure storm (57 failed uploads in
-    # a day) because each failure refreshed the very file being probed. Absent
-    # the state file (pre-existing installs, or before the first attempt) fall
-    # back to the mtime heuristic below.
     bstate = _read_backup_state(home)
     if bstate is _CORRUPT:
-        # Present but unparseable: never degrade to the mtime heuristic below
-        # (a failed upload still refreshes snapshot.enc's mtime, so that would
-        # silently read a real, ongoing failure storm as "On"). Not fresh.
         return _state("needs_action", "Backup state file is unreadable/corrupt")
-    if bstate is not None:
-        failures = bstate.get("consecutive_failures") or 0
-        # A hand-edited or half-written-but-still-valid-JSON state file must
-        # degrade to the mtime heuristic below, never take the whole status
-        # endpoint down with it.
-        try:
-            last_success = float(bstate["last_success"])
-        except (KeyError, TypeError, ValueError):
-            last_success = None
-        if not last_success:
-            return _state("needs_action",
-                          f"Backup has never completed ({failures} failed attempts)")
-        success_age = time.time() - last_success
-        if success_age > window:
-            days = int(success_age // 86400)
-            return _state("needs_action",
-                          f"Backup upload failing — last success {days}d ago "
-                          f"({failures} failed attempts)")
-        return _state("ok", "On", last_verified=_iso(last_success))
-
-    age_seconds = time.time() - st.st_mtime
-    if age_seconds > window:
-        age_days = int(age_seconds // 86400)
-        return _state("needs_action", f"Backup is stale (last {age_days} days ago)")
-    return _state("ok", "On", last_verified=_mtime(snap))
+    if bstate is None:
+        return _state("needs_action", "No backup yet")
+    now = time.time()
+    failures = bstate.get("consecutive_failures") or 0
+    try:
+        last_success = float(bstate.get("last_success") or 0) or None
+    except (TypeError, ValueError):
+        last_success = None
+    try:
+        restore_point = float(bstate.get("restore_point") or 0) or last_success
+    except (TypeError, ValueError):
+        restore_point = last_success
+    pending, pending_bytes, full = _outbox_summary(home, cfg["backup"])
+    if full:
+        return _state("needs_action",
+                      f"capture paused: {_mb(pending_bytes)} waiting to upload")
+    if not restore_point:
+        return _state("needs_action", "No backup yet"
+                      + (f" ({failures} failed attempts)" if failures else ""))
+    age = now - restore_point
+    detail = f"restore point {_ago(age)}"
+    if pending:
+        detail += f" · {pending} waiting to upload ({_mb(pending_bytes)})"
+    if age > _BACKUP_HEALTHY_S:
+        return _state("needs_action",
+                      f"Backup is out of date: {detail}"
+                      + (f" ({failures} failed attempts)" if failures else ""))
+    if failures and (not last_success or now - last_success > _BACKUP_FAILING_S):
+        return _state("needs_action",
+                      f"Backup upload failing — {detail} ({failures} failed attempts)")
+    return _state("ok", detail, last_verified=_iso(restore_point))
 
 
 def probe_records(home) -> dict:
@@ -262,39 +261,26 @@ def _iso(epoch: float):
 def last_backup_success(home) -> float | None:
     """Epoch seconds of the last SUCCESSFUL backup, or None if unknown.
 
-    The same preference probe_backup applies: backup_state.json's recorded
-    `last_success` when that file exists (a failed upload still refreshes
-    snapshot.enc, so its mtime would lie); only when the state file is
-    ABSENT, a non-empty snapshot.enc's mtime. A file that EXISTS but is
-    corrupt/unparseable is never treated as absent -- it reads as "not
-    fresh" (None), the same as a state file recording no success at all.
-    Public so the reflow seed's backup gate need not reach into this
-    module's private reader."""
+    backup_state.json's recorded `last_success` only. The daemon no longer
+    writes snapshot.enc (an upgraded install may keep a stale one), so a file's
+    mtime says nothing about a backup. A state file that EXISTS but is
+    corrupt reads as "not fresh" (None), the same as one recording no success.
+    Public so the reflow seed's backup gate need not reach into this module's
+    private reader."""
     state = _read_backup_state(home)
-    if state is _CORRUPT:
+    if state is None or state is _CORRUPT:
         return None
-    if state is not None:
-        try:
-            v = float(state.get("last_success") or 0)
-        except (TypeError, ValueError):
-            return None
-        return v or None
-    snap = Path(home) / "snapshot.enc"
     try:
-        st = snap.stat()
-    except OSError:
+        v = float(state.get("last_success") or 0)
+    except (TypeError, ValueError):
         return None
-    return st.st_mtime if st.st_size > 0 else None
+    return v or None
 
 
 # Sentinel: backup_state.json EXISTS but could not be parsed as a JSON object
 # (truncated by a crash mid-write, hand-edited, disk corruption). Distinct
-# from "file absent" (a fresh install, or before the first backup attempt):
-# an absent file legitimately falls back to snapshot.enc's mtime, but a
-# present-and-corrupt one must not -- that mtime is refreshed by every FAILED
-# upload attempt too (the artifact is encrypted locally before the upload),
-# so silently treating "corrupt" the same as "absent" would let a corrupt
-# state file mask a real, ongoing upload failure storm as "On"/fresh.
+# from "file absent" (a fresh install, or before the first backup): a corrupt
+# file must read as "not fresh", never as "no backup yet" or as healthy.
 _CORRUPT = object()
 
 
@@ -302,10 +288,9 @@ def _read_backup_state(home):
     """The daemon's record of the last backup ATTEMPT.
 
     Written by ``daemon.write_backup_state``. Returns None if the file is
-    absent (callers fall back to the older snapshot.enc-mtime heuristic), the
+    absent ("no backup yet"), the
     `_CORRUPT` sentinel if it exists but is not a parseable JSON object
-    (callers must NOT fall back to the mtime heuristic -- treat as not
-    fresh), or the parsed dict otherwise.
+    (treat as not fresh), or the parsed dict otherwise.
     """
     p = Path(home) / "backup_state.json"
     try:

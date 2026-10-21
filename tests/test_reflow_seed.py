@@ -479,14 +479,14 @@ def test_due_rows_still_fill_the_window(tmp_path, monkeypatch):
     assert d._run_reflow_seed()["reflow_seed"] == "window_full"
 
 
-def test_backup_gate_falls_back_to_snapshot_mtime_without_a_state_file(tmp_path, monkeypatch):
-    """Same rule as probes.probe_backup: prefer backup_state.json's recorded
-    success; only when that file is absent, a non-empty fresh snapshot.enc."""
+def test_backup_gate_ignores_a_snapshot_file_without_a_state_file(tmp_path, monkeypatch):
+    """The daemon no longer writes snapshot.enc (an upgraded install may keep a
+    stale one): only backup_state.json's last_success counts."""
     s = _store(tmp_path)
     _c(s, "gmail-N-body-0", source_type="gmail", message_id="N", chunk_total=2)
     (tmp_path / "snapshot.enc").write_bytes(b"x" * 16)
     d = _seed_daemon(tmp_path, monkeypatch, s)
-    assert d._run_reflow_seed()["enqueued"] == 1
+    assert d._run_reflow_seed() == {"reflow_seed": "no_recent_backup"}
 
 
 def test_backup_gate_treats_a_corrupt_state_file_as_not_fresh(tmp_path, monkeypatch):

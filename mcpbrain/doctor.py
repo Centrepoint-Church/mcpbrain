@@ -411,6 +411,9 @@ def run_doctor(home, *, conns=None, repairs=None, reprobe=None, platform=None,
                 lines.append(extra)
                 need_action += int(actionable)
 
+    for line in backup_extra_lines(home):
+        lines.append(line)
+
     lines.append(arch_line())
     lines.append(tenant_line())
 
@@ -648,6 +651,44 @@ def prune_held_line(daemon_status: dict | None) -> str | None:
     return (f"⚠️  {'Backup':<16} old snapshots kept: the newest is "
             f"{ph.get('newest_bytes', 0):,} bytes vs {ph.get('largest_kept_bytes', 0):,} "
             f"— pruning paused so a good snapshot stays restorable")
+
+
+_DISCARD_SHOWN_S = 7 * 86400
+_DELETE_FAILURE_MIN = 3
+
+
+def backup_extra_lines(home, now: float | None = None) -> list[str]:
+    """Extra ⚠️ Backup lines read from LOCAL files only (works with the daemon
+    down; never calls Drive): a damaged local backup the daemon discarded in
+    the last 7 days, and old backup files Drive refuses to let mcpbrain remove.
+    Informational: neither needs the user to run a command."""
+    import json
+    import time
+
+    now = time.time() if now is None else now
+    out: list[str] = []
+    try:
+        state = json.loads((Path(home) / "backup_state.json").read_text())
+        disc = state.get("last_discard") if isinstance(state, dict) else None
+        at = float(disc["at"]) if isinstance(disc, dict) else None
+    except (OSError, ValueError, KeyError, TypeError):
+        at = disc = None
+    if at is not None and 0 <= now - at <= _DISCARD_SHOWN_S:
+        from mcpbrain.probes import _ago
+        reason = disc.get("reason") or "unreadable"
+        out.append(f"⚠️  {'Backup':<16} a damaged local backup was discarded "
+                   f"{_ago(now - at)} ({reason}); a fresh full backup was started")
+    try:
+        from mcpbrain import backup_uploader
+        fails = backup_uploader.load_journal(home).get("delete_failures") or {}
+        n = sum(1 for v in fails.values()
+                if isinstance(v, dict) and (v.get("count") or 0) >= _DELETE_FAILURE_MIN)
+    except Exception:  # noqa: BLE001 -- a diagnostic must never break doctor
+        n = 0
+    if n:
+        out.append(f"⚠️  {'Backup':<16} {n} old backup file(s) Drive will not let "
+                   f"mcpbrain remove (check the backup folder's permissions)")
+    return out
 
 
 def tenant_line() -> str:
