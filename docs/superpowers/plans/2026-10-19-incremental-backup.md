@@ -72,7 +72,7 @@
   - `test_drive_id_used_as_is` — `shared_drive_id="0Adrive"` that `drives().get` accepts → `loc.drive_id == "0Adrive"`.
   - `test_folder_id_resolves_to_its_drive` — `shared_drive_id="1folder"`, `drives().get` raises 404, `files().get` returns `{"driveId": "0Adrive"}` → `loc.drive_id == "0Adrive"`.
   - `test_person_is_lowercased_email` — owner_email `Dana.Okafor@Example.org` → `loc.person == "dana.okafor@example.org"`.
-  - `test_legacy_folders_found_and_deduplicated` — fake holds `<root>/dana-okafor` and `<escrow>/dana.okafor@…` → both ids in `legacy_folders`, in that order.
+  - `test_legacy_folders_found_and_deduplicated` — fake holds `<root>/<user_id>` (e.g. `dana-okafor`) and `<escrow>/<email>` → both ids in `legacy_folders`, in that order.
   - `test_create_makes_person_folder_once` — `create=True` twice → exactly one `files().create` with `parents=[drive_id]`, `name=person`.
   - `test_no_email_raises`.
 - [ ] **Step 2:** Run `uv run pytest tests/test_backup_location.py -q` → FAIL (module missing).
@@ -317,7 +317,7 @@
 
 - [ ] **Step 1:** Update the docs.
 - [ ] **Step 2:** Local install per CLAUDE.md (bootout → `uv tool install --reinstall --force ".[daemon]"` → clear `__pycache__` → bootstrap); confirm the installed files contain `backup_outbox.py` and `upload_step`.
-- [ ] **Step 3:** `mcpbrain backup` → base captured and committed; record outbox size, upload time, Drive layout (`<root>/dana.okafor@example.org/chain-…/`).
+- [ ] **Step 3:** `mcpbrain backup` → base captured and committed; record outbox size, upload time, Drive layout (`<root>/<owner email, lower-cased>/chain-…/`).
 - [ ] **Step 4:** Wait for the next hourly capture (or `mcpbrain backup` again) → a delta committed; record its size.
 - [ ] **Step 5:** Kill the daemon mid-upload of a base or delta (`launchctl kickstart -k`), confirm the resumed upload sends only the remainder (journal offset before/after).
 - [ ] **Step 6:** `mcpbrain restore --check` names the new chain, not the 16 June legacy file. Restore into a scratch path with `restore_latest(..., dest_store=<scratch>, swap=lambda s, d: os.replace(s, d))` and confirm `integrity_check` ok and the db sha256 equals the manifest's.

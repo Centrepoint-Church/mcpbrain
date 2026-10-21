@@ -16,9 +16,9 @@ def test_enable_writes_config_and_escrows(tmp_path, monkeypatch):
     monkeypatch.setattr(backup_setup, "_resolve_shared_drive", lambda svc, **kw: "SHARED1")
     monkeypatch.setattr(backup_setup, "_drive_id_of", lambda svc, fid: fid)
     monkeypatch.setattr(backup_setup, "_escrow_key_to_drive", lambda svc, uid, key, **kw: uploaded.setdefault("k", (uid, key)))
-    cfg = backup_setup.enable_backup(str(tmp_path), drive_service=object(), user_id="josh@x.com")
-    assert cfg["backup"]["escrow_key"] and cfg["backup"]["shared_drive_id"] == "SHARED1" and cfg["backup"]["user_id"] == "josh@x.com"
-    assert uploaded["k"][0] == "josh@x.com"
+    cfg = backup_setup.enable_backup(str(tmp_path), drive_service=object(), user_id="dana@x.com")
+    assert cfg["backup"]["escrow_key"] and cfg["backup"]["shared_drive_id"] == "SHARED1" and cfg["backup"]["user_id"] == "dana@x.com"
+    assert uploaded["k"][0] == "dana@x.com"
 
 
 def test_enable_idempotent_keeps_existing_key(tmp_path, monkeypatch):
@@ -66,7 +66,7 @@ def test_enable_backup_escrows_to_configured_shared_drive(tmp_path, monkeypatch)
 
     monkeypatch.setattr(backup_setup, "_escrow_key_to_drive", _fake_escrow)
     monkeypatch.setattr(backup_setup, "_drive_id_of", lambda svc, fid: "0Adrive")
-    cfg = backup_setup.enable_backup(str(tmp_path), drive_service=object(), user_id="josh@x.com")
+    cfg = backup_setup.enable_backup(str(tmp_path), drive_service=object(), user_id="dana@x.com")
     assert captured["folder_id"] == "ESCROW1"
     assert cfg["backup"]["shared_drive_id"] == "0Adrive"
 

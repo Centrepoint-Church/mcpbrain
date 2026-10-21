@@ -13,7 +13,7 @@ Date: 2026-10-19. Status: approved design (owner, in session), implementation fo
 2. **Uploads and auto-restore use different folders, and fresh installs cannot
    upload at all.** Verified live 2026-10-19:
    - The daemon uploads to `<backup.shared_drive_id>/<backup.user_id>/`. On the
-     owner's machine that is `MCPBrain Backups/dana-okafor/` (7 current
+     owner's machine that is `MCPBrain Backups/<backup.user_id>/` (the owner's per-user folder) (7 current
      snapshots).
    - Auto-restore (`restore.detect_restorable` → `find_latest_in_subfolder`)
      reads `<escrow folder>/<account email>/`, which holds ONE snapshot from
