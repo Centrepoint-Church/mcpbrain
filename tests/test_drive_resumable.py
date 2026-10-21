@@ -227,13 +227,14 @@ def test_chunk_halves_on_failure_and_regrows(tmp_path):
     assert server.files[meta["id"]] == p.read_bytes()
 
 
-def test_chunk_never_shrinks_below_8_mib(tmp_path):
+def test_chunk_never_shrinks_below_2_mib(tmp_path):
+    assert dr.CHUNK_MIN == 2 * MiB and dr.CHUNK_MIN % (256 * 1024) == 0
     p = _file(tmp_path, 9 * MiB)
     server = FakeDrive()
     fails = [0]
 
     def hook(n, method, headers, body):
-        if method == "PUT" and body and fails[0] < 4:
+        if method == "PUT" and body and fails[0] < 5:
             fails[0] += 1
             raise ConnectionResetError("reset")
         return None
@@ -241,8 +242,9 @@ def test_chunk_never_shrinks_below_8_mib(tmp_path):
     t = FakeTransport(server, hook)
     _upload(t, p)
     sizes = [s // MiB for s in t.chunk_sizes()]
-    # min(chunk, remaining): chunk 32 -> 16 -> 8 -> 8 -> 8, then the 1 MiB tail.
-    assert sizes == [9, 9, 8, 8, 8, 1]
+    # min(chunk, remaining): chunk 32 -> 16 -> 8 -> 4 -> 2 -> 2 (floor), then
+    # three clean 2 MiB chunks regrow it to 4 for the 3 MiB tail.
+    assert sizes == [9, 9, 8, 4, 2, 2, 2, 2, 3]
 
 
 def test_transient_status_backs_off_and_resumes(tmp_path):

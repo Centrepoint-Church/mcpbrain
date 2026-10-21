@@ -155,7 +155,7 @@ Each loop iteration spends at most `upload_budget_s` (default 60 s) on:
    after every confirmed chunk. On wake, restart or a new iteration, an
    in-flight file resumes by status query. A session Drive no longer knows
    (404/410) restarts that file from zero.
-3. Chunk size adapts: 32 MiB, halving to 8 MiB after a failed chunk, growing
+3. Chunk size adapts: 32 MiB, halving to 2 MiB after a failed chunk, growing
    back after 3 clean ones (multiples of 256 KiB).
 4. A file is done when Drive's response `size` and `md5Checksum` equal the
    local ones. Its file id goes into the journal and the local file is

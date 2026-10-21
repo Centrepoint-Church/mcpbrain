@@ -50,10 +50,11 @@ _INITIATE_URL = ("https://www.googleapis.com/upload/drive/v3/files"
 # Drive requires every non-final chunk to be a multiple of 256 KiB.
 _QUANTUM = 256 * 1024
 # Start large (fewer round trips on a good link), halve after a failed chunk so
-# a flaky link loses less per drop, never below 8 MiB, regrow after
+# a flaky link loses less per drop, never below 2 MiB (a hotspot that drops
+# every few MiB still lands chunks), regrow after
 # _REGROW_AFTER clean chunks in a row.
 CHUNK_MAX = 32 * 1024 * 1024
-CHUNK_MIN = 8 * 1024 * 1024
+CHUNK_MIN = 2 * 1024 * 1024
 _REGROW_AFTER = 3
 
 # Consecutive failures with no byte confirmed in between before giving up. The
