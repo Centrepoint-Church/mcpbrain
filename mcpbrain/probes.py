@@ -262,8 +262,8 @@ def last_backup_success(home) -> float | None:
     """Epoch seconds of the last SUCCESSFUL backup, or None if unknown.
 
     backup_state.json's recorded `last_success` only. The daemon no longer
-    writes snapshot.enc (an upgraded install may keep a stale one), so a file's
-    mtime says nothing about a backup. A state file that EXISTS but is
+    writes snapshot.enc (an upgraded install's stale one is deleted after the
+    first new-layout commit), so a file's mtime says nothing about a backup. A state file that EXISTS but is
     corrupt reads as "not fresh" (None), the same as one recording no success.
     Public so the reflow seed's backup gate need not reach into this module's
     private reader."""

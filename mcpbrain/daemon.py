@@ -3235,6 +3235,7 @@ class Daemon:
             self._upload_failures = 0
             if result.committed:
                 self._backup_failures = 0
+                _remove_legacy_snapshot(home)
 
         # Every upload step re-checks the outbox-full pause (cheap), so a
         # drained outbox resumes capture on the next iteration.
@@ -5340,6 +5341,28 @@ def write_daemon_heartbeat(home) -> None:
             json.dumps({"last_cycle": stamp}))
     except OSError as exc:
         log.warning("daemon heartbeat write failed (continuing): %s", exc)
+
+
+LEGACY_SNAPSHOT_NAME = "snapshot.enc"
+
+
+def _remove_legacy_snapshot(home) -> bool:
+    """Delete the old full-snapshot artifact (`<app dir>/snapshot.enc`, ~800 MB
+    on an upgraded install) once the new layout has committed a restore point
+    on Drive: it is never read or written again. Best-effort and logged; True
+    when a file was removed."""
+    path = Path(home) / LEGACY_SNAPSHOT_NAME
+    try:
+        size = path.stat().st_size
+        path.unlink()
+    except FileNotFoundError:
+        return False
+    except OSError as exc:
+        log.warning("could not remove the old backup file %s: %s", path, exc)
+        return False
+    log.info("removed the old full-snapshot backup file %s (%.0f MB); the new "
+             "backup layout has committed a restore point", path, size / 1e6)
+    return True
 
 
 def maybe_restore_on_first_run(store, home) -> bool:

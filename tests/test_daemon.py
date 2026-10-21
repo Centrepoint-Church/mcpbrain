@@ -2379,3 +2379,33 @@ def test_run_loop_does_not_wait_interval_while_uploads_progress(tmp_path, monkey
     monkeypatch.setattr(daemon_module, "write_daemon_heartbeat", lambda home: None)
     dm.run()
     assert waits == [1.0, 1.0, 300.0, 300.0]
+
+
+def test_first_commit_removes_the_stale_legacy_snapshot(tmp_path, bk, monkeypatch):
+    """An upgraded install keeps ~800 MB of snapshot.enc it never reads again;
+    it goes once the new layout commits, and not before."""
+    stale = Path(bk) / "snapshot.enc"
+    stale.write_bytes(b"old full snapshot")
+    cfg = _backup_config()
+    daemon = _daemon(tmp_path, cfg)
+    daemon.maybe_backup()
+    results = iter([
+        _bu.StepResult([], {"sent": 1}, None, 1, 10, moved=True),   # no commit yet
+        _bu.StepResult(["item"], None, None, 0, 0, moved=True),
+    ])
+    monkeypatch.setattr(daemon_module.backup_uploader, "upload_step",
+                        lambda home, **kw: next(results))
+    daemon.upload_backup_step()
+    assert stale.exists()
+    daemon.upload_backup_step()
+    assert not stale.exists()
+
+
+def test_legacy_snapshot_removal_is_best_effort(tmp_path, monkeypatch):
+    assert daemon_module._remove_legacy_snapshot(tmp_path) is False   # absent
+    (tmp_path / "snapshot.enc").write_bytes(b"x")
+
+    def refuse(self, *a, **k):
+        raise PermissionError("nope")
+    monkeypatch.setattr(Path, "unlink", refuse)
+    assert daemon_module._remove_legacy_snapshot(tmp_path) is False
