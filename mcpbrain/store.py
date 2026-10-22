@@ -226,6 +226,52 @@ def _merge_entities_tx(db, loser_id, winner_id, *, canonical_name=None,
         snap["winner_distinct_pairs"] = [dict(r) for r in db.execute(
             "SELECT * FROM entity_distinct_pairs WHERE a=? OR b=?", (winner_id, winner_id))]
 
+    # --- independent-source support follows a collided relation -------------
+    # A loser relation whose triple already exists on the winner is DELETED
+    # below, and its relation_sources rows cascade with it. Move them onto the
+    # surviving winner copy first (spec 2026-10-22 §3), so a merge of {T1} and
+    # {T2,T3} supports the edge with 3 sources, not 1. The loser's own source
+    # rows are snapshotted (restored with it on unmerge) and the rows this adds
+    # to the winner copy are recorded (removed on unmerge); the winner copy's
+    # prior strength/derived/legacy_strength is in `collisions` already.
+    snap["relation_sources"] = []
+    snap["moved_sources"] = []
+    has_sources = table_exists("relation_sources")
+    if has_sources and rels:
+        snap["relation_sources"] = [dict(r) for r in db.execute(
+            "SELECT * FROM relation_sources WHERE relation_id IN "
+            "(SELECT id FROM entity_relations WHERE entity_a=? OR entity_b=?)",
+            (loser_id, loser_id))]
+        from mcpbrain import graph_write as _gw
+        for r in rels:
+            a, b = sub(r["entity_a"]), sub(r["entity_b"])
+            if a == b:
+                continue                     # becomes a self-loop: swept below
+            w = db.execute("SELECT * FROM entity_relations WHERE entity_a=? AND relation=? "
+                           "AND entity_b=? AND id != ?", (a, r["relation"], b, r["id"])
+                           ).fetchone()
+            if w is None:
+                continue                     # repointed in place, sources stay
+            _gw._preserve_legacy_strength(db, w["id"])
+            for src in [x for x in snap["relation_sources"] if x["relation_id"] == r["id"]]:
+                cur = db.execute(
+                    "INSERT OR IGNORE INTO relation_sources"
+                    "(relation_id, source_key, source_class, first_seen) VALUES(?,?,?,?)",
+                    (w["id"], src["source_key"], src["source_class"], src["first_seen"]))
+                if cur.rowcount:
+                    snap["moved_sources"].append([w["id"], src["source_key"]])
+            # Prefer a non-derived survivor: the winner's copy was derived
+            # (no primary source) and the loser's is real -> the copy takes
+            # the loser's standing.
+            if (w["derived"] or 0) and not (r.get("derived") or 0):
+                db.execute("UPDATE entity_relations SET derived=0, strength=?, "
+                           "legacy_strength=? WHERE id=?",
+                           (r.get("strength"), r.get("legacy_strength"), w["id"]))
+            if db.execute("SELECT 1 FROM relation_sources WHERE relation_id=? AND "
+                          f"source_class IN {_gw._EVIDENCE_SQL}", (w["id"],)).fetchone():
+                db.execute("UPDATE entity_relations SET strength=?, derived=0 WHERE id=?",
+                           (_gw.relation_strength(db, w["id"]), w["id"]))
+
     # --- the merge itself: the pre-existing statements, unchanged ------------
     # Repoint relations onto the winner; UPDATE OR IGNORE drops rows that
     # would collide with an existing winner triple (the UNIQUE index).
@@ -423,6 +469,14 @@ def _unmerge_tx(db, snap: dict) -> None:
     for rid, ptr in snap.get("relation_pointers", []):
         db.execute("UPDATE entity_relations SET invalidated_by_relation_id=? WHERE id=?",
                    (ptr, rid))
+    # Independent-source rows: drop what the merge added to the winner's
+    # copies, put the loser relations' own rows back (they cascaded away with
+    # any collided loser relation). Older snapshots have neither key.
+    for wid, key in snap.get("moved_sources", []):
+        db.execute("DELETE FROM relation_sources WHERE relation_id=? AND source_key=?",  # admin-delete-ok
+                   (wid, key))
+    for src in snap.get("relation_sources", []):
+        _insert_row(db, "relation_sources", src, or_ignore=True)
     for oid in snap["observation_ids"]:
         db.execute("UPDATE entity_observations SET entity_id=? WHERE id=?", (loser_id, oid))
     overlap = set(snap["winner_email_overlap"])
@@ -5522,6 +5576,11 @@ class Store:
 
     def entity_degrees(self, ent_ids) -> dict[str, int]:
         """id -> number of non-invalidated relations touching it (0 if none).
+
+        Derived rows (no primary source) are not counted. Legacy rows (strength
+        predating source counting) still are: degree counts edges, not their
+        support, so a legacy edge is still an edge until Task 10's clean-up
+        decides otherwise.
 
         Every requested id gets a key, so a caller can compare against a
         threshold without a `.get(id, 0)` at each site. Counts BOTH directions,

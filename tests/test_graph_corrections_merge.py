@@ -272,3 +272,58 @@ def test_round_trip_restores_non_colliding_winner_self_loop(tmp_path):
     with s._connect(write=True) as db:
         _unmerge_tx(db, snap)
     assert _state(s) == before
+
+
+def test_merge_sums_independent_sources_and_unmerge_round_trips(tmp_path):
+    """A collided loser relation's sources move onto the surviving winner
+    copy: {T1} + {T2,T3} -> strength 3. Unmerge restores both rows and their
+    source rows exactly."""
+    from mcpbrain import graph_write as gw
+    s = _store(tmp_path)
+    with s._connect(write=True) as db:
+        db.execute("INSERT INTO entity_relations(entity_a,relation,entity_b,strength) "
+                   "VALUES(?, 'manages', ?, 1)", (L, C))
+        db.execute("INSERT INTO entity_relations(entity_a,relation,entity_b,strength) "
+                   "VALUES(?, 'manages', ?, 2)", (W, C))
+        lid = db.execute("SELECT id FROM entity_relations WHERE entity_a=? AND relation='manages'",
+                         (L,)).fetchone()[0]
+        wid = db.execute("SELECT id FROM entity_relations WHERE entity_a=? AND relation='manages'",
+                         (W,)).fetchone()[0]
+        gw.record_relation_source(db, lid, "T1", "primary_mail")
+        gw.record_relation_source(db, wid, "T2", "primary_mail")
+        gw.record_relation_source(db, wid, "T3", "primary_doc")
+
+    def state():
+        with s._connect() as db:
+            return (_state(s), sorted(tuple(r) for r in db.execute(
+                "SELECT relation_id, source_key, source_class FROM relation_sources")))
+    before = state()
+    with s._connect(write=True) as db:
+        snap = _merge_entities_tx(db, L, W, method="user")
+    with s._connect() as db:
+        row = db.execute("SELECT id, strength, derived FROM entity_relations "
+                         "WHERE entity_a=? AND relation='manages'", (W,)).fetchone()
+        keys = {r[0] for r in db.execute(
+            "SELECT source_key FROM relation_sources WHERE relation_id=?", (row["id"],))}
+    assert row["id"] == wid and row["strength"] == 3 and keys == {"T1", "T2", "T3"}
+    with s._connect(write=True) as db:
+        _unmerge_tx(db, snap)
+    assert state() == before
+
+
+def test_merge_prefers_non_derived_survivor(tmp_path):
+    from mcpbrain import graph_write as gw
+    s = _store(tmp_path)
+    with s._connect(write=True) as db:
+        db.execute("INSERT INTO entity_relations(entity_a,relation,entity_b,strength) "
+                   "VALUES(?, 'manages', ?, 1)", (L, C))
+        db.execute("INSERT INTO entity_relations(entity_a,relation,entity_b,strength,derived) "
+                   "VALUES(?, 'manages', ?, 0, 1)", (W, C))
+        lid = db.execute("SELECT id FROM entity_relations WHERE entity_a=? AND relation='manages'",
+                         (L,)).fetchone()[0]
+        gw.record_relation_source(db, lid, "T1", "primary_mail")
+    s.merge_entities(L, W)
+    with s._connect() as db:
+        row = db.execute("SELECT strength, derived FROM entity_relations "
+                         "WHERE entity_a=? AND relation='manages'", (W,)).fetchone()
+    assert (row["strength"], row["derived"]) == (1, 0)

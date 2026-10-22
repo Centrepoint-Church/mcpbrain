@@ -152,13 +152,20 @@ def _rel_filters(db, alias: str = "") -> tuple[str, str]:
 
     Strength counts independent primary sources (spec 2026-10-22 §3): a
     derived=1 row (written from mcpbrain's own notes/briefs/drafts) is no
-    evidence and is excluded; an origin='legacy' row (its strength predates
-    source counting) never outranks a counted one. Column-aware — stores
-    that predate either column read as before."""
+    evidence and is excluded. A LEGACY row — legacy_strength recorded, or no
+    relation_sources rows at all, i.e. its strength predates source counting
+    (+1 per sighting) — never outranks a source-counted one. Column/table
+    aware: a store that predates them reads as before."""
     cols = {r["name"] for r in db.execute("PRAGMA table_info(entity_relations)")}
-    p = f"{alias}." if alias else ""
+    p = f"{alias}." if alias else "entity_relations."
     where = f" AND COALESCE({p}derived, 0) = 0" if "derived" in cols else ""
-    order = f"(COALESCE({p}origin, '') = 'legacy'), " if "origin" in cols else ""
+    legacy = []
+    if "legacy_strength" in cols:
+        legacy.append(f"{p}legacy_strength IS NOT NULL")
+    if "id" in cols and _table_exists(db, "relation_sources"):
+        legacy.append("NOT EXISTS (SELECT 1 FROM relation_sources rs_l "
+                      f"WHERE rs_l.relation_id = {p}id)")
+    order = f"({' OR '.join(legacy)}), " if legacy else ""
     return where, order
 
 

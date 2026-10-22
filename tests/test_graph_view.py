@@ -445,7 +445,8 @@ def test_ego_without_suppressions_table(tmp_path):
 
 def test_graph_view_ignores_derived_and_legacy(tmp_path):
     """Derived rows (no primary source) are not graph edges; legacy rows
-    (pre-source-counting strength) never outrank a counted relation."""
+    (legacy_strength set, or no relation_sources rows — their strength
+    predates source counting) never outrank a source-counted relation."""
     p = tmp_path / "b.sqlite3"
     _seed(p,
           entities=[("e1", "Alice", "person", "Acme", 9, "2026-06-01"),
@@ -455,11 +456,15 @@ def test_graph_view_ignores_derived_and_legacy(tmp_path):
                      ("e2", "e3", "manages", 1)])
     with sqlite3.connect(str(p)) as db:
         db.execute("ALTER TABLE entity_relations ADD COLUMN derived INTEGER NOT NULL DEFAULT 0")
-        db.execute("ALTER TABLE entity_relations ADD COLUMN origin TEXT DEFAULT 'local'")
+        db.execute("ALTER TABLE entity_relations ADD COLUMN legacy_strength INTEGER")
         db.execute("ALTER TABLE entity_relations ADD COLUMN invalidated_at TEXT")
+        db.execute("CREATE TABLE relation_sources(relation_id INTEGER, source_key TEXT, "
+                   "source_class TEXT, first_seen TEXT)")
+        knows = db.execute("SELECT id FROM entity_relations WHERE relation='knows'").fetchone()[0]
+        db.execute("INSERT INTO relation_sources VALUES(?, 't1', 'primary_mail', '')", (knows,))
+        db.execute("INSERT INTO relation_sources VALUES(?, 't2', 'primary_mail', '')", (knows,))
         db.execute("ALTER TABLE entities ADD COLUMN aliases TEXT DEFAULT ''")
         db.execute("ALTER TABLE entities ADD COLUMN notes TEXT DEFAULT ''")
-        db.execute("UPDATE entity_relations SET origin='legacy' WHERE relation='involved_in'")
         db.execute("UPDATE entity_relations SET derived=1 WHERE relation='manages'")
     out = graph_view.graph_canvas(_Store(p), min_conn=7)
     assert [link["relation"] for link in out["links"]] == ["knows", "involved_in"]
@@ -467,3 +472,11 @@ def test_graph_view_ignores_derived_and_legacy(tmp_path):
     assert [r["relation"] for r in d["relations"] + d["backlinks"]] == ["knows"]
     ego = graph_view.graph_ego(_Store(p), "e2", hops=1)
     assert {link["relation"] for link in ego["links"]} == {"knows"}
+
+    # legacy_strength marks a row legacy even when it now has a source row.
+    with sqlite3.connect(str(p)) as db:
+        inv = db.execute("SELECT id FROM entity_relations WHERE relation='involved_in'").fetchone()[0]
+        db.execute("INSERT INTO relation_sources VALUES(?, 't9', 'primary_mail', '')", (inv,))
+        db.execute("UPDATE entity_relations SET legacy_strength=40 WHERE id=?", (inv,))
+    out = graph_view.graph_canvas(_Store(p), min_conn=7)
+    assert [link["relation"] for link in out["links"]] == ["knows", "involved_in"]

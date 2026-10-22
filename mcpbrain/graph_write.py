@@ -262,6 +262,7 @@ def fetch_role(store, entity_id: str, *, current_only: bool = True) -> str:
                WHERE  entity_id = ?
                  AND  attribute  = 'role'
                  AND  (invalidated_at IS NULL OR invalidated_at = '')
+                 AND  COALESCE(derived, 0) = 0
                  {valid_to_clause}
                ORDER  BY valid_from DESC, id DESC
                LIMIT  1""",
@@ -319,6 +320,7 @@ def write_observation(store, entity_id: str, attribute: str, value: str, source:
                 if conn.execute(
                     "SELECT 1 FROM entity_observations "
                     "WHERE entity_id = ? AND attribute = ? AND valid_to IS NULL "
+                    "AND COALESCE(derived, 0) = 0 "
                     "AND source IN ('email_signature', 'from_header', 'body_mention')",
                     (entity_id, attribute),
                 ).fetchone():
@@ -374,10 +376,11 @@ def write_observation(store, entity_id: str, attribute: str, value: str, source:
             "AND valid_to IS NULL AND valid_from <= ?",
             (valid_from, entity_id, attribute, source, valid_from),
         )
+        # A derived row is no fact: it never makes this one historical.
         newer = conn.execute(
             "SELECT MIN(valid_from) FROM entity_observations "
             "WHERE entity_id = ? AND attribute = ? AND source = ? "
-            "AND valid_to IS NULL AND valid_from > ?",
+            "AND valid_to IS NULL AND valid_from > ? AND COALESCE(derived, 0) = 0",
             (entity_id, attribute, source, valid_from),
         ).fetchone()[0]
         oid = conn.execute(
@@ -419,11 +422,18 @@ def consolidate_observations(store) -> dict:
     For each (entity_id, attribute, value) group of *current* rows (valid_to
     NULL, not invalidated), keep the earliest row, set its observed_count to the
     group size and last_seen to the group's max date, and delete the rest.
-    Historical/retired rows are left untouched. Returns counts. Idempotent."""
+    Historical/retired rows are left untouched. Returns counts. Idempotent.
+
+    Independent-source support (spec 2026-10-22 §3): the kept row is the
+    earliest NON-derived member when there is one; the deleted members'
+    observation_sources rows move onto it first (they would cascade away);
+    when the group has any evidence source, observed_count is the kept row's
+    distinct evidence-source count rather than the group size."""
     removed = groups = 0
     with store._connect(write=True) as conn:
         rows = conn.execute(
-            "SELECT id, entity_id, attribute, value, valid_from, last_seen "
+            "SELECT id, entity_id, attribute, value, valid_from, last_seen, "
+            "COALESCE(derived, 0) AS derived "
             "FROM entity_observations "
             "WHERE valid_to IS NULL AND (invalidated_at IS NULL OR invalidated_at = '') "
             "ORDER BY entity_id, attribute, value, valid_from, id"
@@ -435,13 +445,22 @@ def consolidate_observations(store) -> dict:
             if len(members) < 2:
                 continue
             groups += 1
-            keep = members[0]
+            keep = next((m for m in members if not m["derived"]), members[0])
             last = max((m["last_seen"] or m["valid_from"] or "") for m in members)
+            loser_ids = [m["id"] for m in members if m["id"] != keep["id"]]
+            for lid in loser_ids:
+                conn.execute(
+                    "INSERT OR IGNORE INTO observation_sources "
+                    "(observation_id, source_key, source_class, first_seen) "
+                    "SELECT ?, source_key, source_class, first_seen "
+                    "FROM observation_sources WHERE observation_id = ?", (keep["id"], lid))
+            support = observation_support(conn, keep["id"])
             conn.execute(
-                "UPDATE entity_observations SET observed_count = ?, last_seen = ? WHERE id = ?",
-                (len(members), last, keep["id"]),
+                "UPDATE entity_observations SET observed_count = ?, last_seen = ?, "
+                "derived = ? WHERE id = ?",
+                (support or (sum(1 for m in members if not m["derived"]) or 1), last,
+                 1 if all(m["derived"] for m in members) else 0, keep["id"]),
             )
-            loser_ids = [m["id"] for m in members[1:]]
             conn.executemany(
                 "DELETE FROM entity_observations WHERE id = ?",  # admin-delete-ok
                 [(i,) for i in loser_ids],
@@ -590,7 +609,8 @@ def decay_relations(store, *, stale_days: int = 365, weak_max: int = 1,
     (relation_sources) is never decayed: strength now counts independent
     primary sources, so most real relations sit at 1 — "weak" no longer means
     "a one-off co-occurrence" for them, only for unsourced (legacy/structural)
-    rows."""
+    rows. A relation the user asserted (brain_graph_correct) is never
+    decayed either — it counts at least 1 by the user's word."""
     from datetime import datetime, timedelta, timezone
     now = datetime.now(timezone.utc) if as_of is None else datetime.fromisoformat(as_of)
     cutoff = (now - timedelta(days=int(stale_days))).strftime("%Y-%m-%d")
@@ -602,6 +622,7 @@ def decay_relations(store, *, stale_days: int = 365, weak_max: int = 1,
             "WHERE COALESCE(strength, 1) > 0 AND COALESCE(strength, 1) <= ? "
             "AND COALESCE(last_seen, valid_from, '') <> '' "
             "AND COALESCE(last_seen, valid_from) < ? "
+            "AND COALESCE(user_verdict, '') <> 'asserted' "
             "AND NOT EXISTS (SELECT 1 FROM relation_sources rs "
             "                WHERE rs.relation_id = entity_relations.id "
             f"                  AND rs.source_class IN {_EVIDENCE_SQL})",
@@ -643,6 +664,28 @@ def _increment_degree(conn, entity_a, entity_b):
         "UPDATE entities SET degree = degree + 1 WHERE id IN (?, ?)",
         (entity_a, entity_b),
     )
+
+
+def _preserve_legacy_strength(conn, relation_id) -> None:
+    """Before the FIRST source is recorded on a pre-existing row: a row with
+    no relation_sources rows carries a pre-source-counting strength (+1 per
+    sighting). Keep it in legacy_strength (first value wins) so the reset to
+    the distinct-source count is not data loss — Task 10's backfill and
+    the graph view's legacy ordering read it."""
+    conn.execute(
+        "UPDATE entity_relations SET legacy_strength = COALESCE(legacy_strength, strength) "
+        "WHERE id = ? AND COALESCE(strength, 1) > 1 "
+        "AND NOT EXISTS (SELECT 1 FROM relation_sources WHERE relation_id = ?)",
+        (relation_id, relation_id))
+
+
+def legacy_relation_sql(alias: str = "") -> str:
+    """SQL truth value: this relation's strength is NOT a distinct-source count
+    (legacy_strength recorded, or no relation_sources rows at all). Such rows
+    never outrank a source-counted one. Not origin — origin is local/org."""
+    p = f"{alias}." if alias else "entity_relations."
+    return (f"({p}legacy_strength IS NOT NULL OR NOT EXISTS "
+            f"(SELECT 1 FROM relation_sources rs_l WHERE rs_l.relation_id = {p}id))")
 
 
 def _promote_to_evidence(conn, relation_id) -> None:
@@ -767,6 +810,7 @@ def upsert_relation_in(conn, entity_a, relation, entity_b, *, valid_from,
     if same_target:
         rid = same_target[0]["id"]
         if evidence_write:
+            _preserve_legacy_strength(conn, rid)
             if record_relation_source(conn, rid, source_key, cls_value):
                 _bump_observation(conn, rid, last_seen=now,
                                   confidence_delta=CONFIDENCE_BUMP)
@@ -810,6 +854,7 @@ def upsert_relation_in(conn, entity_a, relation, entity_b, *, valid_from,
         return invalidated["id"]
     if invalidated is not None:
         new_id = invalidated["id"]
+        _preserve_legacy_strength(conn, new_id)
         conn.execute(
             "UPDATE entity_relations "
             "SET valid_from = ?, valid_to = NULL, invalidated_at = NULL, "
@@ -1320,9 +1365,10 @@ def extraction_sources(store, doc_ids, *, thread_id="", home=None,
 
     An extraction is one thread (thread_enrich groups by logical source), so
     every evidence chunk of it shares one source_key; the first evidence
-    chunk's key/class is returned. A duplicate (chunks.dup_of) carries its
-    CANONICAL chunk's key and class (followed once) — it adds no support the
-    canonical did not already give. With no evidence chunk the first chunk's
+    chunk's key/class is returned — a NON-duplicate one first. A duplicate
+    (chunks.dup_of) carries its CANONICAL chunk's key and class (followed
+    once), used only when every evidence chunk is a duplicate — it adds no
+    support the canonical did not already give. With no evidence chunk the first chunk's
     derived class is returned (session/brief/draft/consolidated/digest/
     duplicate-of-nothing). A doc id with no chunk row is classified from the
     id alone (``enriched-`` → digest, ``note-consolidated-`` → consolidated)
@@ -1362,11 +1408,19 @@ def extraction_sources(store, doc_ids, *, thread_id="", home=None,
     canon = _rows(canon_ids) if canon_ids else {}
     canon.update(rows)
 
+    # An extraction's OWN evidence wins: a non-duplicate evidence chunk keys
+    # it on its own source. Only when every evidence chunk is a duplicate is
+    # the canonical's key borrowed (it then adds nothing the canonical did not
+    # already give). Crediting a mixed extraction to the canonical's source
+    # would misattribute this thread's own claims.
+    first_dup_evidence = None
     first_derived = None
     for d in ids:
+        is_dup = False
         if d in rows:
             meta, dup = rows[d]
             if dup:
+                is_dup = True
                 if dup not in canon:
                     cls = _sc.SourceClass.DUPLICATE
                     key = _sc.source_key(d, meta)
@@ -1381,10 +1435,13 @@ def extraction_sources(store, doc_ids, *, thread_id="", home=None,
             cls = _sc.classify(d, {}, rules)
             key = thread_id or d
         if _sc.is_evidence(cls):
-            return key, cls.value
-        if first_derived is None:
+            if not is_dup:
+                return key, cls.value
+            if first_dup_evidence is None:
+                first_dup_evidence = (key, cls.value)
+        elif first_derived is None:
             first_derived = (key, cls.value)
-    return first_derived
+    return first_dup_evidence or first_derived
 
 
 def apply(store, extraction, *, doc_ids, identity=None,

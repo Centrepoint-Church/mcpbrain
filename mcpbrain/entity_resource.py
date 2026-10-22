@@ -54,7 +54,8 @@ def _ranked_role(db, eid: str) -> str:
     rows = db.execute(
         "SELECT id, value, source, valid_from FROM entity_observations "
         "WHERE entity_id=? AND attribute='role' AND (valid_to IS NULL OR valid_to='') "
-        "AND (invalidated_at IS NULL OR invalidated_at='')", (eid,)).fetchall()
+        "AND (invalidated_at IS NULL OR invalidated_at='') "
+        "AND COALESCE(derived, 0) = 0", (eid,)).fetchall()
     if not rows:
         return ""
     best = max(rows, key=lambda r: (_source_rank(r["source"]), r["valid_from"] or "", r["id"]))
@@ -116,6 +117,7 @@ def render_markdown(store, entity_id: str) -> dict | None:
             "SELECT attribute, value, source, valid_from FROM entity_observations "
             "WHERE entity_id=? AND valid_to IS NULL "
             "AND (invalidated_at IS NULL OR invalidated_at='') AND attribute != 'occurrence' "
+            "AND COALESCE(derived, 0) = 0 "   # derived: no primary source behind it
             "ORDER BY valid_from DESC LIMIT ?", (eid, MAX_OBSERVATIONS)).fetchall()
         role = _ranked_role(db, eid)
     header = ", ".join(_collapse_ws(x) for x in (ent["type"], ent.get("org") or "") if x)

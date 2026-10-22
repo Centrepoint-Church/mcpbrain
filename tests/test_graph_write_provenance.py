@@ -880,3 +880,86 @@ def test_relations_for_excludes_derived(tmp_path):
                                 source_key="note-x", source_class="session")
     assert {r["entity_b"] for r in s.relations_for("a")} == {"b"}
     assert s.entity_degrees(["c"]) == {"c": 0}
+
+
+def test_extraction_keyed_on_own_chunk_not_duplicate(tmp_path):
+    """A duplicate chunk must not credit the extraction to the canonical's
+    source while the extraction has evidence of its own — in either order.
+    Only an all-duplicate extraction borrows the canonical's key."""
+    s = _store(tmp_path)
+    _mail_chunk(s, "gm-1", "t1")
+    _mail_chunk(s, "gm-2", "t2")
+    _mail_chunk(s, "gm-2d", "t2")
+    with s._connect() as db:
+        db.execute("UPDATE chunks SET dup_of='gm-1' WHERE doc_id='gm-2d'")
+    assert graph_write.extraction_sources(s, ["gm-2d", "gm-2"])[0] == "t2"
+    assert graph_write.extraction_sources(s, ["gm-2", "gm-2d"])[0] == "t2"
+    assert graph_write.extraction_sources(s, ["gm-2d"]) == ("t1", "primary_mail")
+
+
+def test_reobserving_legacy_row_records_legacy_strength(tmp_path):
+    s = _store(tmp_path)
+    _seed_entity(s, "a", name="A"); _seed_entity(s, "b", name="B")
+    with s._connect() as db:
+        db.execute("INSERT INTO entity_relations(entity_a,relation,entity_b,strength,valid_from) "
+                   "VALUES('a','manages','b',30,'2025-01-01')")
+    graph_write.upsert_relation(s, "a", "manages", "b", valid_from="2026-01-01",
+                                source_key="t1", source_class="primary_mail")
+    graph_write.upsert_relation(s, "a", "manages", "b", valid_from="2026-02-01",
+                                source_key="t2", source_class="primary_mail")
+    with s._connect() as db:
+        r = db.execute("SELECT strength, legacy_strength FROM entity_relations").fetchone()
+    assert (r["strength"], r["legacy_strength"]) == (2, 30)
+
+
+def test_derived_observation_never_retires_primary_nor_is_current_role(tmp_path):
+    s = _store(tmp_path)
+    _seed_entity(s, "sam")
+    graph_write.write_observation(s, "sam", "role", "Director", "llm_extraction",
+                                  "2026-03-01", "medium",
+                                  source_key="t1", source_class="primary_mail")
+    # A LATER derived observation of a different role…
+    graph_write.write_observation(s, "sam", "role", "Volunteer Lead", "llm_extraction",
+                                  "2026-06-01", "medium",
+                                  source_key="note-x", source_class="consolidated")
+    # …and an EARLIER primary one arriving after it must not be made
+    # historical by the derived row.
+    graph_write.write_observation(s, "sam", "role", "Coordinator", "llm_extraction",
+                                  "2026-04-01", "medium",
+                                  source_key="t2", source_class="primary_mail")
+    assert graph_write.fetch_role(s, "sam") == "Coordinator"
+    with s._connect() as db:
+        cur = {r["value"]: r["valid_to"] for r in db.execute(
+            "SELECT value, valid_to FROM entity_observations WHERE derived=0")}
+    assert cur["Coordinator"] is None
+    from mcpbrain import entity_resource
+    with s._connect() as db:
+        assert entity_resource._ranked_role(db, "sam") == "Coordinator"
+
+
+def test_consolidate_observations_keeps_sources(tmp_path):
+    s = _store(tmp_path)
+    _seed_entity(s, "sam")
+    with s._connect() as db:
+        for i, der in ((1, 1), (2, 0), (3, 0)):
+            db.execute("INSERT INTO entity_observations(id,entity_id,attribute,value,source,"
+                       "valid_from,derived) VALUES(?,'sam','role','Ops',?,?,?)",
+                       (i, f"s{i}", f"2026-02-0{i}", der))
+        graph_write.record_observation_source(db, 2, "t2", "primary_mail")
+        graph_write.record_observation_source(db, 3, "t3", "primary_mail")
+    graph_write.consolidate_observations(s)
+    with s._connect() as db:
+        rows = db.execute("SELECT id, observed_count, derived FROM entity_observations").fetchall()
+        keys = {r[0] for r in db.execute("SELECT source_key FROM observation_sources")}
+    assert [tuple(r) for r in rows] == [(2, 2, 0)]
+    assert keys == {"t2", "t3"}
+
+
+def test_decay_keeps_user_asserted_relation(tmp_path):
+    s = _store(tmp_path)
+    _seed_entity(s, "a", name="A"); _seed_entity(s, "b", name="B")
+    with s._connect() as db:
+        db.execute("INSERT INTO entity_relations(entity_a,relation,entity_b,strength,last_seen,"
+                   "user_verdict) VALUES('a','manages','b',1,'2023-01-01','asserted')")
+    out = graph_write.decay_relations(s, stale_days=365, weak_max=1, as_of="2026-07-01")
+    assert out["relations_decayed"] == 0

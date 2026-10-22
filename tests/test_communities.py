@@ -39,12 +39,23 @@ def _add_relation(store, a, b, strength=1):
 # Sub-task 1.1 — build_graph
 # ---------------------------------------------------------------------------
 
+def _add_sources(store, a, b, *keys):
+    from mcpbrain import graph_write
+    with store._connect(write=True) as db:
+        rid = db.execute("SELECT id FROM entity_relations WHERE entity_a=? AND entity_b=?",
+                         (a, b)).fetchone()[0]
+        for k in keys:
+            graph_write.record_relation_source(db, rid, k, "primary_mail")
+
+
 def test_build_graph_weights_by_strength(tmp_path):
-    """Relations with different strengths produce edges with matching weights."""
+    """A source-counted relation weighs its distinct-source count (strength);
+    a legacy row (no relation_sources) weighs 1 whatever its old strength."""
     s = _store(tmp_path)
     _add_entities(s, "alice", "bob", "carol")
     _add_relation(s, "alice", "bob", strength=2)
-    _add_relation(s, "bob", "carol", strength=1)
+    _add_sources(s, "alice", "bob", "t1", "t2")
+    _add_relation(s, "bob", "carol", strength=9)   # legacy: no source rows
 
     G = build_graph(s)
 

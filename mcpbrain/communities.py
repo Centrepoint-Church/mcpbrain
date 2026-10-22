@@ -33,19 +33,29 @@ def build_graph(store) -> nx.Graph:
     Only live (non-invalidated, non-expired) relations with strength > 0 are
     loaded. If two separate relation rows exist between the same pair of entities
     (possible when add_relation is called from multiple source docs) their
-    strengths are summed on the single undirected edge.
+    weights are summed on the single undirected edge.
+
+    Weight is the distinct-primary-source count (strength, spec 2026-10-22
+    §3). A LEGACY row — legacy_strength recorded or no relation_sources rows,
+    whose strength still counts every re-sighting — weighs 1, so an inflated
+    pre-source-counting number cannot pull a cluster together. Derived rows
+    have strength 0 and are never loaded.
     """
+    from mcpbrain.graph_write import legacy_relation_sql
     G = nx.Graph()
     with store._connect() as db:
         rels = db.execute(
-            "SELECT entity_a, entity_b, strength FROM entity_relations "
-            "WHERE strength > 0 AND invalidated_at IS NULL AND valid_to IS NULL"
+            "SELECT entity_a, entity_b, "
+            f"CASE WHEN {legacy_relation_sql()} THEN 1 ELSE strength END AS weight "
+            "FROM entity_relations "
+            "WHERE strength > 0 AND invalidated_at IS NULL AND valid_to IS NULL "
+            "AND COALESCE(derived, 0) = 0"
         ).fetchall()
         for r in rels:
             if G.has_edge(r["entity_a"], r["entity_b"]):
-                G[r["entity_a"]][r["entity_b"]]["weight"] += r["strength"]
+                G[r["entity_a"]][r["entity_b"]]["weight"] += r["weight"]
             else:
-                G.add_edge(r["entity_a"], r["entity_b"], weight=r["strength"])
+                G.add_edge(r["entity_a"], r["entity_b"], weight=r["weight"])
     log.debug("graph: %d nodes, %d edges", G.number_of_nodes(), G.number_of_edges())
     return G
 

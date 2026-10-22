@@ -106,7 +106,7 @@ def build_known_people(store, *, batch_thread_ids, core_cap=40, owner=None) -> l
                     WHERE eo.entity_id = e.id
                       AND eo.attribute = 'role'
                       AND eo.valid_to IS NULL
-                      AND eo.invalidated_at IS NULL
+                      AND eo.invalidated_at IS NULL AND COALESCE(eo.derived, 0) = 0
                       AND length(eo.value) BETWEEN 3 AND 70
                     ORDER BY {_ROLE_SOURCE_CASE} DESC, eo.confidence DESC
                     LIMIT 1) AS best_role
@@ -132,7 +132,7 @@ def build_known_people(store, *, batch_thread_ids, core_cap=40, owner=None) -> l
                         WHERE eo.entity_id = e.id
                           AND eo.attribute = 'role'
                           AND eo.valid_to IS NULL
-                          AND eo.invalidated_at IS NULL
+                          AND eo.invalidated_at IS NULL AND COALESCE(eo.derived, 0) = 0
                           AND length(eo.value) BETWEEN 3 AND 70
                         ORDER BY {_ROLE_SOURCE_CASE} DESC, eo.confidence DESC
                         LIMIT 1) AS best_role
@@ -170,7 +170,7 @@ def build_candidate_people(store, *, owner=None) -> list[dict]:
             SELECT e.id, e.name, e.org, e.aliases,
                    (SELECT eo.value FROM entity_observations eo
                     WHERE eo.entity_id = e.id AND eo.attribute = 'role'
-                      AND eo.valid_to IS NULL AND eo.invalidated_at IS NULL
+                      AND eo.valid_to IS NULL AND eo.invalidated_at IS NULL AND COALESCE(eo.derived, 0) = 0
                       AND length(eo.value) BETWEEN 3 AND 70
                     ORDER BY {_ROLE_SOURCE_CASE} DESC, eo.confidence DESC
                     LIMIT 1) AS best_role
