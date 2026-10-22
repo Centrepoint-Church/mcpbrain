@@ -91,7 +91,8 @@ def _parse_age_days(metadata: dict,
     return None
 
 
-def _is_owner_authored(metadata: dict, owner_email: str) -> bool:
+def _is_owner_authored(metadata: dict, owner_email: str, *, doc_id: str = "",
+                       rules=None) -> bool:
     """True when the chunk was authored by the install owner.
 
     Prefers explicit metadata flags; otherwise derives from the sender address
@@ -103,7 +104,20 @@ def _is_owner_authored(metadata: dict, owner_email: str) -> bool:
     owner as sender, but it is an unsent working version — the commitment is
     the SENT message, which arrives as its own message and gets the boost.
     Checked first, so neither an explicit flag nor the sender match can lift a
-    draft into the owner band."""
+    draft into the owner band.
+
+    More generally the boost follows source_class (M6, spec principle 1): a
+    derived source — draft, brief, session, consolidated note, digest — is
+    never owner-authored evidence. `rules` carries the configured brief rules
+    (run_salience_pass builds them once); without them only the
+    configuration-free classes (and the owner address) are known."""
+    from mcpbrain import source_class as sc
+    if rules is None:
+        oe = (owner_email or "").strip().lower()
+        rules = sc.Rules(owner_emails=frozenset({oe} if oe else ()))
+    cls = sc.classify(doc_id, metadata, rules)
+    if not (sc.is_evidence(cls) or cls is sc.SourceClass.DUPLICATE):
+        return False
     raw = metadata.get("labels") or []
     if isinstance(raw, str):
         labels = [p.strip().lower() for p in raw.split(",")]
@@ -121,7 +135,8 @@ def _is_owner_authored(metadata: dict, owner_email: str) -> bool:
     return "sent" in labels
 
 
-def score_structural(metadata: dict, *, owner_email: str = "") -> float:
+def score_structural(metadata: dict, *, owner_email: str = "", doc_id: str = "",
+                     rules=None) -> float:
     """Structural salience in [1.0, 10.0]. No LLM, no I/O.
 
     owner_email (optional) lets the scorer recognise owner-authored content from
@@ -137,7 +152,7 @@ def score_structural(metadata: dict, *, owner_email: str = "") -> float:
         score += 0.5
 
     # Owner sent/replied
-    if _is_owner_authored(metadata, owner_email):
+    if _is_owner_authored(metadata, owner_email, doc_id=doc_id, rules=rules):
         score += 1.5
 
     # Explicit user signals
@@ -265,10 +280,17 @@ def run_salience_pass(store, home: str, *, cap: int = 500) -> dict:
         return {"scored": 0, "llm_scored": 0}
 
     owner_email = config.owner_email(home)
+    from mcpbrain import source_class as sc
+    try:
+        rules = sc.Rules.from_config(
+            home, generated_label_ids=sc.cached_generated_label_ids(store))
+    except Exception:  # noqa: BLE001 — classification never blocks scoring
+        rules = None
     scored = []   # (chunk, structural_score)
     for c in chunks:
         try:
-            s = score_structural(c.get("metadata") or {}, owner_email=owner_email)
+            s = score_structural(c.get("metadata") or {}, owner_email=owner_email,
+                                 doc_id=c.get("doc_id") or "", rules=rules)
         except Exception as exc:
             log.debug("salience scoring failed for %s: %s", c.get("doc_id"), exc)
             s = _BASELINE

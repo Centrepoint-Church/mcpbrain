@@ -364,3 +364,52 @@ def test_draft_no_owner_boost():
     sent = {"sender": f"Dana Okafor <{owner}>", "labels": "SENT"}
     assert _is_owner_authored(sent, owner) is True
     assert score_structural(sent, owner_email=owner) > score_structural(draft, owner_email=owner)
+
+
+def test_owner_boost_follows_source_class():
+    """M6: the owner/salience boost is driven by source_class — a brief SENT
+    owner-to-owner (subject rule), a session note or a digest gets none."""
+    from mcpbrain import source_class as sc
+    from mcpbrain.importance import _is_owner_authored, score_structural
+    owner = "dana.okafor@example.org"
+    rules = sc.Rules(owner_emails=frozenset({owner}), subject_prefixes=("Brief — ",))
+    brief = {"source_type": "gmail", "sender": f"Dana Okafor <{owner}>", "to": owner,
+             "labels": "SENT", "subject": "Brief — Mon 1 Sep"}
+    sent = {**brief, "subject": "Venue booking", "to": "marcus@example.org"}
+    assert _is_owner_authored(brief, owner, rules=rules) is False
+    assert _is_owner_authored(sent, owner, rules=rules) is True
+    assert (score_structural(sent, owner_email=owner, rules=rules)
+            > score_structural(brief, owner_email=owner, rules=rules))
+    session = {"source": "note", "tags": "session", "sender_is_owner": True}
+    assert _is_owner_authored(session, owner, doc_id="note-" + "a" * 32) is False
+    assert _is_owner_authored({"sender_is_owner": True}, owner,
+                              doc_id="enriched-t1") is False
+
+
+def test_salience_pass_applies_brief_rules(tmp_path):
+    import json
+    from mcpbrain.importance import run_salience_pass
+
+    class FakeStore:
+        def __init__(self):
+            self.pairs = []
+
+        def chunks_needing_salience(self, cap):
+            base = {"source_type": "gmail", "sender": "dana.okafor@example.org",
+                    "to": "dana.okafor@example.org", "labels": "SENT"}
+            return [{"doc_id": "gmail-a-body-0", "metadata": {**base, "subject": "Brief — x"}},
+                    {"doc_id": "gmail-b-body-0", "metadata": {**base, "subject": "Plan"}}]
+
+        def get_meta(self, k):
+            return None
+
+        def set_chunk_salience_batch(self, pairs):
+            self.pairs = pairs
+
+    (tmp_path / "config.json").write_text(json.dumps({
+        "owner_email": "dana.okafor@example.org",
+        "ingest": {"generated_gmail_subject_prefixes": ["Brief — "]}}))
+    st = FakeStore()
+    run_salience_pass(st, str(tmp_path))
+    got = dict(st.pairs)
+    assert got["gmail-b-body-0"] > got["gmail-a-body-0"]
