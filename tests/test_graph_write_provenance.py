@@ -912,6 +912,27 @@ def test_reobserving_legacy_row_records_legacy_strength(tmp_path):
     assert (r["strength"], r["legacy_strength"]) == (2, 30)
 
 
+def test_legacy_marker_is_no_evidence_source(tmp_path):
+    """Ruling I8: legacy = no EVIDENCE relation_sources row. legacy_strength is
+    a saved prior value only; a derived-class source row does not count."""
+    s = _store(tmp_path)
+    for e in ("a", "b", "c", "d"):
+        _seed_entity(s, e, name=e.upper())
+    with s._connect(write=True) as db:
+        for b in ("b", "c", "d"):
+            db.execute("INSERT INTO entity_relations(entity_a,relation,entity_b) "
+                       "VALUES('a','knows',?)", (b,))
+        ids = {r["entity_b"]: r["id"] for r in db.execute(
+            "SELECT id, entity_b FROM entity_relations")}
+        graph_write.record_relation_source(db, ids["c"], "s1", "session")
+        graph_write.record_relation_source(db, ids["d"], "t1", "primary_mail")
+        db.execute("UPDATE entity_relations SET legacy_strength=30 WHERE id=?", (ids["d"],))
+        legacy = {r["entity_b"]: r["l"] for r in db.execute(
+            f"SELECT entity_b, {graph_write.legacy_relation_sql()} AS l "
+            "FROM entity_relations")}
+    assert legacy == {"b": 1, "c": 1, "d": 0}
+
+
 def test_derived_observation_never_retires_primary_nor_is_current_role(tmp_path):
     s = _store(tmp_path)
     _seed_entity(s, "sam")

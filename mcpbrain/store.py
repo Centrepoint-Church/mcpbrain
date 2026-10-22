@@ -3060,10 +3060,26 @@ class Store:
             ids = set(source_ids)
             if fid_set:
                 ids |= self._stale_drive_ids(db, fid_set)
-            ids = list(ids)
-            for i in range(0, len(ids), _IN_BATCH):
-                part = ids[i:i + _IN_BATCH]
-                qs = ",".join("?" * len(part))
+            got = self._invalidate_sources_in(db, list(ids), reason=reason, at=at,
+                                              match_thread=match_thread)
+        out["actions"], out["links"] = got["actions"], got["links"]
+        return out
+
+    @staticmethod
+    def _invalidate_sources_in(db, ids, *, reason: str, at: str,
+                               match_thread: bool = True, actions: bool = True,
+                               links: bool = True) -> dict:
+        """invalidate_sources_for_docs' action/link step on an OPEN write
+        connection, so a caller (bin/clean_ingestion.py) can run it inside its
+        own transaction and log the old values there. `ids` are the exact
+        source ids; IN lists are sliced. actions=False / links=False skip that
+        half."""
+        out = {"actions": 0, "links": 0}
+        ids = [x for x in dict.fromkeys(ids or ()) if x]
+        for i in range(0, len(ids), _IN_BATCH):
+            part = ids[i:i + _IN_BATCH]
+            qs = ",".join("?" * len(part))
+            if actions:
                 cond = f"source_doc_id IN ({qs})"
                 params: list = list(part)
                 if match_thread:
@@ -3074,6 +3090,7 @@ class Store:
                     "resolved_at=? WHERE status='open' "
                     f"AND COALESCE(source,'email')='email' AND {cond}",
                     (reason, at, *params)).rowcount
+            if links:
                 live = db.execute(
                     f"SELECT message_id, entity_id FROM email_entities "
                     f"WHERE message_id IN ({qs}) AND COALESCE(derived,0)=0",
@@ -6007,6 +6024,16 @@ class Store:
         """
         if not thread_id:
             return []
+        with self._connect(write=True) as db:
+            return self._supersede_older_drafts_in(db, thread_id)
+
+    @staticmethod
+    def _supersede_older_drafts_in(db, thread_id: str, *, write: bool = True) -> list[str]:
+        """supersede_older_drafts on an open connection. write=False returns
+        the doc_ids it WOULD change without writing (dry runs); the attended
+        clean-up calls it inside its own transaction to log old values."""
+        if not thread_id:
+            return []
         from email.utils import parsedate_to_datetime
 
         def _ts(raw) -> float:
@@ -6020,41 +6047,41 @@ class Store:
             except (TypeError, ValueError, OverflowError):
                 return 0.0
 
-        with self._connect(write=True) as db:
-            rows = db.execute(
-                "SELECT rowid, doc_id, metadata, enrich_state FROM chunks "
-                f"WHERE {_meta_extract('$.thread_id')} = ?", (thread_id,)).fetchall()
-            drafts: dict[str, dict] = {}
-            for r in rows:
-                meta = json.loads(r["metadata"] or "{}")
-                if meta.get("source_type") != "gmail":
+        rows = db.execute(
+            "SELECT rowid, doc_id, metadata, enrich_state FROM chunks "
+            f"WHERE {_meta_extract('$.thread_id')} = ?", (thread_id,)).fetchall()
+        drafts: dict[str, dict] = {}
+        for r in rows:
+            meta = json.loads(r["metadata"] or "{}")
+            if meta.get("source_type") != "gmail":
+                continue
+            raw = meta.get("labels") or ""
+            labels = ({str(x).strip() for x in raw} if isinstance(raw, (list, tuple))
+                      else {x.strip() for x in str(raw).split(",")})
+            if "DRAFT" not in labels:
+                continue
+            mid = meta.get("message_id") or r["doc_id"]
+            d = drafts.setdefault(mid, {"ts": 0.0, "rowid": 0, "rows": []})
+            d["ts"] = max(d["ts"], _ts(meta.get("date")))
+            d["rowid"] = max(d["rowid"], r["rowid"])
+            d["rows"].append((r["doc_id"], meta, r["enrich_state"]))
+        if len(drafts) < 2:
+            return []
+        newest = max(drafts, key=lambda m: (drafts[m]["ts"], drafts[m]["rowid"]))
+        changed = []
+        for mid, d in drafts.items():
+            if mid == newest:
+                continue
+            for doc_id, meta, state in d["rows"]:
+                if meta.get("superseded") is True and state == "cold":
                     continue
-                raw = meta.get("labels") or ""
-                labels = ({str(x).strip() for x in raw} if isinstance(raw, (list, tuple))
-                          else {x.strip() for x in str(raw).split(",")})
-                if "DRAFT" not in labels:
-                    continue
-                mid = meta.get("message_id") or r["doc_id"]
-                d = drafts.setdefault(mid, {"ts": 0.0, "rowid": 0, "rows": []})
-                d["ts"] = max(d["ts"], _ts(meta.get("date")))
-                d["rowid"] = max(d["rowid"], r["rowid"])
-                d["rows"].append((r["doc_id"], meta, r["enrich_state"]))
-            if len(drafts) < 2:
-                return []
-            newest = max(drafts, key=lambda m: (drafts[m]["ts"], drafts[m]["rowid"]))
-            changed = []
-            for mid, d in drafts.items():
-                if mid == newest:
-                    continue
-                for doc_id, meta, state in d["rows"]:
-                    if meta.get("superseded") is True and state == "cold":
-                        continue
-                    meta["superseded"] = True
+                meta["superseded"] = True
+                if write:
                     db.execute(
                         "UPDATE chunks SET metadata=?, enrich_state='cold' WHERE doc_id=?",
                         (json.dumps(meta), doc_id))
-                    changed.append(doc_id)
-            return changed
+                changed.append(doc_id)
+        return changed
 
     def thread_chunks(self, thread_id: str) -> list[dict]:
         """Return all chunks whose metadata.thread_id matches thread_id.

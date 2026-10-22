@@ -473,10 +473,19 @@ def test_graph_view_ignores_derived_and_legacy(tmp_path):
     ego = graph_view.graph_ego(_Store(p), "e2", hops=1)
     assert {link["relation"] for link in ego["links"]} == {"knows"}
 
-    # legacy_strength marks a row legacy even when it now has a source row.
+    # Only a DERIVED-class source row: still legacy (ruling I8) — knows first.
     with sqlite3.connect(str(p)) as db:
         inv = db.execute("SELECT id FROM entity_relations WHERE relation='involved_in'").fetchone()[0]
-        db.execute("INSERT INTO relation_sources VALUES(?, 't9', 'primary_mail', '')", (inv,))
+        db.execute("INSERT INTO relation_sources VALUES(?, 's1', 'session', '')", (inv,))
         db.execute("UPDATE entity_relations SET legacy_strength=40 WHERE id=?", (inv,))
     out = graph_view.graph_canvas(_Store(p), min_conn=7)
     assert [link["relation"] for link in out["links"]] == ["knows", "involved_in"]
+
+    # legacy_strength is only the saved prior value: once the row gains a real
+    # (evidence) source it is source-counted and ranks by its honest strength.
+    with sqlite3.connect(str(p)) as db:
+        for k in ("t7", "t8", "t9"):
+            db.execute("INSERT INTO relation_sources VALUES(?, ?, 'primary_mail', '')", (inv, k))
+        db.execute("UPDATE entity_relations SET strength=3 WHERE id=?", (inv,))
+    out = graph_view.graph_canvas(_Store(p), min_conn=7)
+    assert [link["relation"] for link in out["links"]] == ["involved_in", "knows"]

@@ -681,11 +681,14 @@ def _preserve_legacy_strength(conn, relation_id) -> None:
 
 def legacy_relation_sql(alias: str = "") -> str:
     """SQL truth value: this relation's strength is NOT a distinct-source count
-    (legacy_strength recorded, or no relation_sources rows at all). Such rows
-    never outrank a source-counted one. Not origin — origin is local/org."""
+    — it has no EVIDENCE-class relation_sources row (none at all, or only
+    derived-class ones). Such rows never outrank a source-counted one.
+    legacy_strength is only the saved prior value, not part of the marker: a
+    legacy row that gains a real source is source-counted and its strength is
+    honest (ruling I8). Not origin — origin is local/org."""
     p = f"{alias}." if alias else "entity_relations."
-    return (f"({p}legacy_strength IS NOT NULL OR NOT EXISTS "
-            f"(SELECT 1 FROM relation_sources rs_l WHERE rs_l.relation_id = {p}id))")
+    return ("(NOT EXISTS (SELECT 1 FROM relation_sources rs_l "
+            f"WHERE rs_l.relation_id = {p}id AND rs_l.source_class IN {_EVIDENCE_SQL}))")
 
 
 def _promote_to_evidence(conn, relation_id) -> None:
