@@ -1381,3 +1381,22 @@ def test_drive_app_generated_marker_stamped():
     src = inspect.getsource(drive_mod)
     # handle_drive_item, shared-drive get, both backfills and reingest.
     assert src.count("appProperties") >= 7
+
+
+def test_drive_remove_archives_actions_and_marks_links(tmp_path):
+    store = _store(tmp_path)
+    store.upsert_chunk("gdrive-f9-0", "some text here", "h", {"file_id": "f9"})
+    store.upsert_entity("dana-okafor", "Dana Okafor", "person", "", "2026-01-01")
+    store.link_email_entity("f9", "dana-okafor", role="mentioned")
+    a = store.add_unified_action(text="do it", source="email", source_doc_id="f9", thread_id="f9")
+    man = store.add_unified_action(text="mine", source="manual", source_doc_id="f9", thread_id="f9")
+    cu = store.add_unified_action(text="cu", source="clickup", source_doc_id="f9")
+    svc = FakeDriveService(pages=[])
+    handle_drive_item(svc, store, {"ref_id": "f9", "version": "", "event": "remove"})
+    with store._connect() as db:
+        rows = {r["id"]: dict(r) for r in db.execute("SELECT * FROM actions")}
+        assert rows[a]["status"] == "auto_archived" and rows[a]["resolved_by"] == "source_gone"
+        assert rows[a]["resolved_at"]
+        assert rows[man]["status"] == "open" and rows[cu]["status"] == "open"
+        assert db.execute("SELECT derived FROM email_entities WHERE message_id='f9'").fetchone()[0] == 1
+    assert store.get_chunk("gdrive-f9-0") is None

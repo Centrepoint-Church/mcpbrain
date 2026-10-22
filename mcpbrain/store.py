@@ -3013,6 +3013,55 @@ class Store:
                 (at, reason, *doc_ids))
             return cur.rowcount
 
+    def invalidate_sources_for_docs(self, doc_ids, *, source_ids=(),
+                                    reason: str = "source_gone",
+                                    match_thread: bool = True) -> dict:
+        """A source (Drive file / Gmail message) is gone: take its derived
+        state with it. Reversible: nothing is deleted.
+
+        * local relations sourced from `doc_ids` are invalidated (as
+          invalidate_local_relations_for_docs);
+        * OPEN actions with source='email' whose source_doc_id (or, with
+          match_thread, thread_id) is one of `source_ids` become
+          status='auto_archived', resolved_by=<reason>, resolved_at set --
+          user/manual/clickup actions are never touched;
+        * email_entities rows for `source_ids` are marked derived=1 and the
+          entity's email_count is decremented once per link that was counting
+          (floored at 0), so counts stay equal to the live primary links.
+        """
+        doc_ids = list(doc_ids or ())
+        source_ids = [x for x in dict.fromkeys(source_ids or ()) if x]
+        out = {"relations": 0, "actions": 0, "links": 0}
+        out["relations"] = self.invalidate_local_relations_for_docs(
+            doc_ids, reason=reason)
+        if not source_ids:
+            return out
+        at = datetime.now(timezone.utc).isoformat()
+        qs = ",".join("?" * len(source_ids))
+        with self._connect(write=True) as db:
+            cond = f"source_doc_id IN ({qs})"
+            params: list = list(source_ids)
+            if match_thread:
+                cond = f"({cond} OR thread_id IN ({qs}))"
+                params += source_ids
+            cur = db.execute(
+                "UPDATE actions SET status='auto_archived', resolved_by=?, "
+                "resolved_at=? WHERE status='open' AND COALESCE(source,'email')='email' "
+                f"AND {cond}", (reason, at, *params))
+            out["actions"] = cur.rowcount
+            live = db.execute(
+                f"SELECT message_id, entity_id FROM email_entities "
+                f"WHERE message_id IN ({qs}) AND COALESCE(derived,0)=0",
+                source_ids).fetchall()
+            for r in live:
+                db.execute("UPDATE entities SET email_count = MAX(0, COALESCE(email_count,0) - 1) "
+                           "WHERE id=?", (r["entity_id"],))
+            db.execute(
+                f"UPDATE email_entities SET derived=1 WHERE message_id IN ({qs})",
+                source_ids)
+            out["links"] = len(live)
+        return out
+
     def chunk_count(self) -> int:
         """Total number of rows in the chunks table."""
         with self._connect() as db:

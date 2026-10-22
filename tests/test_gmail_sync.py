@@ -988,3 +988,39 @@ def test_reingest_messages_resupersedes_older_drafts(tmp_path):
     assert store.get_chunk("gmail-d1-body-0")["metadata"]["superseded"] is True
     assert _state(store, "gmail-d1-body-0") == "cold"
     assert "superseded" not in store.get_chunk("gmail-d2-body-0")["metadata"]
+
+
+def _seed_source(store, src_id, thread_id=None, *, ent="dana-okafor"):
+    store.upsert_entity(ent, "Dana Okafor", "person", "", "2026-01-01")
+    store.link_email_entity(src_id, ent, role="sender")
+    with store._connect(write=True) as db:
+        db.execute("UPDATE entities SET email_count=1 WHERE id=?", (ent,))
+    a = store.add_unified_action(text="send report", source="email",
+                                 source_doc_id=src_id, thread_id=thread_id or src_id)
+    m = store.add_unified_action(text="manual thing", source="manual",
+                                 source_doc_id=src_id, thread_id=thread_id or src_id)
+    return a, m
+
+
+def _action(store, aid):
+    with store._connect() as db:
+        return dict(db.execute("SELECT * FROM actions WHERE id=?", (aid,)).fetchone())
+
+
+def test_gmail_404_archives_actions(tmp_path):
+    store = Store(tmp_path / "test.sqlite3", dim=4)
+    store.init()
+    a, manual = _seed_source(store, "m1", "m1")
+    other, _ = _seed_source(store, "m2", "m1", ent="priya-anand")  # same thread, other message
+    err = HttpError(httplib2.Response({"status": 404}), b"gone")
+    svc = FakeService(profile_hid="1000", messages={"m1": err})
+    handle_gmail_item(svc, store, {"ref_id": "m1", "version": "", "event": "upsert",
+                                   "modified_at": "2026-09-04T00:00:00"})
+    r = _action(store, a)
+    assert r["status"] == "auto_archived" and r["resolved_by"] == "source_gone" and r["resolved_at"]
+    assert _action(store, manual)["status"] == "open"        # manual untouched
+    assert _action(store, other)["status"] == "open"         # only THAT message
+    with store._connect() as db:
+        assert db.execute("SELECT derived FROM email_entities WHERE message_id='m1'").fetchone()[0] == 1
+        assert db.execute("SELECT derived FROM email_entities WHERE message_id='m2'").fetchone()[0] == 0
+        assert db.execute("SELECT email_count FROM entities WHERE id='dana-okafor'").fetchone()[0] == 0

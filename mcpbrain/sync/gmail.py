@@ -209,6 +209,14 @@ def handle_gmail_item(service, store, item, *, fetch_attachments: bool = False,
                 num_retries=_NUM_RETRIES)
     except HttpError as e:
         if getattr(e, "resp", None) is not None and e.resp.status == 404:
+            # Gone upstream: take THIS message's actions/links with it (not
+            # the thread's -- other messages may still exist; a thread id
+            # equals its first message's id, so never match on thread_id).
+            mid = item["ref_id"]
+            with bulk_section():
+                store.invalidate_sources_for_docs(
+                    store.doc_ids_for_messages([mid]), source_ids=[mid],
+                    reason="source_gone", match_thread=False)
             return
         raise
     skips: dict = {}

@@ -957,8 +957,11 @@ def handle_drive_item(service, store, item, *, folder_cache=None,
     if item["event"] == "remove":
         with bulk_section():
             doc_ids = store.doc_ids_for_file(fid)
+            # Runs even with no chunks left: the file's actions/links may
+            # outlive its chunks (an earlier removal, a sweep).
+            store.invalidate_sources_for_docs(
+                doc_ids, source_ids=[fid, *doc_ids], reason="source_gone")
             if doc_ids:
-                store.invalidate_local_relations_for_docs(doc_ids)
                 store.delete_chunks(doc_ids)
         return
     fmeta = service.files().get(
@@ -1005,8 +1008,11 @@ def handle_shared_drive_item(service, store, item, *, fleet_storage, pin,
     if item["event"] == "remove":
         with bulk_section():
             doc_ids = store.doc_ids_for_file(fid)
+            # Runs even with no chunks left: the file's actions/links may
+            # outlive its chunks (an earlier removal, a sweep).
+            store.invalidate_sources_for_docs(
+                doc_ids, source_ids=[fid, *doc_ids], reason="source_gone")
             if doc_ids:
-                store.invalidate_local_relations_for_docs(doc_ids)
                 store.delete_chunks(doc_ids)
         # Clear any durable pending-publish row for this file too (final-
         # review fix): a file can be extracted-with-a-miss in one cycle

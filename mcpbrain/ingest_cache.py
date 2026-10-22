@@ -911,7 +911,10 @@ def purge_drive(store, drive_id) -> dict:
     sourced from this drive's docs, then delete its chunks/vectors/FTS. org rows
     are untouched. Returns a summary dict."""
     doc_ids = store.doc_ids_for_drive(drive_id)
-    invalidated = store.invalidate_local_relations_for_docs(doc_ids)
+    fids = sorted({m.get("file_id") for _d, m in store.drive_chunk_metadata(drive_id)
+                   if m.get("file_id")})
+    invalidated = store.invalidate_sources_for_docs(
+        doc_ids, source_ids=[*fids, *doc_ids], reason="drive_revoked")["relations"]
     deleted = store.delete_chunks(doc_ids)
     # warning, not info: purging a drive's entire cached content because access
     # was revoked is exactly the kind of event an operator needs to see without
@@ -1119,7 +1122,10 @@ def purge_infrastructure(store, layout, drive_id, *, fleet_storage=None,
                 out["relations_invalidated"] = res["relations_invalidated"]
             elif rows:
                 doc_ids = [d for d, _m in rows]
-                out["relations_invalidated"] = store.invalidate_local_relations_for_docs(doc_ids)
+                _fids = sorted({m.get("file_id") for _d, m in rows if m.get("file_id")})
+                out["relations_invalidated"] = store.invalidate_sources_for_docs(
+                    doc_ids, source_ids=[*_fids, *doc_ids],
+                    reason="drive_revoked")["relations"]
                 out["chunks_deleted"] = store.delete_chunks(doc_ids)
                 for fid in sorted({m.get("file_id") for _d, m in rows if m.get("file_id")}):
                     store.clear_pending_publish(drive_id, fid)
