@@ -578,15 +578,32 @@ class ControlServer:
                 if not title or not content:
                     return h_json(h, 400, {"error": "title and content required"})
                 from mcpbrain.capture import write_capture
+                from mcpbrain.session_hooks import (
+                    is_non_interactive_entrypoint, is_maintenance_text)
+                # Same rules as the transcript hooks: subagent, headless/SDK
+                # and scheduled-task runs are not captured at all.
+                if body.get("is_sidechain") is True:
+                    return h_json(h, 200, {"queued": False, "skipped": "sidechain"})
+                if is_non_interactive_entrypoint(body.get("entrypoint")):
+                    return h_json(h, 200, {"queued": False, "skipped": "non_interactive"})
+                if is_maintenance_text(content):
+                    return h_json(h, 200, {"queued": False, "skipped": "scheduled_task"})
+                tags = [t.strip() for t in str(body.get("tags") or "session").split(",")
+                        if t.strip()]
+                if "session" not in {t.lower() for t in tags}:
+                    tags.insert(0, "session")
                 envelope = {
                     "kind": "ingest",
                     "source": "stop_hook",
                     "captured_at": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
                     "title": title,
                     "content": content,
-                    "tags": str(body.get("tags") or "session"),
+                    "tags": ",".join(tags),
                     "observation_type": "note",
                 }
+                sid = str(body.get("claude_session_id") or "").strip()
+                if sid:
+                    envelope["claude_session_id"] = sid
                 p = write_capture(str(self.home), envelope)
                 return h_json(h, 200, {"queued": True, "path": str(p)})
 

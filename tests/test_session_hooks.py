@@ -461,3 +461,98 @@ def test_action_needed_returns_empty_on_exception(monkeypatch):
 
     monkeypatch.setattr(session_hooks.probes, "all_connections", boom)
     assert session_hooks._action_needed("/some/home") == ""
+
+
+# --- ingestion integrity: one cold note per Claude session; no maintenance runs ---
+#
+# Markers below were confirmed READ-ONLY against real Claude Code transcripts
+# (2026-10-22), reproduced here with synthetic content:
+#   * subagent transcripts (<session>/subagents/agent-*.jsonl) carry
+#     "isSidechain": true on every line (and the PARENT's sessionId);
+#   * headless `claude -p` / Agent SDK runs carry "entrypoint": "sdk-cli"
+#     (interactive ones are "cli" or "claude-desktop");
+#   * a scheduled task's first user turn starts with
+#     '<scheduled-task name="brain-enrich-hourly" file="...">', and when fired
+#     by the scheduler the line carries origin.subkind "scheduled-trigger".
+
+def _write_transcript(path, lines):
+    path.write_text("\n".join(json.dumps(x) for x in lines))
+    return path
+
+
+def _turn(role, text, **extra):
+    base = {"type": role, "isSidechain": False, "userType": "external",
+            "entrypoint": "claude-desktop", "sessionId": "sess-full-0001"}
+    base.update(extra)
+    base["message"] = {"role": role, "content": text}
+    return base
+
+
+_SUBSTANTIAL = [
+    ("user", "Plan the migration in detail please"),
+    ("assistant", "Here is the plan: step one, step two."),
+    ("user", "Great, do step one"),
+]
+
+
+def _capture(tmp_path, monkeypatch, lines, hook_extra=None, fn="session_end"):
+    t = _write_transcript(tmp_path / "t.jsonl", lines)
+    hook = {"transcript_path": str(t), "session_id": "sess-full-0001"}
+    hook.update(hook_extra or {})
+    got = []
+    monkeypatch.setattr(session_hooks, "write_capture",
+                        lambda home, env: got.append(env) or Path("x"))
+    getattr(session_hooks, fn)(str(tmp_path / "home"), stdin=io.StringIO(json.dumps(hook)))
+    return got
+
+
+def test_capture_envelope_carries_full_claude_session_id(tmp_path, monkeypatch):
+    got = _capture(tmp_path, monkeypatch, [_turn(r, t) for r, t in _SUBSTANTIAL])
+    assert len(got) == 1
+    assert got[0]["claude_session_id"] == "sess-full-0001"
+    assert "session_id" not in got[0]  # anarlog's key; never reuse it
+
+
+def test_capture_falls_back_to_transcript_session_id(tmp_path, monkeypatch):
+    got = _capture(tmp_path, monkeypatch, [_turn(r, t) for r, t in _SUBSTANTIAL],
+                   hook_extra={"session_id": ""})
+    assert got[0]["claude_session_id"] == "sess-full-0001"
+
+
+def test_sidechain_and_scheduled_transcripts_not_captured(tmp_path, monkeypatch):
+    # 1. subagent transcript: every line isSidechain
+    side = [_turn(r, t, isSidechain=True) for r, t in _SUBSTANTIAL]
+    assert _capture(tmp_path, monkeypatch, side) == []
+    # 2. headless / SDK run
+    sdk = [_turn(r, t, entrypoint="sdk-cli") for r, t in _SUBSTANTIAL]
+    assert _capture(tmp_path, monkeypatch, sdk) == []
+    # 3. scheduled task: marker in the first user turn
+    sched = [_turn("user", '<scheduled-task name="brain-enrich-hourly" '
+                           'file="/x/SKILL.md"> This is an automated run of a '
+                           'scheduled task.')] + [_turn(r, t) for r, t in _SUBSTANTIAL]
+    assert _capture(tmp_path, monkeypatch, sched) == []
+    # 4. scheduler-fired origin marker, even without the tag text
+    fired = [_turn("user", "Run the weekly sweep now please",
+                   origin={"kind": "task-notification", "subkind": "scheduled-trigger"})
+             ] + [_turn(r, t) for r, t in _SUBSTANTIAL]
+    assert _capture(tmp_path, monkeypatch, fired) == []
+    # 5. pre_compact obeys the same rules
+    assert _capture(tmp_path, monkeypatch, side, fn="pre_compact") == []
+
+
+def test_inline_sidechain_turns_are_dropped_from_main_session(tmp_path, monkeypatch):
+    lines = [_turn(r, t) for r, t in _SUBSTANTIAL]
+    lines.insert(1, _turn("assistant", "SUBAGENT CHATTER", isSidechain=True))
+    got = _capture(tmp_path, monkeypatch, lines)
+    assert len(got) == 1
+    assert "SUBAGENT CHATTER" not in got[0]["content"]
+    assert "Plan the migration" in got[0]["content"]
+
+
+def test_is_maintenance_text_detects_scheduled_marker():
+    assert session_hooks.is_maintenance_text(
+        'user: <scheduled-task name="reference-gardener" file="x">go')
+    assert session_hooks.is_maintenance_text('<scheduled-task name="a">')
+    assert not session_hooks.is_maintenance_text("user: please plan the migration")
+    assert not session_hooks.is_maintenance_text(
+        "user: what is a <scheduled-task> tag?\n\nassistant: it marks runs")

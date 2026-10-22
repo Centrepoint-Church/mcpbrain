@@ -764,6 +764,27 @@ def drain(store, *, home=None, apply=None, embedder=None, budget=None,
     return summary
 
 
+def _session_base_id(claude_session_id: str) -> str:
+    """Stable base doc id for a Claude session's single note."""
+    import hashlib
+    return "note-session-" + hashlib.sha256(
+        claude_session_id.encode("utf-8")).hexdigest()[:24]
+
+
+def _is_session_note(doc_id: str, meta: dict) -> bool:
+    from mcpbrain.source_class import Rules, SourceClass, classify
+    return classify(doc_id, meta, Rules()) == SourceClass.SESSION
+
+
+def _prior_note_ids(store, base_doc_id: str) -> list[str]:
+    """Every chunk row currently holding a piece of `base_doc_id`: the pieces
+    stamped with its note_id, plus the bare id itself."""
+    ids = list(store._note_sibling_ids(base_doc_id))
+    if base_doc_id not in ids and store.get_chunk(base_doc_id) is not None:
+        ids.append(base_doc_id)
+    return ids
+
+
 def drain_captures(store, *, home=None, budget=None, bulk_section=None) -> int:
     """Apply every capture_inbox envelope. Returns the number applied.
 
@@ -827,13 +848,24 @@ def drain_captures(store, *, home=None, budget=None, bulk_section=None) -> int:
             if kind == "ingest":
                 text = f"{env['title'].strip()}\n\n{env['content'].strip()}"
                 chash = content_hash(text)
-                base_doc_id = f"note-{chash[:32]}"
+                claude_sid = str(env.get("claude_session_id") or "").strip()
+                # One note per Claude session: a stable base id derived from
+                # the session id, so each capture (pre-compact, session end)
+                # REPLACES the last instead of minting an overlapping window
+                # (1,255 notes from 363 sessions, 72% repeated text). The
+                # `note-session-` namespace cannot collide with a content-hash
+                # `note-<32 hex>` id.
+                base_doc_id = (_session_base_id(claude_sid) if claude_sid
+                               else f"note-{chash[:32]}")
                 base_meta = {"source": "note", "title": env["title"],
                              "observation_type": env.get("observation_type", "note"),
                              "tags": env.get("tags", ""),
                              "org": env.get("org", ""),
                              "captured_at": env.get("captured_at", ""),
                              "note_id": base_doc_id}
+                if claude_sid:
+                    base_meta["claude_session_id"] = claude_sid
+                is_session = _is_session_note(base_doc_id, base_meta)
                 try:
                     # Notes used to bypass chunking entirely: one row per note,
                     # up to 133,791 chars, of which only the first ~2,000 were
@@ -868,13 +900,27 @@ def drain_captures(store, *, home=None, budget=None, bulk_section=None) -> int:
                     if len(pieces) > 1:
                         base_meta = {**base_meta, "split": "lossless"}
                     changed = False
+                    new_ids = []
                     for i, piece in enumerate(pieces):
                         doc_id = (base_doc_id if len(pieces) == 1
                                   else f"{base_doc_id}-{i}")
+                        new_ids.append(doc_id)
                         meta = {**base_meta, "chunk_index": i,
                                 "chunk_total": len(pieces)}
                         if store.upsert_chunk(doc_id, piece, chash, meta):
                             changed = True
+                    if claude_sid:
+                        # Replace, not append: pieces of the previous capture
+                        # beyond the new piece count (or the bare id when the
+                        # note grew past one piece) are deleted, never orphaned.
+                        stale = [d for d in _prior_note_ids(store, base_doc_id)
+                                 if d not in set(new_ids)]
+                        if stale and store.delete_chunks(stale):
+                            changed = True
+                    if is_session:
+                        # Sessions stay searchable but are never mined: they
+                        # are the assistant's account of work, not evidence.
+                        store.set_enrich_state(new_ids, "cold")
                     if changed:
                         store.record_change("capture_ingest", ref_id=base_doc_id,
                                             summary=f"Saved note '{env['title'][:60]}'")

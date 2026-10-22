@@ -242,3 +242,92 @@ def test_action_update_reopen(tmp_path):
     assert len(acts) == 1
     changes = s.recent_changes(5)
     assert any(c["change_type"] == "capture_action_update" for c in changes)
+
+
+# --- ingestion integrity: one cold note per Claude session ---
+
+import hashlib  # noqa: E402
+
+
+def _session_env(content, sid="sess-abc-123", title=None, tags="session"):
+    return {"kind": "ingest", "captured_at": "2026-10-22T01:00:00Z",
+            "source": "session_end_hook",
+            "title": title or f"Session {sid[:8]} 2026-10-22",
+            "content": content, "tags": tags, "observation_type": "note",
+            "claude_session_id": sid}
+
+
+def _note_rows(s, prefix="note-"):
+    with s._connect() as db:
+        return [dict(r) for r in db.execute(
+            "SELECT doc_id, text, metadata, enrich_state FROM chunks "
+            "WHERE doc_id LIKE ? ORDER BY doc_id", (prefix + "%",))]
+
+
+def test_session_base_id_is_stable_and_namespaced(tmp_path):
+    s = _store(tmp_path)
+    _spool(tmp_path, "cap-1.json", _session_env("user: hello\n\nassistant: hi"))
+    drain.drain_captures(s, home=tmp_path)
+    expect = "note-session-" + hashlib.sha256(b"sess-abc-123").hexdigest()[:24]
+    rows = _note_rows(s)
+    assert [r["doc_id"] for r in rows] == [expect]
+    meta = json.loads(rows[0]["metadata"])
+    assert meta["claude_session_id"] == "sess-abc-123"
+    assert meta["note_id"] == expect
+
+
+def test_recapture_replaces_not_appends(tmp_path):
+    s = _store(tmp_path)
+    _spool(tmp_path, "cap-1.json", _session_env("user: first window"))
+    drain.drain_captures(s, home=tmp_path)
+    _spool(tmp_path, "cap-2.json",
+           _session_env("user: first window\n\nassistant: and the latest reply"))
+    assert drain.drain_captures(s, home=tmp_path) == 1
+    notes = s.note_chunks()
+    assert len(notes) == 1
+    assert notes[0]["text"].endswith("and the latest reply")
+
+
+def test_recapture_removes_pieces_beyond_new_count(tmp_path):
+    s = _store(tmp_path)
+    long_body = "\n\n".join(f"para {i} " + "y" * 400 for i in range(30))
+    _spool(tmp_path, "cap-1.json", _session_env(long_body))
+    drain.drain_captures(s, home=tmp_path)
+    assert len(_note_rows(s)) > 1
+    # shrink to a single piece: every old -<i> row must go, bare id remains
+    _spool(tmp_path, "cap-2.json", _session_env("user: short now"))
+    drain.drain_captures(s, home=tmp_path)
+    rows = _note_rows(s)
+    assert len(rows) == 1 and "-" not in rows[0]["doc_id"].removeprefix("note-session-")
+    # grow again: the bare row must not linger beside the -<i> pieces
+    _spool(tmp_path, "cap-3.json", _session_env(long_body + "\n\nmore"))
+    drain.drain_captures(s, home=tmp_path)
+    rows = _note_rows(s)
+    assert len(rows) > 1
+    assert all(r["doc_id"].rsplit("-", 1)[1].isdigit() for r in rows)
+    notes = s.note_chunks()
+    assert len(notes) == 1 and notes[0]["text"].endswith("more")
+
+
+def test_session_notes_are_cold(tmp_path):
+    s = _store(tmp_path)
+    long_body = "\n\n".join(f"para {i} " + "y" * 400 for i in range(30))
+    _spool(tmp_path, "cap-1.json", _session_env(long_body))
+    # legacy session envelope: no claude_session_id, but session-tagged
+    legacy = _session_env("user: legacy window", tags="session,pre-compact")
+    legacy.pop("claude_session_id")
+    _spool(tmp_path, "cap-2.json", legacy)
+    _spool(tmp_path, "cap-3.json", _ingest_env(title="Plain", content="ordinary note"))
+    drain.drain_captures(s, home=tmp_path)
+    rows = _note_rows(s)
+    sess = [r for r in rows if "session" in json.loads(r["metadata"]).get("tags", "")]
+    plain = [r for r in rows if r not in sess]
+    assert len(sess) > 2
+    assert all(r["enrich_state"] == "cold" for r in sess)
+    assert plain and all((r["enrich_state"] or "") != "cold" for r in plain)
+    # legacy path keeps today's content-hash id
+    assert any(r["doc_id"].startswith("note-") and not r["doc_id"].startswith("note-session-")
+               for r in sess)
+    # cold chunks never reach the enrichment backlog
+    backlog = {c["doc_id"] for c in s.unenriched_chunks(limit=1000)}
+    assert not backlog & {r["doc_id"] for r in sess}

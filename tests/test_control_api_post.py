@@ -573,3 +573,40 @@ def test_backup_run_endpoint(tmp_path):
         assert d.requests == 2
     finally:
         srv.stop()
+
+
+# --- /api/session/ingest follows the session-capture rules ---
+
+def _session_ingest(tmp_path, body):
+    srv = ControlServer(FakeDaemon(), home=str(tmp_path))
+    srv.start()
+    try:
+        r = _post(f"http://127.0.0.1:{srv.port}/api/session/ingest", srv.token, body)
+        return r.status, json.loads(r.read())
+    finally:
+        srv.stop()
+
+
+def _spooled(tmp_path):
+    return [json.loads(p.read_text())
+            for p in (tmp_path / "capture_inbox").glob("*.json")]
+
+
+def test_session_ingest_carries_claude_session_id_and_session_tag(tmp_path):
+    status, body = _session_ingest(tmp_path, {
+        "title": "Claude Code session abc", "content": "user: worked on X",
+        "tags": "claude_code", "claude_session_id": "sess-xyz"})
+    assert status == 200 and body["queued"] is True
+    [env] = _spooled(tmp_path)
+    assert env["claude_session_id"] == "sess-xyz"
+    assert "session" in env["tags"].split(",")
+    assert "session_id" not in env
+
+
+def test_session_ingest_skips_maintenance_and_sidechain(tmp_path):
+    for extra in ({"content": '<scheduled-task name="brain-enrich-hourly" file="x"> run'},
+                  {"content": "user: hi there", "is_sidechain": True},
+                  {"content": "user: hi there", "entrypoint": "sdk-cli"}):
+        status, body = _session_ingest(tmp_path, {"title": "S", **extra})
+        assert status == 200 and body["queued"] is False and body["skipped"]
+    assert not (tmp_path / "capture_inbox").exists() or not _spooled(tmp_path)

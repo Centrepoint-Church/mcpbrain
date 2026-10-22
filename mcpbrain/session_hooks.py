@@ -254,26 +254,78 @@ def _action_needed(home: str) -> str:
     return "## ⚠️ Action needed\n" + "\n".join(lines)
 
 
-def _read_transcript_turns(transcript_path: str) -> list[tuple[str, str]]:
-    """Return [(role, text), ...] for user+assistant turns in a transcript JSONL.
+# Markers that a transcript is NOT an interactive owner session. Confirmed
+# against real Claude Code transcripts (2026-10-22):
+#   * subagent transcripts carry "isSidechain": true on every line;
+#   * headless `claude -p` / Agent SDK runs carry "entrypoint": "sdk-cli"
+#     (interactive sessions are "cli" or "claude-desktop") -- any "sdk*"
+#     entrypoint is treated as non-interactive;
+#   * a scheduled task's first user turn begins with the
+#     `<scheduled-task name="..." file="...">` tag, and a scheduler-fired turn
+#     carries origin.subkind == "scheduled-trigger".
+# Maintenance runs (brain-enrich-hourly, the gardeners, the actions sweep)
+# are the brain talking to itself: capturing them minted notes about the
+# brain's own housekeeping (170 live notes).
+_SCHEDULED_TASK_MARKER = "<scheduled-task"
+_NON_INTERACTIVE_ENTRYPOINT_PREFIXES = ("sdk",)
 
-    Empty list on any read/parse failure (missing file, bad JSON) so callers
+
+def is_non_interactive_entrypoint(entrypoint) -> bool:
+    ep = str(entrypoint or "").strip().lower()
+    return bool(ep) and ep.startswith(_NON_INTERACTIVE_ENTRYPOINT_PREFIXES)
+
+
+def is_maintenance_text(text: str) -> bool:
+    """True when a captured session body's FIRST user turn carries the
+    scheduled-task marker. Accepts a raw first prompt or the "user: ..." body
+    shape `_capture_session` produces. Only the first turn counts, so a
+    conversation that merely mentions the tag later is still captured."""
+    t = (text or "").lstrip()
+    if t.startswith("user:"):
+        t = t[len("user:"):].lstrip()
+    return t.startswith(_SCHEDULED_TASK_MARKER)
+
+
+def _read_transcript(transcript_path: str) -> tuple[list[tuple[str, str]], dict]:
+    """Return (turns, info) for a transcript JSONL.
+
+    turns: [(role, text), ...] for user+assistant turns, EXCLUDING sidechain
+    (subagent) turns. info: {"session_id": the transcript's sessionId or "",
+    "maintenance": True when the transcript is a subagent, a headless/SDK run
+    or a scheduled-task run -- never captured}.
+
+    Empty turns on any read/parse failure (missing file, bad JSON) so callers
     degrade to "nothing to capture" rather than raising into a hook.
     """
+    info = {"session_id": "", "maintenance": False}
     try:
         raw = Path(transcript_path).read_text()
     except OSError:
-        return []
+        return [], info
     turns: list[tuple[str, str]] = []
+    saw_main = saw_side = False
+    first_user_seen = False
     for line in raw.splitlines():
         try:
             ev = json.loads(line)
         except ValueError:
             continue
+        if not isinstance(ev, dict):
+            continue
+        if not info["session_id"] and isinstance(ev.get("sessionId"), str):
+            info["session_id"] = ev["sessionId"]
+        if is_non_interactive_entrypoint(ev.get("entrypoint")):
+            info["maintenance"] = True
         msg = ev.get("message") or {}
+        if not isinstance(msg, dict):
+            continue
         role = msg.get("role")
         if role not in ("user", "assistant"):
             continue
+        if ev.get("isSidechain") is True:
+            saw_side = True
+            continue
+        saw_main = True
         c = msg.get("content")
         if isinstance(c, str):
             text = c
@@ -282,24 +334,46 @@ def _read_transcript_turns(transcript_path: str) -> list[tuple[str, str]]:
         else:
             text = ""
         text = text.strip()
+        if role == "user" and not first_user_seen and text:
+            first_user_seen = True
+            origin = ev.get("origin")
+            if (text.startswith(_SCHEDULED_TASK_MARKER)
+                    or (isinstance(origin, dict)
+                        and origin.get("subkind") == "scheduled-trigger")
+                    or ev.get("turnOrigin") == "scheduled"):
+                info["maintenance"] = True
         if text:
             turns.append((role, text))
-    return turns
+    if saw_side and not saw_main:
+        info["maintenance"] = True   # a subagent's own transcript
+    return turns, info
+
+
+def _read_transcript_turns(transcript_path: str) -> list[tuple[str, str]]:
+    """[(role, text), ...] for the non-sidechain user+assistant turns."""
+    return _read_transcript(transcript_path)[0]
 
 
 def _capture_session(home: str, transcript_path: str, *, session_id: str,
                      source: str, tags: str = "session") -> None:
-    """Queue an ingest capture of a conversation for the enrich pipeline.
+    """Queue an ingest capture of a conversation.
 
     Captures BOTH sides of the conversation: decisions and outcomes live in the
     assistant's replies, not just the user's prompts, so a user-only clip can't
     summarise what was actually done. "Substantial" is still gated on user
     engagement (turns/chars) so an assistant being verbose on a trivial prompt
     doesn't trip a capture. Best-effort: any failure is swallowed.
+
+    The envelope carries `claude_session_id` (the FULL id) so the drain keeps
+    ONE note per session -- each capture replaces the last -- and writes it
+    cold: session notes stay searchable but are never mined for graph claims.
+    Subagent, headless/SDK and scheduled-task transcripts are not captured.
     """
     if not transcript_path:
         return
-    turns = _read_transcript_turns(transcript_path)
+    turns, info = _read_transcript(transcript_path)
+    if info["maintenance"]:
+        return
     user_turns = [t for r, t in turns if r == "user"]
     joined_user = " ".join(user_turns)
     if len(user_turns) < _MIN_TURNS and len(joined_user) < _MIN_CHARS:
@@ -309,16 +383,21 @@ def _capture_session(home: str, transcript_path: str, *, session_id: str,
         return  # no usable text -> nothing to capture
     if len(body) > _MAX_CONTENT:
         body = body[-_MAX_CONTENT:]  # keep the most recent context
+    sid = (session_id or "").strip()
+    if not sid or sid == "unknown":
+        sid = info["session_id"]
     stamp = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
     envelope = {
         "kind": "ingest",
         "source": source,
         "captured_at": stamp,
-        "title": f"Session {session_id[:8]} {stamp[:10]}",
+        "title": f"Session {(sid or 'unknown')[:8]} {stamp[:10]}",
         "content": body,
         "tags": tags,
         "observation_type": "note",
     }
+    if sid:
+        envelope["claude_session_id"] = sid
     try:
         write_capture(home, envelope)
     except (ValueError, OSError):
