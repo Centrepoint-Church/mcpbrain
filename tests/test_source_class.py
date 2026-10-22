@@ -111,3 +111,43 @@ def test_join_label_ids_keeps_system_first():
     from mcpbrain.sync.normalise import join_label_ids
     out = join_label_ids([f"Label_{i}" * 3 for i in range(40)] + ["DRAFT", "INBOX"])
     assert out.startswith("DRAFT,INBOX") and len(out) <= 200
+
+
+def test_join_label_ids_keeps_generated_marker_through_clip():
+    """M11: on a heavily labelled message the cached mcpbrain/generated id is
+    kept right after the system labels, so the brief marker is never clipped."""
+    from mcpbrain.sync import normalise as nm
+    custom = [f"Label_{i:04d}" for i in range(60)]
+    ids = ["INBOX", *custom, "Label_GEN"]
+    assert "Label_GEN" not in nm.join_label_ids(ids, keep=())
+    assert "Label_GEN" in nm.join_label_ids(ids, keep={"Label_GEN"}).split(",")
+    try:
+        nm.set_priority_label_ids({"Label_GEN"})
+        out = nm.join_label_ids(ids).split(",")
+        assert out[:2] == ["INBOX", "Label_GEN"]
+    finally:
+        nm.set_priority_label_ids(())
+
+
+def test_generated_label_resolution_sets_priority_ids(tmp_path):
+    from datetime import datetime, timezone
+    from mcpbrain.store import Store
+    from mcpbrain.sync import gmail, normalise as nm
+
+    class Svc:
+        def users(self): return self
+        def labels(self): return self
+        def list(self, userId): return self
+        def execute(self, num_retries=0):
+            return {"labels": [{"id": "Label_77", "name": "mcpbrain/generated"}]}
+
+    s = Store(tmp_path / "s.sqlite3", dim=4); s.init()
+    try:
+        now = datetime(2026, 10, 1, tzinfo=timezone.utc)
+        assert gmail.generated_label_ids(s, Svc(), now=now) == {"Label_77"}
+        assert nm._PRIORITY_LABEL_IDS == {"Label_77"}
+        nm.set_priority_label_ids(())
+        gmail.generated_label_ids(s, Svc(), now=now)          # cached path
+        assert nm._PRIORITY_LABEL_IDS == {"Label_77"}
+    finally:
+        nm.set_priority_label_ids(())

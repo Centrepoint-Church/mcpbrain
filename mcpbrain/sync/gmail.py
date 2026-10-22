@@ -53,6 +53,7 @@ def generated_label_ids(store, service, *, now=None) -> frozenset:
 
     from mcpbrain.source_class import (
         GENERATED_LABEL_META_KEY, GENERATED_LABEL_NAME, cached_generated_label_ids)
+    from mcpbrain.sync.normalise import set_priority_label_ids
     now = now or datetime.now(timezone.utc)
     raw = store.get_meta(GENERATED_LABEL_META_KEY)
     if raw:
@@ -61,7 +62,9 @@ def generated_label_ids(store, service, *, now=None) -> frozenset:
             if at.tzinfo is None:
                 at = at.replace(tzinfo=timezone.utc)
             if (now - at).total_seconds() < _GENERATED_LABEL_TTL_S:
-                return cached_generated_label_ids(store)
+                ids = cached_generated_label_ids(store)
+                set_priority_label_ids(ids)        # kept through the label clip
+                return ids
         except (ValueError, TypeError, AttributeError):
             pass                        # malformed cache: resolve afresh
     resp = service.users().labels().list(userId="me").execute(
@@ -70,6 +73,7 @@ def generated_label_ids(store, service, *, now=None) -> frozenset:
                  if lb.get("name") == GENERATED_LABEL_NAME and lb.get("id"))
     store.set_meta(GENERATED_LABEL_META_KEY,
                    json.dumps({"ids": ids, "at": now.isoformat()}))
+    set_priority_label_ids(ids)
     return frozenset(ids)
 
 

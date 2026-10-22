@@ -315,13 +315,30 @@ _SYSTEM_LABELS = ("DRAFT", "SENT", "INBOX", "TRASH", "SPAM", "UNREAD", "STARRED"
                   "IMPORTANT")
 
 
-def join_label_ids(label_ids, limit: int = 200) -> str:
-    """Comma-join label ids for metadata, system labels first, so a clip at
-    `limit` drops custom ids rather than DRAFT/SENT (source classification
-    reads them). Custom ids that do not fit are dropped whole, never cut."""
+# Custom label ids that must survive the clip as surely as the system ones:
+# the resolved `mcpbrain/generated` marker label (the brief rule). Set by
+# sync.gmail.generated_label_ids on every cycle (cached or fresh), so every
+# normaliser in the daemon process — bodies, attachments, reflow — keeps it
+# without each caller threading the store through (M11).
+_PRIORITY_LABEL_IDS: frozenset = frozenset()
+
+
+def set_priority_label_ids(ids) -> None:
+    global _PRIORITY_LABEL_IDS
+    _PRIORITY_LABEL_IDS = frozenset(str(x) for x in (ids or ()) if str(x).strip())
+
+
+def join_label_ids(label_ids, limit: int = 200, *, keep=None) -> str:
+    """Comma-join label ids for metadata, system labels first, then the
+    priority ids (`keep`, default: the cached generated-marker ids), so a clip
+    at `limit` drops ordinary custom ids rather than DRAFT/SENT or the brief
+    marker (source classification reads them). Ids that do not fit are
+    dropped whole, never cut."""
     ids = [str(x) for x in (label_ids or [])]
+    keep = _PRIORITY_LABEL_IDS if keep is None else frozenset(keep)
     ordered = [x for x in _SYSTEM_LABELS if x in ids]
-    ordered += [x for x in ids if x not in _SYSTEM_LABELS]
+    ordered += [x for x in ids if x in keep and x not in ordered]
+    ordered += [x for x in ids if x not in ordered]
     out = ""
     for x in ordered:
         nxt = x if not out else out + "," + x
