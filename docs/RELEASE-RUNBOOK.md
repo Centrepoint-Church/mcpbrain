@@ -863,6 +863,43 @@ ON) and simply fail cleanly while it is down. Only if `tool_exec_in_daemon` was
 set `false` would they write in-process — then leave them alone until the
 daemon is back.
 
+## 9. Ingestion clean-up (`bin/clean_ingestion.py`, attended, one-off per install)
+
+Spec: `docs/superpowers/specs/2026-10-22-ingestion-integrity-design.md`. Archives
+open actions and marks links that came from the brain's own output (session notes,
+briefs, drafts, consolidated notes, digests), dedupes actions by meaning, and
+recounts relation strength from distinct evidence sources. Nothing is deleted:
+every change is logged in `cleanup_log` and `--undo STEP` reverses it.
+
+**Run it straight after installing the release that carries the new schema.**
+Until `sources_backfill` runs, every relation counts as legacy (community edges
+all weigh 1).
+
+1. Configure the brief rules if this install receives brain-generated briefs
+   (`config.json` → `"ingest": {"generated_gmail_subject_prefixes": [...],
+   "generated_drive_folders": [...]}`). Without rules, `--yes` refuses unless
+   you pass `--no-brief-rules`.
+2. Rehearse on a copy (no daemon stop needed — a copy outside the app dir is
+   not refused):
+   ```bash
+   sqlite3 "file:$APP/brain.sqlite3?mode=ro" "VACUUM INTO '/tmp/cc/brain.sqlite3'"
+   cp "$APP/config.json" /tmp/cc/
+   python bin/clean_ingestion.py --home /tmp/cc --store /tmp/cc/brain.sqlite3 --yes
+   MCPBRAIN_HOME=/tmp/cc uv run python tests/eval/run_eval.py --gold --k 10
+   ```
+   Compare against the same gold run on an untouched copy: recall@10 must not
+   drop; MRR no worse than one rank step.
+3. Live: `launchctl bootout gui/$(id -u)/com.mcpbrain`, confirm no daemon
+   process, then `python bin/clean_ingestion.py` (dry run; needs the new schema,
+   so on a store the new daemon never opened run step 4 directly — it snapshots
+   first), then `python bin/clean_ingestion.py --yes`. It prints the verified
+   snapshot path and ends with `integrity_check ok` (exit 2 otherwise).
+4. `launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/com.mcpbrain.plist`,
+   then `mcpbrain doctor` and the gold gate on the live store.
+5. To reverse one class: bootout, `python bin/clean_ingestion.py --undo <step> --yes`
+   (undo later steps first; a value changed since the run is reported as
+   SKIPPED and kept).
+
 ## Environment note — repos live outside iCloud
 
 All repos now live under `~/GitHub` (moved off the iCloud-synced `~/Documents`

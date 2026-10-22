@@ -113,8 +113,9 @@ column is `deadline`.
   similarity (bge-small, cosine ≥ 0.88) against open actions of the same logical
   source (thread / base note / file / event) and same-owner open actions in the
   30-day window; keep the exact/lexical fast path. Re-check against the LIVE open
-  list at apply time. When `stale_reextract` re-runs a source, its new extraction
-  supersedes that source's open extraction-sourced actions instead of adding.
+  list at apply time. *(Amended in build: supersede-on-silence was REMOVED. The
+  extraction prompt tells the model to stay silent about still-valid actions, so
+  silence is not completion; closing stays with `resolved_action_ids`.)*
 - **Owner canonicalisation at write.** Owner strings resolve through the owner
   identity's aliases to one canonical owner; "Claude"/"assistant" owners are not
   written.
@@ -139,6 +140,9 @@ At ingest, a chunk whose normalised text hash equals an already-enriched chunk's
 is marked enriched with `dup_of = <canonical doc_id>` and not re-extracted; its
 evidence is the canonical's (same `source_key`), so it adds no strength.
 Recall is unchanged (retrieval already collapses identical content).
+*(Amended in build: carry applies only to My Drive files and notes. Gmail is
+excluded because a carried message loses its sender links and thread actions;
+shared drives are excluded because the cache payload would be withheld forever.)*
 
 ### 5. Removal paths
 
@@ -161,11 +165,15 @@ similarity dedupe, or dedupe could keep a derived copy and archive the real one)
 3. `source_brief`, `source_draft`, `source_consolidated`, `source_digest` —
    archive their open actions; cold-mark their chunks.
 4. `derived_links` — mark entity links / relations / observations whose source is
-   a derived class `derived=1` (excluded everywhere; not deleted).
+   a derived class `derived=1` (excluded everywhere; not deleted). *(Amended: a
+   relation is marked only at strength <= 1; a re-observed one stays visible with a
+   derived-class source row. Session notes are cold-marked, never superseded, and
+   `source_draft` re-queues the thread's evidence chunks.)*
 5. `dedup_embed` — cluster remaining open actions at cosine ≥ 0.88 within logical
    source; keep the one with a deadline/owner/earliest; archive the rest.
-6. `legacy_strength` — legacy `involved_in` rows: save strength to
-   `legacy_strength`, set `origin='legacy'`, exclude from strength ranking.
+6. `legacy_strength` — legacy rows: save strength to `legacy_strength`. *(Amended:
+   the legacy marker is "no evidence `relation_sources` rows", not
+   `origin='legacy'` — `origin` already means local/org.)*
 7. `sources_backfill` — populate `relation_sources` / `observation_sources` from
    existing provenance; recompute strength, observed_count, email_count, mentions.
 8. `source_gone` — archive open actions whose source no longer exists; mark

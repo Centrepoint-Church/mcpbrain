@@ -395,6 +395,55 @@ upload for the first time. `bin/optimise_store.py` still uses
 
 **Live verification (2026-10-21, this machine, installed from the working tree via bootout → reinstall → clear __pycache__ → bootstrap):** first base 921 MB / 42 files captured and uploaded in 11 min 13 s and committed; the stale 790 MB `snapshot.enc` was removed after the commit; Drive layout `<backup drive>/<email>/chain-20261021-5d5299/` (42 base files + records + manifest, 923 MB); prune's `name contains 'base-'` query matched 42 of 42 on real Drive. A second `mcpbrain backup` 10 minutes later produced a 4.1 MB delta and finished in 43 s. A resumable upload stopped at 32 MiB of 40 MiB resumed from a fresh transport using only the saved session and verified by md5 on real Drive. `mcpbrain restore --check` picks the new chain; the 16 June 2026 legacy file is now the LAST fallback. A scratch restore rebuilt the store from base + delta in 2 min 50 s: `integrity_check` ok, 255,149 chunks / 33,025 entities, sha256 equal to the capture's `db_sha256`, records + config restored, staging cleaned up. Still to measure: the 24-hour delta size (sets `base_threshold`, now 2.0).
 
+## Ingestion integrity (2026-10-22, source-only, NOT released)
+
+Spec `docs/superpowers/specs/2026-10-22-ingestion-integrity-design.md`, plan
+`docs/superpowers/plans/2026-10-22-ingestion-integrity.md`. **The brain was reading its
+own output back as evidence and counting repeats as support**: Claude session
+transcripts made 62% of open actions, daily briefs came back twice a day, drafts counted
+as commitments, consolidated notes and digests were re-extracted, and relation strength
+counted re-extractions, not sources.
+
+- **`mcpbrain/source_class.py` is the ONE classification** of every chunk's source:
+  evidence = `primary_mail` / `primary_doc` / `primary_event`; derived = `session` /
+  `brief` / `draft` / `consolidated` / `digest`; plus `duplicate`. Derived chunks are
+  COLD (searchable, never enriched, no owner/salience boost). Brief rules are config,
+  never code (`ingest.generated_gmail_subject_prefixes`, `ingest.generated_drive_folders`,
+  plus the `mcpbrain/generated` Gmail label / Drive `appProperties.mcpbrain_generated`).
+  A brief must be from AND to/cc only owner addresses. Attachments inherit their parent.
+- **Sessions:** one cold note per Claude session id (`note-session-<sha>`), FULL
+  transcript, never mined; subagent / SDK / scheduled-task transcripts are not captured.
+- **Strength = distinct EVIDENCE source keys** (`relation_sources` /
+  `observation_sources`), set, never incremented. The legacy marker is
+  `legacy_strength IS NOT NULL` with no evidence source rows — NOT `origin='legacy'`
+  (`origin` already means local/org). Derived rows (`derived=1`) are excluded from the
+  graph view, entity resources, prompts, org contribution and decay.
+- **Action dedupe is by meaning:** bge-small cosine >= 0.88 within the logical source,
+  owner-compatible (blank / 'unclear' match anything); lexical fallback if the embedder
+  fails. **Supersede-on-silence was built and REMOVED** — the extraction prompt tells the
+  model to stay silent about still-valid actions, so silence is not completion. Do not
+  reintroduce it.
+- **Duplicate carry is narrow ON PURPOSE:** only My Drive files and notes (>= 200 chars,
+  from an enriched evidence canonical). Never Gmail (a carried message loses its sender
+  links and thread actions) and never shared drives (the payload would be withheld forever).
+- Notes extract as one thread (`note_id`); threads sort by real time
+  (`parsedate_to_datetime`), not the date string. Source removal archives actions
+  (`source_gone`) and marks links derived, revived if the source returns.
+- **`bin/clean_ingestion.py`** — attended, reversible, dry-run default; `--yes` refuses
+  while the daemon runs, snapshots first, `integrity_check` after; `--undo STEP` restores
+  from `cleanup_log` (old+new values; drifted rows are skipped and kept). A relation is
+  marked derived only at strength <= 1 (re-observed ones stay visible). `source_draft`
+  re-queues the thread's evidence chunks so real commitments come back from SENT mail.
+- **Measured on a VACUUM INTO copy of the live store (2026-10-22):** open actions
+  **12,522 -> 2,552** (session 7,727; consolidated 430; draft 410; digest 407; brief 183;
+  source_gone 452; embed dedupe 361); 41 draft threads re-queued for extraction. Gold on
+  the copy vs an untouched copy, same harness: **recall@10 0.867 -> 0.900, MRR 0.604 ->
+  0.601**. Full 12-step undo restores every ordinary table row-for-row.
+- **INSTALL AND CLEAN-UP MUST BE BACK TO BACK.** Until `sources_backfill` runs, every
+  relation reads as legacy, so community edges all weigh 1 and clusters reshape. The live
+  store has no `cleanup_log` until the new-schema daemon or a first `--yes` runs
+  `Store.init`, so a live dry run needs that first. Procedure: `docs/RELEASE-RUNBOOK.md` §9.
+
 ## Shipping caveats
 
 - **Current state (2026-09-29): the four version files (+ `uv.lock`) are at
