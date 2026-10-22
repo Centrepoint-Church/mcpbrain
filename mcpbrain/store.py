@@ -765,6 +765,13 @@ class ReflowOrphanError(RuntimeError):
 
 
 # Every (table, column) holding a chunk doc_id that a reflow must remap.
+# apply_reflow's final guard: clear a self-referencing dup_of on the given
+# new ids. A module constant so a test can EXPLAIN the exact statement.
+_SELF_DUP_GUARD_SQL = (
+    "UPDATE chunks SET dup_of=NULL, enrich_state=CASE WHEN "
+    "enrich_state='duplicate' THEN '' ELSE enrich_state END "
+    "WHERE doc_id IN ({qs}) AND dup_of IS NOT NULL AND dup_of=doc_id")
+
 _REFLOW_REF_COLUMNS = (
     ("entity_relations", "source_doc_id"),
     ("entity_observations", "source"),
@@ -4336,11 +4343,13 @@ class Store:
             self._release_stale_dups(
                 db, list(dict.fromkeys(list(plan.remap.values()) + new_ids
                                        + list(plan.deletes))))
-            # Final guard: a chunk is never its own duplicate.
-            db.execute(
-                "UPDATE chunks SET dup_of=NULL, enrich_state=CASE WHEN "
-                "enrich_state='duplicate' THEN '' ELSE enrich_state END "
-                "WHERE dup_of=doc_id")
+            # Final guard: a chunk is never its own duplicate. Only a new id
+            # can be (dup_of is assigned or remapped onto new ids alone), so
+            # it is scoped to them -- a PK lookup, never a scan of chunks.
+            for i in range(0, len(new_ids), 500):
+                batch = new_ids[i:i + 500]
+                db.execute(_SELF_DUP_GUARD_SQL.format(qs=",".join("?" * len(batch))),
+                           batch)
             db.executemany(
                 "INSERT INTO reflow_map(owner, old_doc_id, new_doc_id, reason, at) "
                 "VALUES(?,?,?,?,?)",

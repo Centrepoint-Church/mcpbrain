@@ -285,3 +285,15 @@ def test_reflow_same_owner_canonical_never_self_references(tmp_path):
             assert state != "duplicate", (d, state)
         else:
             assert rows.get(dup, (None,))[0] is None  # canonical is not itself a dup
+
+
+def test_self_dup_guard_does_not_scan_chunks(tmp_path):
+    from mcpbrain.store import _SELF_DUP_GUARD_SQL
+    s = _store(tmp_path)
+    with s._connect() as db:
+        plan = " ".join(r[-1] for r in db.execute(
+            "EXPLAIN QUERY PLAN " + _SELF_DUP_GUARD_SQL.format(qs="?,?"),
+            ("gdrive-D-0", "gdrive-D-1")))
+    assert "SCAN chunks" not in plan, plan
+    assert ("idx_chunks_dup_of" in plan or "doc_id" in plan
+            or "autoindex" in plan), plan
