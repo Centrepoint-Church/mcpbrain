@@ -5616,6 +5616,73 @@ class Store:
                 "SELECT winner_id,loser_id,loser_name,method,at FROM entity_merge_log "
                 "ORDER BY id").fetchall()]
 
+    def supersede_older_drafts(self, thread_id: str) -> list[str]:
+        """Keep only the newest DRAFT version of a Gmail thread live in recall.
+
+        Every save of a Gmail draft is a NEW message id, so one reply drafted in
+        five sittings lands as five overlapping versions (spec: 451 versions,
+        298 superseded). Among this thread's DRAFT-labelled chunks, the newest
+        message — by parsed `date`, then by latest rowid — is left alone; every
+        chunk of every other draft message is set `enrich_state='cold'` and
+        stamped `metadata.superseded = true`. Idempotent (rows already in that
+        state are not rewritten). Returns the doc_ids changed by this call.
+
+        Nothing is deleted. Non-draft messages of the thread (including the
+        SENT version of the same reply) are never touched. The newest draft is
+        not marked superseded; it is cold anyway as a derived class (prepare's
+        derived gate), and cold chunks stay in recall.
+        """
+        if not thread_id:
+            return []
+        from email.utils import parsedate_to_datetime
+
+        def _ts(raw) -> float:
+            try:
+                dt = parsedate_to_datetime(str(raw or ""))
+                return dt.timestamp() if dt is not None else 0.0
+            except (TypeError, ValueError, IndexError, OverflowError):
+                pass
+            try:
+                return datetime.fromisoformat(str(raw)).timestamp()
+            except (TypeError, ValueError, OverflowError):
+                return 0.0
+
+        with self._connect(write=True) as db:
+            rows = db.execute(
+                "SELECT rowid, doc_id, metadata, enrich_state FROM chunks "
+                f"WHERE {_meta_extract('$.thread_id')} = ?", (thread_id,)).fetchall()
+            drafts: dict[str, dict] = {}
+            for r in rows:
+                meta = json.loads(r["metadata"] or "{}")
+                if meta.get("source_type") != "gmail":
+                    continue
+                raw = meta.get("labels") or ""
+                labels = ({str(x).strip() for x in raw} if isinstance(raw, (list, tuple))
+                          else {x.strip() for x in str(raw).split(",")})
+                if "DRAFT" not in labels:
+                    continue
+                mid = meta.get("message_id") or r["doc_id"]
+                d = drafts.setdefault(mid, {"ts": 0.0, "rowid": 0, "rows": []})
+                d["ts"] = max(d["ts"], _ts(meta.get("date")))
+                d["rowid"] = max(d["rowid"], r["rowid"])
+                d["rows"].append((r["doc_id"], meta, r["enrich_state"]))
+            if len(drafts) < 2:
+                return []
+            newest = max(drafts, key=lambda m: (drafts[m]["ts"], drafts[m]["rowid"]))
+            changed = []
+            for mid, d in drafts.items():
+                if mid == newest:
+                    continue
+                for doc_id, meta, state in d["rows"]:
+                    if meta.get("superseded") is True and state == "cold":
+                        continue
+                    meta["superseded"] = True
+                    db.execute(
+                        "UPDATE chunks SET metadata=?, enrich_state='cold' WHERE doc_id=?",
+                        (json.dumps(meta), doc_id))
+                    changed.append(doc_id)
+            return changed
+
     def thread_chunks(self, thread_id: str) -> list[dict]:
         """Return all chunks whose metadata.thread_id matches thread_id.
 

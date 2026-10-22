@@ -479,7 +479,7 @@ class ReflowContext:
             fmeta = self.drive.files().get(
                 fileId=fid, supportsAllDrives=True,
                 fields="id,name,mimeType,modifiedTime,version,parents,md5Checksum,"
-                       "size,owners,driveId").execute(num_retries=3)
+                       "size,owners,driveId,appProperties").execute(num_retries=3)
         except HttpError as exc:
             if _http_status(exc) == 404:
                 self._stamp(old, "source_gone")     # the delta sync owns removal

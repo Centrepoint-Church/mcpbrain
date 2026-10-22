@@ -61,6 +61,30 @@ class Rules:
         )
 
 
+# Store meta key holding the resolved id(s) of the Gmail label NAMED
+# GENERATED_LABEL_NAME. Written by sync.gmail.generated_label_ids (which has a
+# Gmail service); read here by anything that only has the store (prepare).
+GENERATED_LABEL_NAME = "mcpbrain/generated"
+GENERATED_LABEL_META_KEY = "gmail_generated_label_id"
+
+
+def cached_generated_label_ids(store) -> frozenset:
+    """The cached `mcpbrain/generated` label id(s), or an empty set.
+
+    Never raises: an absent cache, a malformed value or a store without meta
+    support all mean "no marker label known yet" — the subject/folder brief
+    rules and every other class still apply."""
+    import json
+    try:
+        raw = store.get_meta(GENERATED_LABEL_META_KEY)
+        if not raw:
+            return frozenset()
+        ids = json.loads(raw).get("ids") or []
+        return frozenset(str(i) for i in ids if str(i).strip())
+    except Exception:  # noqa: BLE001 — a cache miss must never block prepare
+        return frozenset()
+
+
 def is_evidence(cls: SourceClass) -> bool:
     return cls in EVIDENCE
 

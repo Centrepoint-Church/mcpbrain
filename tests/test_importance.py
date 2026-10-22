@@ -349,3 +349,18 @@ def test_recency_decay_empty_date_falls_through_to_captured_at():
     from mcpbrain.importance import recency_decay
     now = datetime.now(timezone.utc).isoformat()
     assert recency_decay({"date": "", "captured_at": now}) > 0.98
+
+
+def test_draft_no_owner_boost():
+    """A DRAFT is the owner's unsent working version, not a commitment: it gets
+    no owner-authored boost even though the sender is the owner — and not even
+    with an explicit flag or a co-present SENT label."""
+    from mcpbrain.importance import _is_owner_authored, score_structural
+    owner = "dana@northgatetrust.org"
+    draft = {"sender": f"Dana Okafor <{owner}>", "labels": "DRAFT"}
+    assert _is_owner_authored(draft, owner) is False
+    assert _is_owner_authored({**draft, "sender_is_owner": True}, owner) is False
+    assert _is_owner_authored({"sender": owner, "labels": ["DRAFT", "SENT"]}, owner) is False
+    sent = {"sender": f"Dana Okafor <{owner}>", "labels": "SENT"}
+    assert _is_owner_authored(sent, owner) is True
+    assert score_structural(sent, owner_email=owner) > score_structural(draft, owner_email=owner)

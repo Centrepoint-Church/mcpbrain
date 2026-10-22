@@ -97,7 +97,20 @@ def _is_owner_authored(metadata: dict, owner_email: str) -> bool:
     Prefers explicit metadata flags; otherwise derives from the sender address
     matching owner_email, or a Gmail 'SENT' label. Live ingest doesn't set the
     sender_is_owner flag, so this derivation is what actually lights up the
-    high-salience band for the owner's own words."""
+    high-salience band for the owner's own words.
+
+    A DRAFT is never owner-authored for this purpose (spec §2): it carries the
+    owner as sender, but it is an unsent working version — the commitment is
+    the SENT message, which arrives as its own message and gets the boost.
+    Checked first, so neither an explicit flag nor the sender match can lift a
+    draft into the owner band."""
+    raw = metadata.get("labels") or []
+    if isinstance(raw, str):
+        labels = [p.strip().lower() for p in raw.split(",")]
+    else:
+        labels = [str(lb).strip().lower() for lb in raw]
+    if "draft" in labels:
+        return False
     if metadata.get("sender_is_owner") or metadata.get("from_owner"):
         return True
     oe = (owner_email or "").strip().lower()
@@ -105,11 +118,7 @@ def _is_owner_authored(metadata: dict, owner_email: str) -> bool:
         sender = str(metadata.get("sender") or metadata.get("from") or "").lower()
         if oe in sender:
             return True
-    labels = metadata.get("labels") or []
-    if isinstance(labels, str):
-        labels = labels.lower()
-        return "sent" in [p.strip() for p in labels.split(",")]
-    return any(str(lb).strip().lower() == "sent" for lb in labels)
+    return "sent" in labels
 
 
 def score_structural(metadata: dict, *, owner_email: str = "") -> float:

@@ -431,3 +431,23 @@ def test_consolidated_multi_chunk_note_carries_note_id(tmp_path):
     ids = {json.loads(r[1]).get("note_id") for r in rows}
     assert len(ids) == 1 and None not in ids   # all pieces share one note_id
     assert s.note_chunks() and len(s.note_chunks()) == 1   # one note, not N
+
+
+def test_consolidated_note_written_cold_and_never_core(store):
+    """A consolidated note is a machine summary, never evidence: written cold
+    (still a row, so still searchable), so it never re-queues for extraction and
+    is never a core candidate."""
+    from mcpbrain.consolidation import _write_note
+    doc_id = _write_note(store, [{"doc_id": "src-1"}], "A short durable note.")
+    with store._connect() as db:
+        state = db.execute("SELECT enrich_state FROM chunks WHERE doc_id=?",
+                           (doc_id,)).fetchone()[0]
+    assert state == "cold"
+    assert doc_id not in {c["doc_id"] for c in store.unenriched_chunks()}
+    assert doc_id not in {c["doc_id"] for c in store.top_core_candidates(limit=50)}
+    long_id = _write_note(store, [{"doc_id": "src-2"}], ("Word " * 400 + "\n\n") * 6)
+    with store._connect() as db:
+        states = {r[0] for r in db.execute(
+            "SELECT enrich_state FROM chunks WHERE doc_id LIKE ?",
+            (long_id.rsplit("-", 1)[0] + "-%",))}
+    assert states == {"cold"}

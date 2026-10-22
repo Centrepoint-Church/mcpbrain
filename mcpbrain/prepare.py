@@ -415,10 +415,80 @@ _PROMOTIONAL_LABELS = frozenset({
 _MIN_DRIVE_TEXT = 200
 
 
-def should_enrich(chunk: dict) -> bool:
+def _chunk_meta(chunk: dict) -> dict:
+    meta = chunk.get("metadata") or {}
+    if isinstance(meta, str):
+        import json as _json
+        try:
+            meta = _json.loads(meta)
+        except Exception:
+            meta = {}
+    return meta if isinstance(meta, dict) else {}
+
+
+def _is_derived(chunk: dict, rules) -> bool:
+    """True when the chunk's source class is derived (not evidence, not a
+    DUPLICATE — a duplicate carries its canonical's evidence and is handled by
+    the dedupe path, not cold-marked here)."""
+    from mcpbrain import source_class as sc
+    cls = sc.classify(chunk.get("doc_id") or "", _chunk_meta(chunk),
+                      rules if rules is not None else sc.Rules())
+    return not (cls is sc.SourceClass.DUPLICATE or sc.is_evidence(cls))
+
+
+def derived_cold(store, chunks, rules) -> list[str]:
+    """Cold-mark every chunk whose source class is derived; return their ids.
+
+    Derived sources (sessions, briefs, drafts, consolidated notes, digests —
+    spec §1) stay embedded and searchable but are never graph-extracted, so
+    they can mint no actions, links, relations or observations. Unlike the
+    salience gate this is NOT optional: prepare_units runs it whether or not
+    `salience_gate` is enabled (a derived chunk is never evidence, whatever a
+    cost knob says). Reversible like every cold mark (set_enrich_state '')."""
+    cold = [c["doc_id"] for c in chunks
+            if c.get("doc_id") and _is_derived(c, rules)]
+    if cold:
+        store.set_enrich_state(cold, "cold")
+    return cold
+
+
+def _apply_derived_gate(store, batches: list, rules, *, bulk_section=None,
+                        budget=None) -> tuple[list, int]:
+    """derived_cold over each batch; drop the cold chunks (and emptied
+    batches) from what goes on to extraction. Bracketing and budget exactly as
+    _apply_salience_gate — the unreached tail is dropped this cycle, never
+    passed through ungated."""
+    if bulk_section is None:
+        bulk_section = nullcontext
+    result, total = [], 0
+    for done, batch in enumerate(batches):
+        if _budget_spent(budget, "derived gate", done, len(batches)):
+            break
+        with bulk_section():
+            cold = set(derived_cold(store, batch.chunks, rules))
+        total += len(cold)
+        if not cold:
+            result.append(batch)
+            continue
+        kept = [c for c in batch.chunks if c.get("doc_id") not in cold]
+        if kept:
+            import copy
+            nb = copy.copy(batch)
+            nb.chunks = kept
+            nb.doc_ids = [d for d in batch.doc_ids if d not in cold]
+            result.append(nb)
+    if total:
+        log.info("derived gate: %d derived chunk(s) cold-marked", total)
+    return result, total
+
+
+def should_enrich(chunk: dict, rules=None) -> bool:
     """Return True when a chunk is worth LLM graph-extraction.
 
     Source-aware gate:
+    - Any source: a DERIVED source class (session, brief, draft, consolidated,
+      digest — source_class.classify) is never extracted. `rules` carries the
+      configured brief rules; without it the rule-free classes still apply.
     - Any source: skip a chunk tagged content_subtype 'table' (I1).
     - Email: skip CATEGORY_PROMOTIONS/UPDATES Gmail labels (in addition to the
       existing _filter_noise sender/subject checks). The label check works on the
@@ -432,13 +502,9 @@ def should_enrich(chunk: dict) -> bool:
 
     Returns True for any unrecognised source (fail-open, no false negatives).
     """
-    meta = chunk.get("metadata") or {}
-    if isinstance(meta, str):
-        import json as _json
-        try:
-            meta = _json.loads(meta)
-        except Exception:
-            meta = {}
+    if _is_derived(chunk, rules):
+        return False
+    meta = _chunk_meta(chunk)
 
     # The chunk metadata field is `source_type` (not `source`); fall back to the
     # legacy key and to structural hints (thread_id ⇒ email, file_id/mime ⇒ Drive).
@@ -1149,10 +1215,19 @@ def prepare_units(store, *, thread_cap: int, char_budget: int,
     if now is None:
         now = datetime.datetime.now(datetime.timezone.utc)
     batches = _group_unenriched_threads(store, thread_cap=thread_cap)
+    _home = str(config.app_dir())
+    # Derived sources first, and UNCONDITIONALLY (not behind salience_gate):
+    # a session, brief, draft, consolidated note or digest is never evidence.
+    # The Gmail marker label id comes from the store-meta cache the sync cycle
+    # maintains (prepare has no Gmail service).
+    from mcpbrain import source_class as _sc
+    rules = _sc.Rules.from_config(
+        home or _home, generated_label_ids=_sc.cached_generated_label_ids(store))
+    batches, derived_n = _apply_derived_gate(store, batches, rules,
+                                             bulk_section=bulk_section, budget=budget)
     # Q1 salience gate: run before noise filter so cold-marked chunks are excluded
     # from the thread_cap count. Gate is behind a config flag (default OFF).
     salience_summary = {}
-    _home = str(config.app_dir())
     if config.salience_gate_enabled(_home):
         batches, salience_summary = _apply_salience_gate(
             store, batches,
@@ -1195,6 +1270,8 @@ def prepare_units(store, *, thread_cap: int, char_budget: int,
     summary["batch_id"] = data.get("batch_id")
     if salience_summary:
         summary["salience_gate"] = salience_summary
+    if derived_n:
+        summary["derived_cold"] = derived_n
     return summary
 
 

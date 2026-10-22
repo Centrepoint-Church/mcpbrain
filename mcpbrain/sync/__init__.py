@@ -15,7 +15,7 @@ from mcpbrain.sync.drive import (
     discover_drive, discover_shared_drives, flush_skip_report, handle_drive_item,
     handle_shared_drive_item, list_shared_drives,
 )
-from mcpbrain.sync.gmail import discover_gmail, handle_gmail_item
+from mcpbrain.sync.gmail import discover_gmail, generated_label_ids, handle_gmail_item
 
 log = logging.getLogger(__name__)
 
@@ -169,6 +169,13 @@ def run_sync_cycle(store, embedder, *, gmail_service=None,
     disc_budget = Budget(DISCOVERY_BUDGET_S)
     if gmail_service is not None:
         discovered["gmail"] = discover_gmail(gmail_service, store, budget=disc_budget)
+        # Resolve the `mcpbrain/generated` marker label's id (cached, at most a
+        # list call a day) so prepare can classify generated mail as derived.
+        # Best-effort: a failure keeps the previous cache and the cycle goes on.
+        try:
+            generated_label_ids(store, gmail_service)
+        except Exception as exc:  # noqa: BLE001 — the marker is an optimisation
+            log.debug("sync: generated-label resolve skipped: %s", exc)
     if calendar_service is not None:
         discovered["calendar"] = discover_calendar(calendar_service, store,
                                                    budget=disc_budget,

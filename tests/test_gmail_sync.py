@@ -857,3 +857,107 @@ def test_reingest_messages_converges_a_body_that_normalises_to_nothing(
     assert body["metadata"]["reextract_empty"] is True
     # Metadata only -- the existing body text is left alone.
     assert body["text"] == "old body"
+
+
+# ---------------------------------------------------------------------------
+# Derived sources: the generated-marker label and draft superseding
+# ---------------------------------------------------------------------------
+
+class _LabelsSvc:
+    def __init__(self, labels):
+        self.labels_list = labels
+        self.calls = 0
+
+    def users(self):
+        return self
+
+    def labels(self):
+        return self
+
+    def list(self, userId):
+        self.calls += 1
+        return _Req({"labels": self.labels_list})
+
+
+def test_gmail_generated_label_resolved_and_cached(tmp_path):
+    """The `mcpbrain/generated` label NAME resolves to its id via labels().list,
+    is cached in store meta for prepare (which has no service), and is not
+    re-listed within a day. An absent label caches as an empty set."""
+    from datetime import datetime, timedelta, timezone
+
+    from mcpbrain import source_class as sc
+    from mcpbrain.sync.gmail import generated_label_ids
+    store = Store(tmp_path / "test.sqlite3", dim=4)
+    store.init()
+    svc = _LabelsSvc([{"id": "INBOX", "name": "INBOX"},
+                      {"id": "Label_42", "name": "mcpbrain/generated"},
+                      {"id": "Label_7", "name": "mcpbrain/generated-old"}])
+    t0 = datetime(2026, 10, 22, 8, 0, tzinfo=timezone.utc)
+    assert generated_label_ids(store, svc, now=t0) == frozenset({"Label_42"})
+    assert sc.cached_generated_label_ids(store) == frozenset({"Label_42"})
+    assert generated_label_ids(store, svc, now=t0 + timedelta(hours=5)) == {"Label_42"}
+    assert svc.calls == 1                      # cached: no second list
+    svc.labels_list = []
+    assert generated_label_ids(store, svc, now=t0 + timedelta(days=2)) == frozenset()
+    assert svc.calls == 2                      # refreshed after a day
+    assert sc.cached_generated_label_ids(store) == frozenset()
+    generated_label_ids(store, svc, now=t0 + timedelta(days=2, hours=1))
+    assert svc.calls == 2                      # an ABSENT label is cached too
+    # The cached id classifies a labelled message as a brief.
+    rules = sc.Rules(generated_label_ids=frozenset({"Label_42"}))
+    meta = {"source_type": "gmail", "labels": "INBOX,Label_42", "subject": "x"}
+    assert sc.classify("gmail-m-body-0", meta, rules) is sc.SourceClass.BRIEF
+
+
+def _draft_msg(mid, thread, date, body, labels=("DRAFT",)):
+    return {
+        "id": mid, "threadId": thread, "labelIds": list(labels),
+        "payload": {"mimeType": "text/plain", "headers": [
+            {"name": "Subject", "value": "Re: Hall booking"},
+            {"name": "From", "value": "dana@northgatetrust.org"},
+            {"name": "Date", "value": date}],
+            "body": {"data": b64(body)}},
+    }
+
+
+def _state(store, doc_id):
+    with store._connect() as db:
+        r = db.execute("SELECT enrich_state FROM chunks WHERE doc_id=?",
+                       (doc_id,)).fetchone()
+    return r[0] if r else None
+
+
+def test_older_drafts_superseded_newest_stays_searchable(tmp_path):
+    """Three saves of one reply arrive as three DRAFT message ids. The two older
+    ones are cold + superseded; the newest is not superseded and still a row
+    (recall keeps cold chunks). Arrival order does not matter — the newest is
+    chosen by Date — and the SENT message of the thread is never touched."""
+    store = Store(tmp_path / "test.sqlite3", dim=4)
+    store.init()
+    msgs = {
+        "d2": _draft_msg("d2", "T1", "Tue, 21 Oct 2026 10:00:00 +0000",
+                         "Draft two: we can confirm Hall B for Sunday."),
+        "d1": _draft_msg("d1", "T1", "Tue, 21 Oct 2026 09:00:00 +0000",
+                         "Draft one: we might confirm Hall B."),
+        "s1": _draft_msg("s1", "T1", "Tue, 21 Oct 2026 08:00:00 +0000",
+                         "The original request about Hall B.", labels=("SENT",)),
+        "d3": _draft_msg("d3", "T1", "Tue, 21 Oct 2026 11:00:00 +0000",
+                         "Draft three: confirmed Hall B for Sunday at 9."),
+        "x1": _draft_msg("x1", "T2", "Tue, 21 Oct 2026 07:00:00 +0000",
+                         "A draft on another thread entirely."),
+    }
+    svc = FakeService(messages=msgs)
+    for mid in ("d2", "d1", "s1", "x1", "d3"):
+        handle_gmail_item(svc, store, {"ref_id": mid, "version": "", "event": "upsert",
+                                       "modified_at": "2026-10-21T00:00:00"})
+    for old in ("d1", "d2"):
+        c = store.get_chunk(f"gmail-{old}-body-0")
+        assert c["metadata"]["superseded"] is True
+        assert _state(store, f"gmail-{old}-body-0") == "cold"
+    newest = store.get_chunk("gmail-d3-body-0")
+    assert newest is not None and "superseded" not in newest["metadata"]
+    sent = store.get_chunk("gmail-s1-body-0")
+    assert "superseded" not in sent["metadata"] and _state(store, "gmail-s1-body-0") != "cold"
+    assert "superseded" not in store.get_chunk("gmail-x1-body-0")["metadata"]
+    # Idempotent: re-running changes nothing.
+    assert store.supersede_older_drafts("T1") == []

@@ -203,6 +203,10 @@ def _write_note(store, cluster: list[dict], summary: str) -> str | None:
         store.upsert_chunk(doc_id, summary, content_hash_full, metadata)
         store.set_chunk_type(doc_id, "semantic")
         store.set_chunk_tier(doc_id, "hot")
+        # A machine summary is never evidence (spec §2): searchable, but cold
+        # so it is never re-extracted — and, because top_core_candidates
+        # requires enrich_state != 'cold', never promoted into core either.
+        store.set_enrich_state([doc_id], "cold")
         return doc_id
 
     first_doc_id = None
@@ -227,6 +231,7 @@ def _write_note(store, cluster: list[dict], summary: str) -> str | None:
         store.upsert_chunk(doc_id, piece, piece_hash, metadata)
         store.set_chunk_type(doc_id, "semantic")
         store.set_chunk_tier(doc_id, "hot")
+        store.set_enrich_state([doc_id], "cold")    # never evidence; see above
     return first_doc_id
 
 

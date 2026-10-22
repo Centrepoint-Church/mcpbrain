@@ -1526,3 +1526,112 @@ def test_split_gapped_document_marks_a_truncated_tail_on_the_last_part_only():
     assert len(parts) > 1
     assert not parts[0]["messages"][0]["text"].endswith("[…]\n\n")
     assert parts[-1]["messages"][0]["text"].endswith("[…]\n\n")
+
+
+# --- derived source classes (ingestion integrity §2) -------------------------
+
+def _derived_store(tmp_path, monkeypatch, cfg):
+    monkeypatch.setenv("MCPBRAIN_HOME", str(tmp_path))
+    (tmp_path / "config.json").write_text(json.dumps(cfg))
+    store = Store(str(tmp_path / "b.sqlite3"), dim=4)
+    store.init()
+    return store
+
+
+def _thread_unit_doc_ids(tmp_path):
+    units_dir = tmp_path / "enrich_queue" / "units"
+    out = set()
+    for u in (units_dir.glob("*.json") if units_dir.exists() else []):
+        d = json.loads(u.read_text())
+        if d.get("kind") == "thread":
+            for t in d["threads"]:
+                for m in t.get("messages") or []:
+                    out.update(m.get("chunk_doc_ids") or [])
+                out.update(t.get("doc_ids") or [])
+    return out
+
+
+def _cold(store, doc_id):
+    with store._connect() as db:
+        return db.execute("SELECT enrich_state FROM chunks WHERE doc_id=?",
+                          (doc_id,)).fetchone()[0] == "cold"
+
+
+def test_sent_version_is_primary_draft_is_not(tmp_path, monkeypatch):
+    """A reply drafted then sent: the DRAFT version is derived (cold, never
+    extracted), the SENT version is primary and goes on to extraction — so the
+    reply's actions come from the sent message only. Runs with the salience
+    gate OFF: the derived gate is not optional."""
+    store = _derived_store(tmp_path, monkeypatch, {"salience_gate": False})
+    owner = "Dana Okafor <dana@northgatetrust.org>"
+    body = "Can you confirm the Hall B booking for Sunday? I will send the roster by Friday."
+    common = {"source_type": "gmail", "thread_id": "T-reply", "sender": owner,
+              "to": "marcus@example.org", "subject": "Re: Hall B",
+              "content_type": "email_body", "chunk_index": 0, "chunk_total": 1}
+    store.upsert_chunk("gmail-d1-body-0", body, "h-d1",
+                       {**common, "message_id": "d1", "labels": "DRAFT",
+                        "date": "Tue, 21 Oct 2026 09:00:00 +0000"})
+    store.upsert_chunk("gmail-s1-body-0", body, "h-s1",
+                       {**common, "message_id": "s1", "labels": "SENT",
+                        "date": "Tue, 21 Oct 2026 10:00:00 +0000"})
+    _stub_context(monkeypatch)
+    summary = prepare.prepare_units(store, thread_cap=10, char_budget=100000,
+                                    resolution_due=False, now=_NOW, home=str(tmp_path))
+    assert _cold(store, "gmail-d1-body-0")
+    assert not _cold(store, "gmail-s1-body-0")
+    assert summary.get("derived_cold") == 1
+    sent_ids = _thread_unit_doc_ids(tmp_path)
+    assert "gmail-s1-body-0" in sent_ids
+    assert "gmail-d1-body-0" not in sent_ids
+    # should_enrich agrees on its own, for the resalience sweep.
+    assert prepare.should_enrich(store.get_chunk("gmail-d1-body-0")) is False
+    assert prepare.should_enrich(store.get_chunk("gmail-s1-body-0")) is True
+
+
+def test_brief_and_consolidated_never_reach_units(tmp_path, monkeypatch):
+    """A configured self-sent brief, a marker-labelled brief (id from the store
+    cache), a generated Drive doc and a consolidated note are cold-marked and
+    never reach a unit; an ordinary email in the same run does."""
+    store = _derived_store(tmp_path, monkeypatch, {
+        "salience_gate": False, "owner_email": "dana@northgatetrust.org",
+        "ingest": {"generated_gmail_subject_prefixes": ["Brief — "],
+                   "generated_drive_folders": ["My Drive/Daily Briefs"]}})
+    store.set_meta("gmail_generated_label_id", json.dumps(
+        {"ids": ["Label_9"], "at": "2026-10-22T00:00:00+00:00"}))
+    me = "dana@northgatetrust.org"
+    text = "Follow up with Marcus about the Hall B roster and confirm by Friday please. " * 4
+    rows = {
+        "gmail-b1-body-0": {"source_type": "gmail", "thread_id": "T-b1", "message_id": "b1",
+                            "sender": me, "to": me, "subject": "Brief — Wed 22 Oct",
+                            "labels": "INBOX", "date": "Wed, 22 Oct 2026 06:00:00 +0000"},
+        "gmail-b2-body-0": {"source_type": "gmail", "thread_id": "T-b2", "message_id": "b2",
+                            "sender": me, "to": "marcus@example.org", "subject": "Notes",
+                            "labels": "INBOX,Label_9",
+                            "date": "Wed, 22 Oct 2026 06:00:00 +0000"},
+        "gdrive-f1-0": {"source_type": "gdrive", "file_id": "f1", "file_name": "Brief",
+                        "mime_type": "application/vnd.google-apps.document",
+                        "folder_path": "My Drive/Daily Briefs", "chunk_index": 0,
+                        "chunk_total": 1},
+        "gdrive-f2-0": {"source_type": "gdrive", "file_id": "f2", "file_name": "Gen",
+                        "mime_type": "application/vnd.google-apps.document",
+                        "app_generated": "1", "chunk_index": 0, "chunk_total": 1},
+        "note-consolidated-abc": {"observation_type": "consolidated",
+                                  "title": "Consolidated note"},
+        "gmail-p1-body-0": {"source_type": "gmail", "thread_id": "T-p1", "message_id": "p1",
+                            "sender": "marcus@example.org", "to": me,
+                            "subject": "Brief — forwarded by Marcus", "labels": "INBOX",
+                            "date": "Wed, 22 Oct 2026 07:00:00 +0000"},
+    }
+    for i, (doc_id, meta) in enumerate(rows.items()):
+        store.upsert_chunk(doc_id, text, f"h{i}", meta)
+    _stub_context(monkeypatch)
+    prepare.prepare_units(store, thread_cap=20, char_budget=100000,
+                          resolution_due=False, now=_NOW, home=str(tmp_path))
+    in_units = _thread_unit_doc_ids(tmp_path)
+    for derived in ("gmail-b1-body-0", "gmail-b2-body-0", "gdrive-f1-0", "gdrive-f2-0",
+                    "note-consolidated-abc"):
+        assert _cold(store, derived), derived
+        assert derived not in in_units, derived
+    # A brief-prefixed email from someone else is primary mail.
+    assert not _cold(store, "gmail-p1-body-0")
+    assert "gmail-p1-body-0" in in_units

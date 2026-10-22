@@ -134,7 +134,7 @@ _MIME_EXTRACTION_META: dict[str, tuple[str, str, float]] = {
 _CHANGES_FIELDS = (
     "nextPageToken,newStartPageToken,"
     "changes(fileId,removed,file(id,name,mimeType,modifiedTime,owners,"
-    "md5Checksum,version,size,parents))"
+    "md5Checksum,version,size,parents,appProperties))"
 )
 
 
@@ -421,6 +421,12 @@ def normalise_drive(file_meta: dict, text: str, drive_id: str | None = None, *,
         base_meta[DRIVE_ID_META_KEY] = drive_id
     if folder:
         base_meta["folder_path"] = folder[:300]
+    # The generic "mcpbrain wrote this" marker any producer can stamp on a Drive
+    # file (spec §1): source_class.classify reads it and classes the file a
+    # brief — searchable, never evidence. Stamped only when it is exactly "1",
+    # so an unrelated appProperties bag never reaches the metadata.
+    if str((file_meta.get("appProperties") or {}).get("mcpbrain_generated")) == "1":
+        base_meta["app_generated"] = "1"
 
     if tables:
         rendered = [(t, extra, [t]) for t, extra in tabular.render_chunks(
@@ -957,7 +963,7 @@ def handle_drive_item(service, store, item, *, folder_cache=None,
         return
     fmeta = service.files().get(
         fileId=fid, supportsAllDrives=True,
-        fields="id,name,mimeType,modifiedTime,version,parents").execute(
+        fields="id,name,mimeType,modifiedTime,version,parents,appProperties").execute(
             num_retries=_NUM_RETRIES)
     _fc = folder_cache if folder_cache is not None else {}
     if unchanged_reflow_owner(store, fmeta, folder=lambda: folder_path(service, fmeta, _fc)):
@@ -1019,7 +1025,8 @@ def handle_shared_drive_item(service, store, item, *, fleet_storage, pin,
 
     fmeta = service.files().get(
         fileId=fid, supportsAllDrives=True,
-        fields="id,name,mimeType,modifiedTime,version,parents,md5Checksum,size,owners"
+        fields="id,name,mimeType,modifiedTime,version,parents,md5Checksum,size,owners,"
+               "appProperties"
     ).execute(num_retries=_NUM_RETRIES)
     processed, miss = _cache_first_extract_one(
         service, store, fleet_storage, drive_id, fmeta, pin,
@@ -1062,7 +1069,8 @@ def backfill_drive(service, store, modified_after: str,
     q = f"modifiedTime > '{modified_after}'"
     if modified_before:
         q += f" and modifiedTime < '{modified_before}'"
-    fields = "nextPageToken, files(id,name,mimeType,modifiedTime,owners,parents)"
+    fields = ("nextPageToken, files(id,name,mimeType,modifiedTime,owners,parents,"
+              "appProperties)")
     folder_cache: dict = {}
     skip_report: dict = {}
     page_token, processed = None, 0
@@ -1134,7 +1142,7 @@ def backfill_shared_drive(service, store, drive_id, modified_after, *,
     if modified_before:
         q += f" and modifiedTime < '{modified_before}'"
     fields = ("nextPageToken, files(id,name,mimeType,modifiedTime,owners,"
-              "md5Checksum,version,size,parents)")
+              "md5Checksum,version,size,parents,appProperties)")
     page_token, processed = None, 0
     miss: list[tuple[str, str]] = []
     while True:
@@ -1296,7 +1304,7 @@ def reingest_files(service, store, file_ids, *, bulk_section=None,
     # and survive it indefinitely. My Drive / shared-with-me files have no
     # driveId; `.get` yields None and the key stays absent, as normalise_drive
     # already expects.
-    fields = "id,name,mimeType,modifiedTime,owners,parents,driveId"
+    fields = "id,name,mimeType,modifiedTime,owners,parents,driveId,appProperties"
     folder_cache: dict = {}
     summary = {"files": 0, "missing": 0, "empty": 0, "failed": 0, "orphans": 0}
 

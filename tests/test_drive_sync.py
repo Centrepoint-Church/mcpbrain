@@ -1356,3 +1356,28 @@ def test_a_file_gone_from_drive_also_stops_being_selected(tmp_path, monkeypatch)
     assert chunk["metadata"]["reextract_missing"] is True, (
         "why the stamp is there must be recorded, not inferred"
     )
+
+
+def test_drive_app_generated_marker_stamped():
+    """appProperties.mcpbrain_generated == "1" is stamped as app_generated, which
+    source_class reads as a brief; anything else (absent, "0", other keys) is not
+    stamped. Every Drive fetch requests appProperties so the marker arrives."""
+    from mcpbrain import source_class as sc
+    from mcpbrain.sync import drive as drive_mod
+    base = {"id": "f1", "name": "Brief", "mimeType": "text/plain",
+            "modifiedTime": "2026-10-01T00:00:00Z"}
+    text = "A generated morning brief with plenty of text to chunk. " * 5
+    marked = normalise_drive({**base, "appProperties": {"mcpbrain_generated": "1"}}, text)
+    assert marked and all(c.metadata["app_generated"] == "1" for c in marked)
+    assert sc.classify(marked[0].doc_id, marked[0].metadata, sc.Rules()) is sc.SourceClass.BRIEF
+    for props in (None, {}, {"mcpbrain_generated": "0"}, {"other": "1"}):
+        fm = dict(base) if props is None else {**base, "appProperties": props}
+        chunks = normalise_drive(fm, text)
+        assert "app_generated" not in chunks[0].metadata
+        assert sc.classify(chunks[0].doc_id, chunks[0].metadata,
+                           sc.Rules()) is sc.SourceClass.PRIMARY_DOC
+    assert "appProperties" in drive_mod._CHANGES_FIELDS
+    import inspect
+    src = inspect.getsource(drive_mod)
+    # handle_drive_item, shared-drive get, both backfills and reingest.
+    assert src.count("appProperties") >= 7

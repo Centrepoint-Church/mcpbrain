@@ -32,6 +32,62 @@ def _utc_now_iso() -> str:
     return datetime.now(timezone.utc).replace(tzinfo=None).isoformat()
 
 
+# How long a resolved `mcpbrain/generated` label id is trusted before the
+# label list is asked again. A day: the label is created once and almost never
+# renamed, and labels().list costs a quota unit per call.
+_GENERATED_LABEL_TTL_S = 86400
+
+
+def generated_label_ids(store, service, *, now=None) -> frozenset:
+    """Resolve the id of the Gmail label NAMED `mcpbrain/generated`, cached.
+
+    Gmail stores label IDS on messages, never names, so the generic "mcpbrain
+    wrote this" marker (spec §1) is matched by id. The id is resolved via
+    users().labels().list at most once per `_GENERATED_LABEL_TTL_S` and cached in
+    store meta (source_class.GENERATED_LABEL_META_KEY) so prepare — which has no
+    Gmail service — can build its classification Rules from the cache. An
+    absent label is cached too (empty set), so a mailbox without it is not
+    re-listed every cycle. A failed list raises; the caller keeps the old cache.
+    """
+    from datetime import datetime, timezone
+
+    from mcpbrain.source_class import (
+        GENERATED_LABEL_META_KEY, GENERATED_LABEL_NAME, cached_generated_label_ids)
+    now = now or datetime.now(timezone.utc)
+    raw = store.get_meta(GENERATED_LABEL_META_KEY)
+    if raw:
+        try:
+            at = datetime.fromisoformat(json.loads(raw).get("at") or "")
+            if at.tzinfo is None:
+                at = at.replace(tzinfo=timezone.utc)
+            if (now - at).total_seconds() < _GENERATED_LABEL_TTL_S:
+                return cached_generated_label_ids(store)
+        except (ValueError, TypeError, AttributeError):
+            pass                        # malformed cache: resolve afresh
+    resp = service.users().labels().list(userId="me").execute(
+        num_retries=_NUM_RETRIES)
+    ids = sorted(str(lb.get("id")) for lb in resp.get("labels") or []
+                 if lb.get("name") == GENERATED_LABEL_NAME and lb.get("id"))
+    store.set_meta(GENERATED_LABEL_META_KEY,
+                   json.dumps({"ids": ids, "at": now.isoformat()}))
+    return frozenset(ids)
+
+
+def _supersede_drafts(store, chunks) -> None:
+    """After writing a message, retire older DRAFT versions of its thread.
+
+    Only threads where a just-written chunk is itself a DRAFT are checked, so
+    ordinary mail costs nothing. See Store.supersede_older_drafts."""
+    tids = set()
+    for ch in chunks:
+        md = ch.metadata or {}
+        labels = {x.strip() for x in str(md.get("labels") or "").split(",")}
+        if "DRAFT" in labels and md.get("thread_id"):
+            tids.add(md["thread_id"])
+    for tid in tids:
+        store.supersede_older_drafts(tid)
+
+
 def _parse_gmail_cursor(raw: str) -> tuple[str, str | None]:
     """Split a persisted gmail cursor into (history_id, page_token).
 
@@ -159,12 +215,14 @@ def handle_gmail_item(service, store, item, *, fetch_attachments: bool = False,
     att_chunks = (attachments.fetch_and_normalise(service, raw, store=store)
                   if fetch_attachments else [])
     with bulk_section():
-        for chunk in normalise_gmail(raw, report=skips):
+        body_chunks = normalise_gmail(raw, report=skips)
+        for chunk in body_chunks:
             store.upsert_chunk(chunk.doc_id, chunk.text, chunk.content_hash,
                                chunk.metadata)
         for chunk in att_chunks:
             store.upsert_chunk(chunk.doc_id, chunk.text, chunk.content_hash,
                                chunk.metadata)
+        _supersede_drafts(store, body_chunks)
 
 
 def _fetch_one(service, mid: str, *, fetch_attachments: bool,
@@ -267,10 +325,12 @@ def backfill_gmail(service, store, after: str, before: str | None = None,
         """The ONLY writer. Always runs on the calling thread."""
         nonlocal processed
         with bulk_section():
-            for ch in normalise_gmail(raw, report=skips):
+            body_chunks = normalise_gmail(raw, report=skips)
+            for ch in body_chunks:
                 store.upsert_chunk(ch.doc_id, ch.text, ch.content_hash, ch.metadata)
             for ch in att_chunks:
                 store.upsert_chunk(ch.doc_id, ch.text, ch.content_hash, ch.metadata)
+            _supersede_drafts(store, body_chunks)
             processed += 1
 
     pool = _local = None
