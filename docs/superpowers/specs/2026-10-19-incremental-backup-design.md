@@ -117,8 +117,12 @@ next run redoes the capture and any orphan temp/segment files without a sidecar
 are swept. Cost of redoing: seconds.
 
 **Base or delta.** A capture is a **base** (every page) when: there is no
-chain; `page_size` changed; or the chain's committed delta bytes exceed
-`base_threshold` (default 2.0, R37) × the chain's base bytes. Otherwise it is a
+chain; `page_size` changed; the chain's committed delta bytes exceed
+`base_threshold` (default 0.5) × the chain's base bytes; or the chain's base was
+captured more than `base_max_age_days` (default 14, wall clock) ago. Live churn
+measured 2026-10-21/22 was ~0.8 MB/h against a 921 MB base, so the size rule
+alone would wait months; the age rule bounds restore length and how long pages
+go without re-verification from the live store. Otherwise it is a
 **delta** against the previous capture. A base is just a large item; it is
 written locally in seconds and uploaded in many short sessions like anything
 else.
@@ -241,7 +245,7 @@ store only.)
 ### 7. Configuration (`backup` block)
 
 New keys with defaults: `capture_interval_s` 3600, `retain_days` 7,
-`base_threshold` 2.0 (R37), `upload_budget_s` 60, `outbox_max_bytes` 2_000_000_000.
+`base_threshold` 0.5, `base_max_age_days` 14, `upload_budget_s` 60, `outbox_max_bytes` 2_000_000_000.
 `interval_s` is ignored for capture (it was the full-upload cadence) and kept
 readable for older daemons. `escrow_key`, `shared_drive_id`, `user_id` keep
 their meaning; `user_id` only names a legacy folder now.

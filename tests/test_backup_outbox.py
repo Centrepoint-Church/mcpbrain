@@ -613,11 +613,68 @@ def test_unparseable_sidecar_quarantined_and_files_kept(env, bad):
     assert orphan.exists()
 
 
-def test_default_base_threshold_is_two_bases_of_deltas():
-    """R37: at ~18 MB/h of churn a 0.5 threshold forced a ~750 MB base every
-    ~15 captured hours; 2.0 bounds a restore at ~3x a base instead."""
-    assert bo.Settings().base_threshold == 2.0
-    assert bo.Settings.from_config({}).base_threshold == 2.0
+def test_default_base_threshold_and_age():
+    """Live churn (2026-10-21/22): ~0.8 MB/h against a 921 MB base. 2.0 would
+    wait ~months for a size-triggered base; 0.5 plus a 14-day age rule bounds
+    both the restore chain and how long pages go unverified."""
+    assert bo.Settings().base_threshold == 0.5
+    assert bo.Settings.from_config({}).base_threshold == 0.5
+    assert bo.Settings().base_max_age_days == 14
+    assert bo.Settings.from_config({}).base_max_age_days == 14
+    assert bo.Settings.from_config({"base_max_age_days": 3}).base_max_age_days == 3
+
+
+@pytest.mark.parametrize("bad", [0, -1, "x", None, [1]])
+def test_bad_base_max_age_falls_back_to_14(bad):
+    assert bo.Settings.from_config({"base_max_age_days": bad}).base_max_age_days == 14
+
+
+def test_age_rule_forces_base_after_max_age_not_before(env):
+    home, store, _r, _c, cap = env
+    t0 = 1_000_000.0
+    base = cap(settings=bo.Settings(base_threshold=100.0), clock=lambda: t0)
+    day = 86400
+    _insert(store)
+    d1 = cap(settings=bo.Settings(base_threshold=100.0), clock=lambda: t0 + 14 * day - 1)
+    assert d1.kind == "delta" and d1.chain == base.chain
+    _insert(store)
+    d2 = cap(settings=bo.Settings(base_threshold=100.0), clock=lambda: t0 + 14 * day + 1)
+    assert d2.kind == "base" and d2.chain != base.chain
+    # the new chain restarts the clock
+    _insert(store)
+    d3 = cap(settings=bo.Settings(base_threshold=100.0), clock=lambda: t0 + 15 * day)
+    assert d3.kind == "delta" and d3.chain == d2.chain
+
+
+def test_capture_json_without_base_at_does_not_force_base(env):
+    home, store, _r, _c, cap = env
+    t0 = 1_000_000.0
+    base = cap(settings=bo.Settings(base_threshold=100.0), clock=lambda: t0)
+    path = bo.backup_dir(home) / "capture.json"
+    data = json.loads(path.read_text())
+    data.pop("base_at")
+    path.write_text(json.dumps(data))
+    _insert(store)
+    far = t0 + 365 * 86400
+    d1 = cap(settings=bo.Settings(base_threshold=100.0), clock=lambda: far)
+    assert d1.kind == "delta" and d1.chain == base.chain
+    # unknown age was stamped "now", so the rule counts from there
+    _insert(store)
+    d2 = cap(settings=bo.Settings(base_threshold=100.0), clock=lambda: far + 15 * 86400)
+    assert d2.kind == "base"
+
+
+def test_size_rule_at_default_threshold_still_forces_base(env):
+    home, store, _r, _c, cap = env
+    base = cap(settings=bo.Settings(base_threshold=0.5))
+    for _ in range(40):
+        _update_row(store, 1, os.urandom(200).hex())
+        _insert(store, 20)
+        item = cap(settings=bo.Settings(base_threshold=0.5))
+        if item.kind == "base":
+            assert item.chain != base.chain
+            return
+    pytest.fail("deltas never crossed 0.5x base")
 
 
 @pytest.mark.parametrize("bad", ["[1, 2]", "42", "null"])

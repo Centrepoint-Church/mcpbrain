@@ -365,9 +365,15 @@ Modules: `backup_location`, `backup_pages`, `backup_outbox`, `drive_resumable`,
   config are placed atomically; a records failure after the store swap is a
   "partial restore" shown in status/doctor/wizard.
 - A new base is taken when the delta bytes since the base exceed
-  `base_threshold` × the base; default **2.0** (R37, was 0.5: at ~18 MB/h churn
-  0.5 meant a ~750 MB base every ~15 captured hours). Re-tune after the 24 h live
-  measurement.
+  `base_threshold` × the base; default **0.5**, PLUS a new base whenever the
+  chain's base is older than `base_max_age_days` (default **14**, wall clock;
+  `CaptureState.base_at`, a missing value in an old capture.json counts as "now"
+  so an upgrade forces no base). Live measurement 2026-10-21 14:08 to 10-22 08:12
+  (18 h, 12 hourly deltas): 14 MB total, ~0.8 MB/h, against a 921 MB base. The
+  earlier 2.0 (R37) would have waited ~1.8 GB of deltas, i.e. months, leaving a
+  restore applying thousands of small files and pages unverified against the live
+  store. Expected average upload is about 80 MB/day, versus about 750 MB/day
+  before the incremental scheme.
 - Capture skips an empty store; a full outbox pauses capture (recorded once) and
   `mcpbrain backup` explains it; idle installs prune once a day; a discarded
   damaged local backup forces a fresh base and shows in doctor for 7 days.

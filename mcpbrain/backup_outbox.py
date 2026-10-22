@@ -95,7 +95,8 @@ class Settings:
     """The `backup` config block, with the plan's defaults."""
     capture_interval_s: float = 3600
     retain_days: float = 7
-    base_threshold: float = 2.0
+    base_threshold: float = 0.5
+    base_max_age_days: float = 14
     upload_budget_s: float = 60
     outbox_max_bytes: int = 2_000_000_000
 
@@ -108,10 +109,17 @@ class Settings:
         c = cfg_backup or {}
         d = cls()
         retain = c.get("retain_days", c.get("retain", d.retain_days))
+        try:
+            max_age = float(c.get("base_max_age_days", d.base_max_age_days))
+            if not max_age > 0 or max_age == float("inf"):
+                max_age = d.base_max_age_days
+        except (TypeError, ValueError):
+            max_age = d.base_max_age_days
         return cls(
             capture_interval_s=float(c.get("capture_interval_s", d.capture_interval_s)),
             retain_days=float(retain),
             base_threshold=float(c.get("base_threshold", d.base_threshold)),
+            base_max_age_days=max_age,
             upload_budget_s=float(c.get("upload_budget_s", d.upload_budget_s)),
             outbox_max_bytes=int(c.get("outbox_max_bytes", d.outbox_max_bytes)),
         )
@@ -178,6 +186,10 @@ class CaptureState:
     store_id: str
     # sha256 of pages.idx as this state left it; "" never matches = new base.
     index_digest: str = ""
+    # Wall-clock time the chain's base was captured. 0.0 = unknown (a
+    # capture.json written before this field): treated as "now" by the first
+    # delta, so an upgrade never forces an immediate base.
+    base_at: float = 0.0
 
 
 def backup_dir(home) -> Path:
@@ -501,6 +513,12 @@ def _capture_copy(home, copy: Path, key: bytes, *, settings: Settings, now: floa
                                      min(s["last_pgno"], scan.page_count) + 1))
         if not changed and scan.page_count == prev_count and fp == state.records_fp:
             return None
+        base_at = state.base_at or now
+        if now - base_at > settings.base_max_age_days * 86400:
+            # Age rule: re-verify every page from the live store at least this
+            # often, and bound how many files a restore must apply.
+            base = True
+    if not base:
         prev_seq = since[-1].seq if since else state.seq
         seq = prev_seq + 1
         so_far = state.delta_bytes + sum(
@@ -531,7 +549,8 @@ def _capture_copy(home, copy: Path, key: bytes, *, settings: Settings, now: floa
                 chain=state.chain, seq=seq, page_size=scan.page_size,
                 page_count=scan.page_count, db_sha256=scan.db_sha256,
                 records_fp=fp, base_bytes=state.base_bytes,
-                delta_bytes=so_far + seg_bytes, store_id=store_id)
+                delta_bytes=so_far + seg_bytes, store_id=store_id,
+                base_at=base_at)
             _commit(home, item, scan.new_index, new_state)
             return item
 
@@ -553,7 +572,7 @@ def _capture_copy(home, copy: Path, key: bytes, *, settings: Settings, now: floa
     new_state = CaptureState(
         chain=chain, seq=1, page_size=scan.page_size, page_count=scan.page_count,
         db_sha256=scan.db_sha256, records_fp=fp, base_bytes=seg_bytes,
-        delta_bytes=0, store_id=store_id)
+        delta_bytes=0, store_id=store_id, base_at=now)
     _commit(home, item, scan.new_index, new_state)
     return item
 

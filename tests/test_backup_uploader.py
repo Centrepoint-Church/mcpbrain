@@ -592,7 +592,7 @@ def test_crash_after_journal_commit_finishes_cleanup_not_a_gap(env, monkeypatch,
     st = _state(env)
     assert st["restore_point"] == 3_000.0 and st["consecutive_failures"] == 0
     _insert(env.store, 5)
-    assert env.cap().kind == "delta"
+    assert env.cap(clock=lambda: 4_000.0).kind == "delta"
 
 
 def test_committed_item_never_coalesced(env, monkeypatch):
