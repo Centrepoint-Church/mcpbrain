@@ -414,10 +414,22 @@ counted re-extractions, not sources.
 - **Sessions:** one cold note per Claude session id (`note-session-<sha>`), FULL
   transcript, never mined; subagent / SDK / scheduled-task transcripts are not captured.
 - **Strength = distinct EVIDENCE source keys** (`relation_sources` /
-  `observation_sources`), set, never incremented. The legacy marker is
-  `legacy_strength IS NOT NULL` with no evidence source rows — NOT `origin='legacy'`
-  (`origin` already means local/org). Derived rows (`derived=1`) are excluded from the
-  graph view, entity resources, prompts, org contribution and decay.
+  `observation_sources`), set, never incremented. The legacy marker
+  (`graph_write.legacy_relation_sql`, ruling I8) is "a LOCAL relation with no
+  EVIDENCE `relation_sources` row"; `legacy_strength` is only the saved prior value,
+  not part of the marker. `origin='org'` rows are never legacy (their strength is the
+  curator's count). Derived rows (`derived=1`) are excluded from the graph view,
+  entity resources, prompts, org contribution and decay.
+- **A derived-class source writes NOTHING in `graph_write.apply`** (ruling I14): no
+  action, entity, link, relation, observation, topic, occurrence, context row or
+  digest. Enforced in `apply` itself, not only by prepare's gate and `drop_cold`
+  (a unit built before an upgrade still reaches `apply`).
+- **Source removal counts per source** (M3): the gone source's `relation_sources`
+  rows are deleted, strength is recounted, and a relation is invalidated only when no
+  evidence source remains (a message deleted from a live thread keeps the thread's
+  support). Owner/salience boost follows `source_class` (M6). Core tier = identity
+  seed + procedural notes + semantic notes surfaced by recall in >= 3 distinct weeks,
+  never tied salience (M8).
 - **Action dedupe is by meaning:** bge-small cosine >= 0.88 within the logical source,
   owner-compatible (blank / 'unclear' match anything); lexical fallback if the embedder
   fails. **Supersede-on-silence was built and REMOVED** — the extraction prompt tells the
@@ -429,20 +441,33 @@ counted re-extractions, not sources.
 - Notes extract as one thread (`note_id`); threads sort by real time
   (`parsedate_to_datetime`), not the date string. Source removal archives actions
   (`source_gone`) and marks links derived, revived if the source returns.
-- **`bin/clean_ingestion.py`** — attended, reversible, dry-run default; `--yes` refuses
-  while the daemon runs, snapshots first, `integrity_check` after; `--undo STEP` restores
-  from `cleanup_log` (old+new values; drifted rows are skipped and kept). A relation is
-  marked derived only at strength <= 1 (re-observed ones stay visible). `source_draft`
-  re-queues the thread's evidence chunks so real commitments come back from SENT mail.
+- **The clean-up is in the package** (`mcpbrain/ingestion_cleanup.py`; `mcpbrain
+  clean-ingestion`; `bin/clean_ingestion.py` is a thin wrapper) and **runs ONCE on every
+  install as a daemon migration** (ruling I13): `ingestion_cleanup` cadence pass under
+  the bulk lock, gated on the fleet flag `ingestion_cleanup_enabled` (default ON) and a
+  backup < 24 h old; `source_brief` skipped when no brief rule; `integrity_check`
+  after; error / failed check -> `failed`, never retried. One marker (meta
+  `ingestion_cleanup`) shared with the attended CLI, so it never runs twice by itself;
+  state in `/api/status` and doctor. Attended CLI: dry-run default; `--yes` refuses
+  while the daemon runs, snapshots first; `--undo STEP` restores from `cleanup_log`
+  (drifted rows are skipped and kept). A relation is marked derived only at strength
+  <= 1. `source_draft` re-queues the thread's evidence chunks. `derived_observations`
+  (I15) marks `llm_extraction` observations of DERIVED-ONLY entities (>= 1
+  class-derived link/derived relation and no other link or live relation): 225 of
+  33,615 on the live copy; the other 33,390 stay live (source unknowable).
 - **Measured on a VACUUM INTO copy of the live store (2026-10-22):** open actions
   **12,522 -> 2,552** (session 7,727; consolidated 430; draft 410; digest 407; brief 183;
   source_gone 452; embed dedupe 361); 41 draft threads re-queued for extraction. Gold on
   the copy vs an untouched copy, same harness: **recall@10 0.867 -> 0.900, MRR 0.604 ->
   0.601**. Full 12-step undo restores every ordinary table row-for-row.
-- **INSTALL AND CLEAN-UP MUST BE BACK TO BACK.** Until `sources_backfill` runs, every
-  relation reads as legacy, so community edges all weigh 1 and clusters reshape. The live
+- **Communities reshape at install and STAY reshaped — the clean-up does not restore
+  historic weights** (measured on the copy, 2026-10-22): `sources_backfill` recovers a
+  source only where `source_doc_id` still resolves (4,275 of 80,813 live relations, all
+  strength 1); the other 76,445 stay legacy and weigh 1. Pre-upgrade (raw bump counts)
+  -> after clean-up: 50 -> 62 communities, 29% of entities move (NMI 0.64); install
+  alone moves 27.5%, the clean-up 14% on top. Flattening is by design (I8). The live
   store has no `cleanup_log` until the new-schema daemon or a first `--yes` runs
-  `Store.init`, so a live dry run needs that first. Procedure: `docs/RELEASE-RUNBOOK.md` §9.
+  `Store.init`. Procedure: `docs/RELEASE-RUNBOOK.md` §9.
 
 ## Shipping caveats
 

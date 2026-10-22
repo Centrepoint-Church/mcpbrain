@@ -863,42 +863,73 @@ ON) and simply fail cleanly while it is down. Only if `tool_exec_in_daemon` was
 set `false` would they write in-process — then leave them alone until the
 daemon is back.
 
-## 9. Ingestion clean-up (`bin/clean_ingestion.py`, attended, one-off per install)
+## 9. Ingestion clean-up (one-shot per install: daemon migration or `mcpbrain clean-ingestion`)
 
 Spec: `docs/superpowers/specs/2026-10-22-ingestion-integrity-design.md`. Archives
 open actions and marks links that came from the brain's own output (session notes,
-briefs, drafts, consolidated notes, digests), dedupes actions by meaning, and
-recounts relation strength from distinct evidence sources. Nothing is deleted:
-every change is logged in `cleanup_log` and `--undo STEP` reverses it.
+briefs, drafts, consolidated notes, digests), marks observations of entities known
+only from that output, dedupes actions by meaning, and recounts relation strength
+from distinct evidence sources. Nothing is deleted: every change is logged in
+`cleanup_log` and `--undo STEP` reverses it.
 
-**Run it straight after installing the release that carries the new schema.**
-Until `sources_backfill` runs, every relation counts as legacy (community edges
-all weigh 1).
+**Every install runs it by itself, once** (ruling I13). The code lives in the
+package (`mcpbrain/ingestion_cleanup.py`); the daemon's `ingestion_cleanup`
+cadence pass runs it under the bulk lock after `Store.init`, gated on:
+
+- the fleet kill switch `ingestion_cleanup_enabled` (default ON; set it false in
+  `org-config.json` → `flags` to hold the fleet, or locally for one install);
+- a successful backup in the last 24 h (`deferred_no_backup` until there is one;
+  retried hourly);
+- the shared marker (store meta `ingestion_cleanup`): once `done` or `failed` it
+  never runs again by itself.
+
+`source_brief` is SKIPPED (not refused) on an install with no brief rule. After
+the run it does `PRAGMA integrity_check`; any error or a failed check records
+`failed` with the reason and is never retried. State shows in `/api/status`
+(`ingestion_cleanup`) and in `mcpbrain doctor` (`Clean-up` line).
+
+**What the owner should expect after it runs** (measured on a copy of the live
+store, 2026-10-22): open actions 12,522 → 2,552. **Communities reshape at
+install and stay reshaped**: `sources_backfill` can recover a source only for
+relations whose `source_doc_id` still resolves (4,275 of 80,813 live relations,
+each at strength 1); the other 76,445 stay legacy and weigh 1. Pre-upgrade
+weights (raw bump counts) → after the clean-up: 50 → 62 communities, 29% of
+entities in a different community (NMI 0.64). Install alone (before the
+clean-up) already moves 27.5%; the clean-up itself moves 14% against that. The
+flattening of historic strength is by design (ruling I8): nothing ranks by
+`legacy_strength`.
+
+Attended use (this machine, or to inspect / undo):
 
 1. Configure the brief rules if this install receives brain-generated briefs
    (`config.json` → `"ingest": {"generated_gmail_subject_prefixes": [...],
    "generated_drive_folders": [...]}`). Without rules, `--yes` refuses unless
-   you pass `--no-brief-rules`.
+   you pass `--no-brief-rules` (the daemon skips `source_brief` instead).
 2. Rehearse on a copy (no daemon stop needed — a copy outside the app dir is
    not refused):
    ```bash
    sqlite3 "file:$APP/brain.sqlite3?mode=ro" "VACUUM INTO '/tmp/cc/brain.sqlite3'"
    cp "$APP/config.json" /tmp/cc/
-   python bin/clean_ingestion.py --home /tmp/cc --store /tmp/cc/brain.sqlite3 --yes
+   mcpbrain clean-ingestion --home /tmp/cc --store /tmp/cc/brain.sqlite3 --yes
    MCPBRAIN_HOME=/tmp/cc uv run python tests/eval/run_eval.py --gold --k 10
    ```
    Compare against the same gold run on an untouched copy: recall@10 must not
    drop; MRR no worse than one rank step.
-3. Live: `launchctl bootout gui/$(id -u)/com.mcpbrain`, confirm no daemon
-   process, then `python bin/clean_ingestion.py` (dry run; needs the new schema,
-   so on a store the new daemon never opened run step 4 directly — it snapshots
-   first), then `python bin/clean_ingestion.py --yes`. It prints the verified
-   snapshot path and ends with `integrity_check ok` (exit 2 otherwise).
+3. Live, attended (to run it before the daemon does, e.g. right after installing):
+   `launchctl bootout gui/$(id -u)/com.mcpbrain`, confirm no daemon process,
+   then `mcpbrain clean-ingestion` (dry run; prints the marker state; needs the
+   new schema, so on a store the new daemon never opened run step 4 directly —
+   it snapshots first), then `mcpbrain clean-ingestion --yes`. It prints the
+   verified snapshot path and ends with `integrity_check ok` (exit 2 otherwise).
+   Any attended `--yes` claims the shared marker, so the daemon will not run it
+   again; a full `--yes` after the daemon already ran is a no-op unless `--rerun`.
+   (`python bin/clean_ingestion.py` from a checkout is the same tool.)
 4. `launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/com.mcpbrain.plist`,
    then `mcpbrain doctor` and the gold gate on the live store.
-5. To reverse one class: bootout, `python bin/clean_ingestion.py --undo <step> --yes`
+5. To reverse one class: bootout, `mcpbrain clean-ingestion --undo <step> --yes`
    (undo later steps first; a value changed since the run is reported as
-   SKIPPED and kept).
+   SKIPPED and kept). Undo works the same whether the daemon or the CLI applied
+   the step.
 
 ## Environment note — repos live outside iCloud
 

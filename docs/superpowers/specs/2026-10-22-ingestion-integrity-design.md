@@ -121,7 +121,15 @@ column is `deadline`.
   written.
 - **Core tier.** Consolidated notes are not eligible; core requires identity/
   procedural notes or a durability signal (observed across ≥ 3 distinct weeks),
-  not tied salience.
+  not tied salience. *(Built in the
+  final-review fix wave, M8: core = the identity seed (always) + procedural notes +
+  semantic notes surfaced by recall (exposure/used) in >= 3 distinct ISO weeks;
+  ranked identity, procedural, weeks, salience. Measured on the live copy after the
+  clean-up: core = the identity seed alone.)*
+- **Derived sources write nothing in `graph_write.apply`.** *(Amended in the fix
+  wave, ruling I14: enforced in `apply` itself — no action, entity, link, relation,
+  observation, topic, occurrence, context row or digest — not only by the upstream
+  gates.)*
 
 ### 3. Independent-source counting
 
@@ -149,8 +157,18 @@ shared drives are excluded because the cache payload would be withheld forever.)
 Drive file removal and Gmail deletion invalidate the source's open actions
 (`resolved_by='source_gone'`) and mark its entity links derived — as
 `invalidate_local_relations_for_docs` already does for relations.
+*(Amended in the fix wave, M3: removal deletes the gone source's `relation_sources`
+rows and recounts strength; a relation is invalidated only when no evidence source
+remains. A source key is gone only when no surviving chunk still carries it.)*
 
-### 6. Attended clean-up (`bin/clean_ingestion.py`)
+### 6. Clean-up (`mcpbrain/ingestion_cleanup.py`: attended CLI + one-shot daemon migration)
+
+*(Amended in the fix wave, ruling I13: the clean-up ships in the package and every
+install runs it once as a daemon migration — under the bulk lock, gated on the
+fleet flag `ingestion_cleanup_enabled` and a backup < 24 h old, `source_brief`
+skipped without brief rules, `integrity_check` after, `failed` recorded and never
+retried. The attended CLI (`mcpbrain clean-ingestion`) shares one marker with it.
+Ruling I15 adds step `derived_observations` after `derived_links`.)*
 
 Dry-run by default; `--yes` to apply; refuses unless the daemon is booted out
 (control-port probe, as `mcpbrain restore`); takes and verifies a snapshot first;
