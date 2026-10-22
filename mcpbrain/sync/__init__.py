@@ -220,6 +220,10 @@ def run_sync_cycle(store, embedder, *, gmail_service=None,
     cr = False
     drives_fs: dict[str, object] = {}
     infra_layout = None
+    # folder_cache: see the comment above fetch_attachments below. Created
+    # here because the infrastructure purge in the shared-drive block walks
+    # the same folder parents.
+    folder_cache: dict = {}
     if drive_service is not None and home is not None:
         try:
             # Cheapest check first: ingest_cache_enabled is a single config-dict
@@ -314,15 +318,22 @@ def run_sync_cycle(store, embedder, *, gmail_service=None,
                         with (bulk_section or nullcontext)():
                             ingest_cache.purge_infrastructure(
                                 store, infra_layout, did,
-                                fleet_storage=storage_factory(did))
+                                fleet_storage=storage_factory(did),
+                                drive_service=drive_service,
+                                folder_cache=folder_cache)
                     except Exception as exc:  # noqa: BLE001 — retried next cycle
                         log.warning("sync: could not purge infrastructure drive "
                                     "%s (will retry): %s", did, exc)
                 present = all_drive_ids
                 with (bulk_section or nullcontext)():
+                    # Infra drives are excluded from presence counting
+                    # outright, so even if purge_infrastructure above keeps
+                    # failing they can never age into the unguarded
+                    # revocation purge.
                     revoked_now = ingest_cache.note_drive_presence(
                         store, present,
                         threshold=config.ingest_cache_revocation_threshold(home),
+                        exclude=infra_layout.dedicated,
                     )["purged"]
                 result["revoked_drives"] = revoked_now
                 # A revoked drive's sync_queue/sync_cursors/
@@ -357,7 +368,6 @@ def run_sync_cycle(store, embedder, *, gmail_service=None,
     # elsewhere. Building either fresh inside the lambda would silently defeat
     # them -- a lambda called once per item would rebuild the "cache" on every
     # call.
-    folder_cache: dict = {}
     fetch_attachments = config.gmail_attachments(home) if home else False
 
     # Per-SOURCE skip tallies ("drive" for My Drive, "drive:<id>" per Shared

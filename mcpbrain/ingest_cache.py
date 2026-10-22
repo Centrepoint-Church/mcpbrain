@@ -903,19 +903,32 @@ def _absence_key(drive_id: str) -> str:
     return f"ingest_cache.absent:{drive_id}"
 
 
-def note_drive_presence(store, present_ids, *, threshold: int = 3) -> dict:
+def note_drive_presence(store, present_ids, *, threshold: int = 3,
+                        exclude=()) -> dict:
     """Track per-drive consecutive absence and auto-purge after `threshold`
     consecutive missing cycles (spec §A3: guard against a transient Drive glitch
     reading as revocation). State lives in the meta table — no schema, no cadence.
 
     A present drive resets its counter and is remembered; a known drive absent for
     `threshold` cycles is purge_drive'd and forgotten. Returns {'purged','tracked'}.
+
+    Drives in `exclude` (mcpbrain's own infrastructure drives, left out of
+    the presence list on purpose) are forgotten here and never counted, so
+    they can never reach this UNGUARDED purge -- their content is handled only
+    by purge_infrastructure, which refuses to delete anything that looks like
+    real documents.
     """
     try:
         known = set(json.loads(store.get_meta(_KNOWN_DRIVES_META) or "[]"))
     except (ValueError, TypeError):
         known = set()
-    present = set(present_ids)
+    exclude = set(exclude or ())
+    present = set(present_ids) - exclude
+    if known & exclude:
+        known -= exclude
+        store.set_meta(_KNOWN_DRIVES_META, json.dumps(sorted(known)))
+    for d in exclude:
+        store.delete_meta(_absence_key(d))
 
     # Data-safety guard: a TOTAL disappearance (we knew >=1 drive, now enumerate
     # zero) is far more likely a transient Drive-API hiccup / scope blip / 200-with-
@@ -983,7 +996,41 @@ def _looks_real(rows, in_infra) -> bool:
             or any(not in_infra(m.get("folder_path") or "") for _d, m in rows))
 
 
-def purge_infrastructure(store, layout, drive_id, *, fleet_storage=None) -> dict:
+def _under_infra_by_id(rows, layout, drive_id, drive_service, folder_cache):
+    """The rows whose FILE sits under one of the drive's infrastructure folder
+    ids -- the same id-based test the ingest skip uses, so a same-named folder
+    elsewhere in the drive is never mistaken for mcpbrain's. A file whose
+    ancestry cannot be resolved (no Drive service, lookup failed, file gone)
+    is KEPT."""
+    from mcpbrain.sync.drive import under_folders
+    folders = layout.skip_folders(drive_id)
+    if drive_service is None or not folders:
+        return []
+    verdict: dict[str, bool] = {}
+    out = []
+    for doc_id, meta in rows:
+        fid = meta.get("file_id")
+        if not fid:
+            continue
+        if fid not in verdict:
+            try:
+                fmeta = drive_service.files().get(
+                    fileId=fid, fields="id,parents", supportsAllDrives=True,
+                ).execute(num_retries=5)
+                parents = (fmeta or {}).get("parents") or []
+                verdict[fid] = bool(parents) and under_folders(
+                    drive_service, {"parents": parents}, folder_cache, folders)
+            except Exception as exc:  # noqa: BLE001 — unresolvable means keep
+                log.info("ingest_cache: could not resolve where %s sits; "
+                         "keeping it: %s", fid, exc)
+                verdict[fid] = False
+        if verdict[fid]:
+            out.append((doc_id, meta))
+    return out
+
+
+def purge_infrastructure(store, layout, drive_id, *, fleet_storage=None,
+                         drive_service=None, folder_cache=None) -> dict:
     """Remove what was ingested from mcpbrain's own infrastructure in one drive.
 
     `layout` is infra_drives.resolve's Layout. For a DEDICATED drive (excluded
@@ -993,8 +1040,9 @@ def purge_infrastructure(store, layout, drive_id, *, fleet_storage=None) -> dict
     the guard below. Its chunks go through purge_drive (relations invalidated
     bitemporally, then chunks/vectors/FTS deleted) and its ingest-cache
     artifacts are deleted. For a drive that also holds real documents, only
-    chunks whose folder_path is inside an infrastructure folder are removed,
-    with their pending publishes and cache artifacts.
+    chunks whose file sits under an infrastructure folder ID (resolved through
+    `drive_service`; folder_path names only pre-filter) are removed, with
+    their pending publishes and cache artifacts.
 
     Refuses -- logs, records INFRA_REFUSED_META for doctor, deletes nothing --
     when the candidates look like real content (_looks_real). The chunk scan
@@ -1022,7 +1070,10 @@ def purge_infrastructure(store, layout, drive_id, *, fleet_storage=None) -> dict
             return layout.in_infra(drive_id, fp)
 
         if not dedicated:
-            rows = [(d, m) for d, m in rows if in_infra(m.get("folder_path") or "")]
+            rows = _under_infra_by_id(
+                [(d, m) for d, m in rows if in_infra(m.get("folder_path") or "")],
+                layout, drive_id, drive_service,
+                folder_cache if folder_cache is not None else {})
         refused = bool(rows) and _looks_real(rows, in_infra)
         if refused:
             out["refused"] = len(rows)

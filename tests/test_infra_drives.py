@@ -369,6 +369,9 @@ def test_dedicated_purge_refuses_what_looks_like_real_content(tmp_path, seed):
 def test_non_dedicated_purge_removes_only_the_infra_subtree(tmp_path):
     s = _store(tmp_path)
     lay = _layout((), {"TEAM": {"FLEET"}}, {"TEAM": ["Drive/mcpbrain-fleet"]})
+    svc = _team_tree()
+    svc.nodes["OG"] = _folder("org-graph", "FLEET", "TEAM")
+    svc.nodes["GR"] = _file("manifest.json", "OG", "TEAM")
     _seed(s, "TEAM", "CFG", folder="Drive/mcpbrain-fleet")
     _seed(s, "TEAM", "GR", folder="Drive/mcpbrain-fleet/org-graph")
     _seed(s, "TEAM", "PLAN", folder="Drive/Budgets", mime="application/msword")
@@ -382,7 +385,8 @@ def test_non_dedicated_purge_removes_only_the_infra_subtree(tmp_path):
     fs.put_bytes(f"{ingest_cache.CACHE_DIR}/CFG.aaaaaaaaaaaa.bbbbbbbb.mbc.gz", b"x")
     fs.put_bytes(f"{ingest_cache.CACHE_DIR}/PLAN.aaaaaaaaaaaa.bbbbbbbb.mbc.gz", b"y")
 
-    res = ingest_cache.purge_infrastructure(s, lay, "TEAM", fleet_storage=fs)
+    res = ingest_cache.purge_infrastructure(s, lay, "TEAM", fleet_storage=fs,
+                                            drive_service=svc)
 
     assert res["chunks_deleted"] == 2 and res["refused"] == 0
     assert s.doc_ids_for_drive("TEAM") == ["gdrive-PLAN-0"]
@@ -399,9 +403,51 @@ def test_non_dedicated_purge_refuses_real_content_inside_the_subtree(tmp_path):
     s = _store(tmp_path)
     lay = _layout((), {"TEAM": {"FLEET"}}, {"TEAM": ["Drive/mcpbrain-fleet"]})
     _seed(s, "TEAM", "X", folder="Drive/mcpbrain-fleet", mime="application/pdf")
-    res = ingest_cache.purge_infrastructure(s, lay, "TEAM")
+    svc = _team_tree()
+    svc.nodes["X"] = _file("scan.pdf", "FLEET", "TEAM", "application/pdf")
+    res = ingest_cache.purge_infrastructure(s, lay, "TEAM", drive_service=svc)
     assert res["refused"] == 1
     assert s.doc_ids_for_drive("TEAM") == ["gdrive-X-0"]
+
+
+def test_non_dedicated_purge_goes_by_folder_id_not_name(tmp_path):
+    """Two root folders both named mcpbrain-fleet: only the configured one's
+    files go; the namesake's JSON stays, and so does a file whose ancestry
+    cannot be resolved."""
+    s = _store(tmp_path)
+    lay = _layout((), {"TEAM": {"FLEET"}}, {"TEAM": ["Drive/mcpbrain-fleet"]})
+    svc = _team_tree()
+    svc.nodes["TWIN"] = _folder("mcpbrain-fleet", "TEAM", "TEAM")
+    svc.nodes["MINE"] = _file("settings.json", "TWIN", "TEAM")
+    svc.nodes["LOST"] = _file("lost.json", "FLEET", "TEAM")
+    svc.fail.add("LOST")
+    for fid in ("CFG", "MINE", "LOST"):
+        _seed(s, "TEAM", fid, folder="Drive/mcpbrain-fleet")
+
+    res = ingest_cache.purge_infrastructure(s, lay, "TEAM", drive_service=svc)
+
+    assert res["chunks_deleted"] == 1
+    assert sorted(s.doc_ids_for_drive("TEAM")) == ["gdrive-LOST-0", "gdrive-MINE-0"]
+
+
+def test_non_dedicated_purge_without_a_drive_service_deletes_nothing(tmp_path):
+    s = _store(tmp_path)
+    lay = _layout((), {"TEAM": {"FLEET"}}, {"TEAM": ["Drive/mcpbrain-fleet"]})
+    _seed(s, "TEAM", "CFG", folder="Drive/mcpbrain-fleet")
+    assert ingest_cache.purge_infrastructure(s, lay, "TEAM")["chunks_deleted"] == 0
+    assert s.doc_ids_for_drive("TEAM") == ["gdrive-CFG-0"]
+
+
+def test_note_drive_presence_never_counts_an_excluded_drive(tmp_path):
+    s = _store(tmp_path)
+    s.set_meta(ingest_cache._KNOWN_DRIVES_META, '["D1", "INFRA"]')
+    s.set_meta(ingest_cache._absence_key("INFRA"), "2")
+    for _ in range(5):
+        out = ingest_cache.note_drive_presence(s, ["D1"], threshold=3,
+                                               exclude={"INFRA"})
+        assert out["purged"] == []
+    assert s.get_meta(ingest_cache._KNOWN_DRIVES_META) == '["D1"]'
+    assert s.get_meta(ingest_cache._absence_key("INFRA")) is None
 
 
 # -- the sync cycle -------------------------------------------------------------
@@ -442,7 +488,7 @@ def test_cycle_with_central_cache_excludes_dedicated_drive_and_deletes_only_its_
         seen["exclude"] = set(exclude)
         return {}
 
-    def _spy_presence(store_, present, *, threshold):
+    def _spy_presence(store_, present, *, threshold, exclude=()):
         seen["present"] = sorted(present)
         return {"purged": [], "tracked": len(present)}
 
@@ -504,6 +550,40 @@ def test_cycle_keeps_syncing_a_team_drive_that_holds_the_fleet_folder(
     assert s.doc_ids_for_drive("TEAM") == ["gdrive-PLAN-0"]
     assert s.get_cursor("drive:TEAM") == "9"
     assert json.loads(s.get_meta(ingest_cache._KNOWN_DRIVES_META)) == ["TEAM"]
+
+
+def test_a_failing_infra_purge_never_reaches_the_unguarded_revocation_purge(
+        tmp_path, monkeypatch):
+    from mcpbrain import sync as sync_mod
+    from mcpbrain.sync import run_sync_cycle
+
+    home = _cycle_home(tmp_path, backup={"shared_drive_id": "INFRA"},
+                       fleet={"folder_id": "FLEET", "escrow_folder_id": "ESC"})
+    s = _store(tmp_path)
+    _seed(s, "INFRA", "F1", folder="Drive/mcpbrain-fleet", mime="application/pdf")
+    s.set_meta(ingest_cache._KNOWN_DRIVES_META, '["D1", "INFRA"]')
+    monkeypatch.setattr(config, "ingest_cache_central", lambda home: False)
+    import mcpbrain.fleet_storage as fsmod
+    monkeypatch.setattr(fsmod, "drive_cache_storage",
+                        lambda svc_, did: LocalDirFleetStorage(tmp_path / "c" / did))
+    monkeypatch.setattr(sync_mod, "discover_shared_drives", lambda *a, **k: {})
+    monkeypatch.setattr(sync_mod, "_shared_drive_backfill_step", lambda *a, **k: {})
+
+    def _boom(*_a, **_k):
+        raise RuntimeError("purge keeps failing")
+
+    purged = []
+    real_purge_drive = ingest_cache.purge_drive
+    monkeypatch.setattr(ingest_cache, "purge_infrastructure", _boom)
+    monkeypatch.setattr(ingest_cache, "purge_drive",
+                        lambda st, d: purged.append(d) or real_purge_drive(st, d))
+
+    svc = _dedicated_tree()
+    for _ in range(config.ingest_cache_revocation_threshold(home) + 2):
+        run_sync_cycle(s, embedder=None, drive_service=svc, home=home)
+
+    assert "INFRA" not in purged
+    assert s.doc_ids_for_drive("INFRA") == ["gdrive-F1-0"]
 
 
 def test_cycle_leaves_drives_alone_when_no_infra_configured(tmp_path, monkeypatch):

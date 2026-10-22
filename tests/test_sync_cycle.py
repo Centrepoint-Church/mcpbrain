@@ -1244,7 +1244,7 @@ def test_run_sync_cycle_notes_drive_presence_every_cycle(tmp_path, monkeypatch):
     monkeypatch.setattr(sync_mod, "_shared_drive_backfill_step", lambda *a, **k: {})
 
     captured = {}
-    def _spy_note_drive_presence(store_, present, *, threshold):
+    def _spy_note_drive_presence(store_, present, *, threshold, exclude=()):
         captured["present"] = sorted(present)
         captured["threshold"] = threshold
         return {"purged": [], "tracked": len(present)}

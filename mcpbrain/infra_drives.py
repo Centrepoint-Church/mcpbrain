@@ -63,6 +63,9 @@ class Layout:
         return self.folders.get(drive_id, frozenset())
 
     def in_infra(self, drive_id, folder_path: str) -> bool:
+        """Name-path match: a pre-filter and a real-content guard only. It
+        can match a same-named folder elsewhere, so deciding what to DELETE
+        in a shared drive goes by folder id (ingest_cache._under_infra_by_id)."""
         fp = folder_path or ""
         return any(fp == p or fp.startswith(p + "/")
                    for p in self.paths.get(drive_id, ()))
