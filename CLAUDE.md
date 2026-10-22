@@ -444,9 +444,13 @@ counted re-extractions, not sources.
 - **The clean-up is in the package** (`mcpbrain/ingestion_cleanup.py`; `mcpbrain
   clean-ingestion`; `bin/clean_ingestion.py` is a thin wrapper) and **runs ONCE on every
   install as a daemon migration** (ruling I13): `ingestion_cleanup` cadence pass under
-  the bulk lock, gated on the fleet flag `ingestion_cleanup_enabled` (default ON) and a
-  backup < 24 h old; `source_brief` skipped when no brief rule; `integrity_check`
-  after; error / failed check -> `failed`, never retried. One marker (meta
+  the bulk lock (embedder built BEFORE the lock; a failed build means lexical dedupe,
+  never `failed`), gated on the fleet flag `ingestion_cleanup_enabled` (default ON) and a
+  restore point CAPTURED < 24 h ago (`probes.last_restore_point`); `Store.init` first
+  (a wizard-restored store was never initialised); `source_brief` skipped when no brief
+  rule; `integrity_check` after; error / failed check -> `failed`, never retried. The
+  CLI claims the marker as `running` before it writes (stale after 2 h = interrupted,
+  daemon takes over); only a FULL run marks it done. One marker (meta
   `ingestion_cleanup`) shared with the attended CLI, so it never runs twice by itself;
   state in `/api/status` and doctor. Attended CLI: dry-run default; `--yes` refuses
   while the daemon runs, snapshots first; `--undo STEP` restores from `cleanup_log`
@@ -459,7 +463,7 @@ counted re-extractions, not sources.
   **12,522 -> 2,552** (session 7,727; consolidated 430; draft 410; digest 407; brief 183;
   source_gone 452; embed dedupe 361); 41 draft threads re-queued for extraction. Gold on
   the copy vs an untouched copy, same harness: **recall@10 0.867 -> 0.900, MRR 0.604 ->
-  0.601**. Full 12-step undo restores every ordinary table row-for-row.
+  0.601**. Full 13-step undo (now incl. `derived_observations`) restores every ordinary table row-for-row.
 - **Communities reshape at install and STAY reshaped — the clean-up does not restore
   historic weights** (measured on the copy, 2026-10-22): `sources_backfill` recovers a
   source only where `source_doc_id` still resolves (4,275 of 80,813 live relations, all

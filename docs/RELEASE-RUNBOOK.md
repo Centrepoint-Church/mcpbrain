@@ -878,8 +878,9 @@ cadence pass runs it under the bulk lock after `Store.init`, gated on:
 
 - the fleet kill switch `ingestion_cleanup_enabled` (default ON; set it false in
   `org-config.json` → `flags` to hold the fleet, or locally for one install);
-- a successful backup in the last 24 h (`deferred_no_backup` until there is one;
-  retried hourly);
+- a restore point CAPTURED in the last 24 h (`probes.last_restore_point`: the
+  capture time, not the upload commit; `deferred_no_backup` until there is one,
+  shown as pending before an install's first backup; retried hourly);
 - the shared marker (store meta `ingestion_cleanup`): once `done` or `failed` it
   never runs again by itself.
 
@@ -921,8 +922,12 @@ Attended use (this machine, or to inspect / undo):
    new schema, so on a store the new daemon never opened run step 4 directly —
    it snapshots first), then `mcpbrain clean-ingestion --yes`. It prints the
    verified snapshot path and ends with `integrity_check ok` (exit 2 otherwise).
-   Any attended `--yes` claims the shared marker, so the daemon will not run it
-   again; a full `--yes` after the daemon already ran is a no-op unless `--rerun`.
+   An attended `--yes` claims the shared marker as `running` before it writes, so
+   a daemon relaunched mid-run stands off (a claim older than 2 h counts as a
+   crashed run: doctor warns and the daemon takes over). A FULL run (or an
+   `--undo`) then marks it done; a partial `--steps` run leaves the state as it
+   was, so the daemon still runs the rest. A full `--yes` after the daemon already
+   ran is a no-op unless `--rerun`.
    (`python bin/clean_ingestion.py` from a checkout is the same tool.)
 4. `launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/com.mcpbrain.plist`,
    then `mcpbrain doctor` and the gold gate on the live store.
