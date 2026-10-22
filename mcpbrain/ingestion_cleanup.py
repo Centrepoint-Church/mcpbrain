@@ -793,6 +793,7 @@ def step_source_gone(ctx, tx):
                 "AND COALESCE(derived,0)=0", part).fetchone()[0]
         return
     lcols = ("derived", "derived_reason")
+    ecols = ("email_count", "mentions")    # removal takes a meeting mention back (M7)
 
     def links():
         out = {}
@@ -805,12 +806,12 @@ def step_source_gone(ctx, tx):
 
     before = links()
     ents = {e for _m, e in before}
-    ebefore = {(k,): v for k, v in _fetch(db, "entities", "id", ents, ("email_count",)).items()}
+    ebefore = {(k,): v for k, v in _fetch(db, "entities", "id", ents, ecols).items()}
     got = Store._invalidate_sources_in(db, mids, reason="source_gone", at=tx.at,
                                        actions=False)
     tx.log_diff("email_entities", before, links())
     tx.log_diff("entities", ebefore,
-                {(k,): v for k, v in _fetch(db, "entities", "id", ents, ("email_count",)).items()})
+                {(k,): v for k, v in _fetch(db, "entities", "id", ents, ecols).items()})
     tx.counts["links:source_gone"] += got["links"]
 
 

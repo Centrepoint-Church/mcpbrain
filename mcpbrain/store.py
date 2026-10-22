@@ -2124,6 +2124,10 @@ class Store:
                 source_class TEXT NOT NULL,
                 first_seen   TEXT NOT NULL,
                 PRIMARY KEY (relation_id, source_key)){_S}""")
+            # Removal looks support rows up by source (M3): without this the
+            # primary key (relation_id first) cannot serve it.
+            db.execute("CREATE INDEX IF NOT EXISTS idx_relation_sources_key "
+                       "ON relation_sources(source_key)")
             db.execute(f"""CREATE TABLE IF NOT EXISTS observation_sources(
                 observation_id INTEGER NOT NULL
                                REFERENCES entity_observations(id) ON DELETE CASCADE,
@@ -2893,20 +2897,28 @@ class Store:
     @staticmethod
     def _delete_chunk_rows(db, doc_ids: list[str]) -> int:
         """delete_chunks' body, on an open write connection (so a caller can
-        make the delete part of a larger transaction)."""
-        qs = ",".join("?" * len(doc_ids))
-        rowids = [r["rowid"] for r in db.execute(
-            f"SELECT rowid FROM chunks WHERE doc_id IN ({qs})", doc_ids).fetchall()]
+        make the delete part of a larger transaction). Every IN list is sliced
+        at _IN_BATCH: a revoked shared drive can hold more chunks than SQLite
+        allows bound variables in one statement."""
+        doc_ids = list(dict.fromkeys(doc_ids))
+        rowids: list = []
+        for i in range(0, len(doc_ids), _IN_BATCH):
+            part = doc_ids[i:i + _IN_BATCH]
+            qs = ",".join("?" * len(part))
+            rowids += [r["rowid"] for r in db.execute(
+                f"SELECT rowid FROM chunks WHERE doc_id IN ({qs})", part).fetchall()]
         # Which Drive files these doc_ids belong to, resolved BEFORE the
         # delete so the payload cleanup below can ask whether anything is
         # left. Derived from the doc_id rather than metadata so an orphaned
         # payload (no chunk row at all) is still cleaned up.
         file_ids = {k for k in (_file_key_from_doc_id(d) for d in doc_ids) if k}
+        for i in range(0, len(rowids), _IN_BATCH):
+            part = rowids[i:i + _IN_BATCH]
+            ph = ",".join("?" * len(part))
+            db.execute(f"DELETE FROM vec_chunks WHERE rowid IN ({ph})", part)
+            db.execute(f"DELETE FROM fts_chunks WHERE rowid IN ({ph})", part)
+            db.execute(f"DELETE FROM chunks WHERE rowid IN ({ph})", part)
         if rowids:
-            ph = ",".join("?" * len(rowids))
-            db.execute(f"DELETE FROM vec_chunks WHERE rowid IN ({ph})", rowids)
-            db.execute(f"DELETE FROM fts_chunks WHERE rowid IN ({ph})", rowids)
-            db.execute(f"DELETE FROM chunks WHERE rowid IN ({ph})", rowids)
             Store._release_stale_dups(db, doc_ids)
         # A file's cached payload dies only with its LAST chunk. Before the
         # re-key each chunk had its own row and the file's others survived a
@@ -3007,27 +3019,139 @@ class Store:
     def invalidate_local_relations_for_docs(self, doc_ids, *,
                                             reason: str = "drive_revoked",
                                             at: str | None = None) -> int:
-        """Bitemporally invalidate origin='local' relations whose source_doc_id is
-        in doc_ids and are not already invalidated. Sets invalidated_at (UTC ISO)
-        and superseded_reason. origin='org' rows are never touched — layer 1 is
-        curator-owned and safe-by-construction (spec A3). Returns rows changed."""
-        doc_ids = list(doc_ids)
+        """A source is gone: take its support away from origin='local'
+        relations, and invalidate (bitemporally: invalidated_at +
+        superseded_reason) only those left with no evidence. origin='org' rows
+        are never touched -- layer 1 is curator-owned (spec A3). Returns the
+        number of relations invalidated.
+
+        Call BEFORE the chunk rows are deleted: each doc's logical source key
+        (Gmail thread, Drive file, note, event, anarlog session) is read from
+        its chunk, and counts as gone only when no chunk OUTSIDE `doc_ids`
+        still carries it (a Gmail message deleted from a live thread leaves
+        the thread's support in place). Then, in one transaction:
+
+          * relation_sources rows of the gone keys are deleted;
+          * every live local relation those rows supported, or whose
+            source_doc_id is one of `doc_ids`, has its strength recounted
+            (graph_write.relation_strength); one with evidence left stays
+            live at the new count, one without is invalidated. A legacy row
+            (no source rows at all) has no evidence left and is invalidated,
+            as before source counting existed.
+
+        IN lists are sliced at _IN_BATCH; the source_key lookup is served by
+        idx_relation_sources_key, each per-key liveness probe by the matching
+        chunk-metadata expression index."""
+        from mcpbrain.graph_write import relation_strength
+        doc_ids = list(dict.fromkeys(d for d in (doc_ids or ()) if d))
         if not doc_ids:
             return 0
         at = at or datetime.now(timezone.utc).isoformat()
         n = 0
         with self._connect(write=True) as db:
-            # Sliced: a whole shared drive is tens of thousands of ids and
-            # SQLite caps bound variables per statement.
+            gone = self._gone_source_keys(db, doc_ids)
+            cand: set = set()
             for i in range(0, len(doc_ids), _IN_BATCH):
                 part = doc_ids[i:i + _IN_BATCH]
                 qs = ",".join("?" * len(part))
+                cand |= {r[0] for r in db.execute(
+                    f"SELECT id FROM entity_relations WHERE source_doc_id IN ({qs}) "
+                    "AND invalidated_at IS NULL AND COALESCE(origin,'local')='local'",
+                    part)}
+            gone = sorted(gone)
+            for i in range(0, len(gone), _IN_BATCH):
+                part = gone[i:i + _IN_BATCH]
+                qs = ",".join("?" * len(part))
+                hit = [r[0] for r in db.execute(
+                    "SELECT rs.relation_id FROM relation_sources rs "
+                    "JOIN entity_relations er ON er.id = rs.relation_id "
+                    f"WHERE rs.source_key IN ({qs}) "
+                    "AND COALESCE(er.origin,'local')='local'", part)]
+                if not hit:
+                    continue
+                db.execute(  # admin-delete-ok: a removed source's support row
+                    f"DELETE FROM relation_sources WHERE source_key IN ({qs}) "
+                    "AND relation_id IN (SELECT id FROM entity_relations "
+                    "WHERE COALESCE(origin,'local')='local')", part)
+                cand |= set(hit)
+            dead: list = []
+            for rid in sorted(cand):
+                row = db.execute("SELECT strength, invalidated_at FROM entity_relations "
+                                 "WHERE id=?", (rid,)).fetchone()
+                if row is None or row["invalidated_at"] is not None:
+                    continue
+                left = relation_strength(db, rid)
+                if left > 0:
+                    if row["strength"] != left:
+                        db.execute("UPDATE entity_relations SET strength=? WHERE id=?",
+                                   (left, rid))
+                else:
+                    dead.append(rid)
+            for i in range(0, len(dead), _IN_BATCH):
+                part = dead[i:i + _IN_BATCH]
+                qs = ",".join("?" * len(part))
                 n += db.execute(
                     f"UPDATE entity_relations SET invalidated_at=?, superseded_reason=? "
-                    f"WHERE source_doc_id IN ({qs}) AND invalidated_at IS NULL "
-                    f"AND COALESCE(origin,'local')='local'",
+                    f"WHERE id IN ({qs}) AND invalidated_at IS NULL",
                     (at, reason, *part)).rowcount
         return n
+
+    # The metadata field that names a chunk's logical source (source_class.
+    # source_key's namespaces), with the key built from its value.
+    _SOURCE_KEY_FIELDS = (
+        ("file_id", "$.file_id", lambda v: v),
+        ("session_id", "$.session_id", lambda v: f"anarlog-{v}"),
+        ("event_id", "$.event_id", lambda v: f"cal-{v}"),
+        ("note_id", "$.note_id", lambda v: v),
+    )
+
+    @classmethod
+    def _gone_source_keys(cls, db, doc_ids) -> set:
+        """Logical source keys of `doc_ids` that no chunk outside `doc_ids`
+        still carries. A content duplicate is skipped (its key is its
+        canonical's, which is not being removed by removing the duplicate);
+        a doc with no chunk row left names itself."""
+        removed = set(doc_ids)
+        probes: dict = {}                     # key -> (expression, value)
+        seen: set = set()
+        for i in range(0, len(doc_ids), _IN_BATCH):
+            part = doc_ids[i:i + _IN_BATCH]
+            qs = ",".join("?" * len(part))
+            for r in db.execute(f"SELECT doc_id, metadata, dup_of FROM chunks "
+                                f"WHERE doc_id IN ({qs})", part):
+                seen.add(r["doc_id"])
+                if r["dup_of"]:
+                    continue
+                try:
+                    meta = json.loads(r["metadata"] or "{}") or {}
+                except (TypeError, ValueError):
+                    meta = {}
+                if meta.get("source_type") == "gmail":
+                    field = "thread_id" if meta.get("thread_id") else "message_id"
+                    if meta.get(field):
+                        probes[str(meta[field])] = (f"$.{field}", str(meta[field]))
+                        continue
+                for fld, expr, mk in cls._SOURCE_KEY_FIELDS:
+                    if meta.get(fld):
+                        probes[mk(str(meta[fld]))] = (expr, str(meta[fld]))
+                        break
+                else:
+                    if meta.get("thread_id"):
+                        probes[str(meta["thread_id"])] = ("$.thread_id",
+                                                          str(meta["thread_id"]))
+                    else:
+                        probes[r["doc_id"]] = None
+        gone = {d for d in doc_ids if d not in seen}
+        for key, probe in probes.items():
+            if probe is None:
+                gone.add(key)
+                continue
+            expr, val = probe
+            live = any(r[0] not in removed for r in db.execute(
+                f"SELECT doc_id FROM chunks WHERE {_meta_extract(expr)} = ?", (val,)))
+            if not live:
+                gone.add(key)
+        return gone
 
     def invalidate_sources_for_docs(self, doc_ids, *, source_ids=(),
                                     file_ids=(),
@@ -3051,7 +3175,11 @@ class Store:
         candidates are found with one prefix scan and confirmed by an exact
         owner parse, since base64url ids contain '-' and a bare prefix
         over-matches.
-        All IN lists are sliced; one transaction.
+        All IN lists are sliced. TWO transactions, in order: the relation step
+        (invalidate_local_relations_for_docs) commits first, then the
+        action/link step runs in its own. A failure in the second leaves the
+        relations already handled -- harmless, as both steps are idempotent
+        and the caller retries the whole removal.
         """
         doc_ids = list(doc_ids or ())
         source_ids = [x for x in dict.fromkeys(source_ids or ()) if x]
@@ -3098,14 +3226,20 @@ class Store:
                     (reason, at, *params)).rowcount
             if links:
                 live = db.execute(
-                    f"SELECT message_id, entity_id FROM email_entities "
+                    f"SELECT message_id, entity_id, role FROM email_entities "
                     f"WHERE message_id IN ({qs}) AND COALESCE(derived,0)=0",
                     part).fetchall()
                 for r in live:
+                    # A meeting-series 'about' link is the one link that also
+                    # counted a mention (graph_write.apply); take it back too,
+                    # or each remove/revive cycle inflates mentions (M7).
                     db.execute(
                         "UPDATE entities SET email_count = "
-                        "MAX(0, COALESCE(email_count,0) - 1) WHERE id=?",
-                        (r["entity_id"],))
+                        "MAX(0, COALESCE(email_count,0) - 1), "
+                        "mentions = CASE WHEN ? AND type='meeting' "
+                        "THEN MAX(0, COALESCE(mentions,0) - 1) ELSE mentions END "
+                        "WHERE id=?",
+                        (1 if r["role"] == "about" else 0, r["entity_id"]))
                 db.execute(
                     f"UPDATE email_entities SET derived=1, derived_reason=? "
                     f"WHERE message_id IN ({qs}) AND COALESCE(derived,0)=0",
