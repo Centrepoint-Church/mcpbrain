@@ -789,7 +789,8 @@ def test_derived_source_adds_no_support(tmp_path):
     graph_write.apply(s, _rel_extraction("t1", "m1"), doc_ids=["gm-1"])
     sam_before = s.get_entity("sam")["email_count"]
 
-    # The same relation and role restated by a consolidated note: nothing moves.
+    # The same relation and role restated by a consolidated note: nothing moves,
+    # and nothing is written for it at all (ruling I14).
     graph_write.apply(s, _rel_extraction("note-consolidated-abc", "note-consolidated-abc"),
                       doc_ids=["note-consolidated-abc"])
     assert _strength(s) == (1, 0, 1)
@@ -797,21 +798,78 @@ def test_derived_source_adds_no_support(tmp_path):
     assert s.get_entity("sam")["email_count"] == sam_before
     with s._connect() as db:
         link = db.execute("SELECT derived FROM email_entities "
-                          "WHERE message_id='note-consolidated-abc' AND entity_id='sam'"
-                          ).fetchone()
-    assert link is not None and link["derived"] == 1
+                          "WHERE message_id='note-consolidated-abc'").fetchone()
+    assert link is None
 
-    # A relation ONLY a derived source states is written derived=1 / strength 0.
+    # A relation ONLY a derived source states is not written at all.
     ext = _rel_extraction("note-consolidated-abc", "note-consolidated-abc")
     ext["relations"] = [{"source_name": "Sam", "type": "manages", "target_name": "Pat"}]
     graph_write.apply(s, ext, doc_ids=["note-consolidated-abc"])
-    assert _strength(s, "manages") == (0, 1, 0)
+    with s._connect() as db:
+        assert db.execute("SELECT COUNT(*) FROM entity_relations "
+                          "WHERE relation='manages'").fetchone()[0] == 0
 
     # A later primary source makes it a real edge with one source.
     ext2 = _rel_extraction("t1", "m1")
     ext2["relations"] = [{"source_name": "Sam", "type": "manages", "target_name": "Pat"}]
     graph_write.apply(s, ext2, doc_ids=["gm-1"])
     assert _strength(s, "manages") == (1, 0, 1)
+
+
+def _graph_counts(s):
+    with s._connect() as db:
+        return {t: db.execute(f"SELECT COUNT(*) FROM {t}").fetchone()[0]
+                for t in ("actions", "entities", "email_entities", "entity_relations",
+                          "entity_observations", "email_context", "thread_context")
+                } | {"digest": db.execute("SELECT COUNT(*) FROM chunks "
+                                          "WHERE doc_id LIKE 'enriched-%'").fetchone()[0]}
+
+
+def _full_extraction(thread_id, msg_id):
+    ext = _rel_extraction(thread_id, msg_id)
+    ext["topics"] = ["venue booking"]
+    ext["contextual_summary"] = "Dana is booking the venue."
+    ext["entities"].append({"name": "Weekly Staff Meeting", "type": "meeting",
+                            "series_name": "Weekly Staff Meeting",
+                            "occurrence_date": "2026-02-01"})
+    ext["actions"] = [{"description": "Return the signed venue form",
+                       "owner_name": "Dana Okafor", "deadline": "2026-03-01"}]
+    return ext
+
+
+def test_draft_source_writes_nothing(tmp_path):
+    """Ruling I14: a derived-class source (a DRAFT) writes no action, entity,
+    link, relation, observation, topic, occurrence, context row or digest —
+    even when its unit reaches apply (a pre-upgrade unit, any future caller)."""
+    s = _store(tmp_path)
+    _mail_chunk(s, "gmail-d1-body-0", "td", labels="DRAFT", message_id="md")
+    before = _graph_counts(s)
+    res = graph_write.apply(s, _full_extraction("td", "md"), doc_ids=["gmail-d1-body-0"])
+    assert _graph_counts(s) == before
+    assert res["entities"] == 0 and res["relations"] == 0
+
+
+def test_session_note_writes_nothing(tmp_path):
+    s = _store(tmp_path)
+    nid = "note-session-" + "a" * 16
+    s.upsert_chunk(f"{nid}-0", "transcript", "h-s",
+                   {"source": "note", "note_id": nid, "tags": "session",
+                    "claude_session_id": "abc"})
+    before = _graph_counts(s)
+    graph_write.apply(s, _full_extraction(nid, nid), doc_ids=[f"{nid}-0"])
+    assert _graph_counts(s) == before
+
+
+def test_evidence_source_still_writes_everything(tmp_path):
+    """Control for the two tests above: the same extraction from SENT mail
+    writes its action, entities, links and relation."""
+    s = _store(tmp_path)
+    _mail_chunk(s, "gmail-s1-body-0", "ts", labels="SENT", message_id="ms")
+    before = _graph_counts(s)
+    graph_write.apply(s, _full_extraction("ts", "ms"), doc_ids=["gmail-s1-body-0"])
+    after = _graph_counts(s)
+    for t in ("entities", "email_entities", "entity_relations"):
+        assert after[t] > before[t], t
 
 
 def test_digest_writes_no_relations(tmp_path):

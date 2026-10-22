@@ -1544,13 +1544,24 @@ def apply(store, extraction, *, doc_ids, identity=None,
     # Independent-source support (spec 2026-10-22 §3): which LOGICAL source
     # (thread / file / note / event) this extraction is, and whether it is
     # evidence. Evidence adds a support row (strength / observed_count are SET
-    # to the distinct-source count); a derived source writes links/relations/
-    # observations derived=1 and adds no support; a digest writes none.
+    # to the distinct-source count); a derived source (digest included)
+    # writes nothing at all (ruling I14, below).
     _src_key, _src_cls = extraction_sources(store, doc_ids, thread_id=thread_id,
                                             home=_home)
     _derived = bool(_src_cls) and not _is_evidence_class(_src_cls)
     _digest = _src_cls == _sc.SourceClass.DIGEST.value
     _src_kw = {"source_key": _src_key, "source_class": _src_cls}
+    if _derived:
+        # Derived sources are never evidence (spec principle 2, ruling I14):
+        # no action, entity, link, relation, observation, topic, occurrence,
+        # context row or digest. Upstream gates (prepare's derived gate,
+        # drain's drop_cold) normally keep such chunks away from here, but a
+        # unit built before an upgrade, or any other caller, still reaches
+        # apply — so the rule is enforced HERE, not by convention.
+        log.info("apply: skipped thread %s: source class %s is not evidence",
+                 thread_id, _src_cls)
+        return {"entities": 0, "relations": 0, "topics": 0, "email_context": 0,
+                "skipped": _src_cls}
 
     # Thread lead = earliest message by date. Falls back to first listed.
     lead = None
