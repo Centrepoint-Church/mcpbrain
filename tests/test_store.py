@@ -146,13 +146,14 @@ def test_doc_ids_for_messages_query_is_index_backed(tmp_path):
         plan = " ".join(
             tuple(r)[-1] for r in
             db.execute("EXPLAIN QUERY PLAN " + s._doc_ids_query(1),
-                       ["x"] * 5).fetchall())
+                       ["x"] * 6).fetchall())
     assert "SCAN chunks" not in plan, f"full scan not eliminated: {plan}"
     assert "idx_chunks_msgid" in plan and "idx_chunks_fileid" in plan, \
         f"metadata indexes not used: {plan}"
     assert "idx_chunks_eventid" in plan, f"event_id arm not index-backed: {plan}"
     assert "idx_chunks_sessionid" in plan, \
         f"session_id arm not index-backed: {plan}"
+    assert "idx_chunks_noteid" in plan, f"note_id arm not index-backed: {plan}"
 
 
 def test_doc_ids_for_messages_strips_the_cal_prefix_for_the_event_arm(tmp_path):

@@ -813,3 +813,51 @@ def test_join_pieces_marks_an_internal_gap_and_a_truncated_tail():
     assert "[…]" in text
     text2, gap2 = join_pieces(["a", "b"], [0, 1], 2)
     assert (text2, gap2) == ("a\n\nb", False)
+
+
+def _seed_note(store, nid, n):
+    for i in range(n):
+        store.upsert_chunk(f"{nid}-{i}", f"piece {i}", f"h{nid}{i}",
+                           {"source": "note", "note_id": nid,
+                            "chunk_index": i, "chunk_total": n})
+
+
+def test_note_chunks_group_into_one_thread(tmp_path):
+    store = _store(tmp_path)
+    nid = "note-" + "a" * 32
+    _seed_note(store, nid, 3)
+    batches = thread_enrich.group_unenriched_threads(store, thread_cap=10)
+    assert len(batches) == 1
+    assert batches[0].thread_id == nid
+    assert len(batches[0].doc_ids) == 3
+
+
+def test_doc_ids_for_note_id_returns_all_pieces(tmp_path):
+    store = _store(tmp_path)
+    nid = "note-" + "b" * 32
+    _seed_note(store, nid, 3)
+    _seed_note(store, "note-" + "c" * 32, 2)
+    assert store.doc_ids_for_messages([nid]) == [f"{nid}-0", f"{nid}-1", f"{nid}-2"]
+
+
+def test_thread_sorted_by_time_not_weekday_string(tmp_path):
+    store = _store(tmp_path)
+    # Weekday-string order would put "Fri" before "Wed"; real time is the reverse.
+    _seed(store, "g1", thread_id="T", message_id="m1",
+          date="Wed, 23 Sep 2026 22:01:59 -0700")
+    _seed(store, "g2", thread_id="T", message_id="m2",
+          date="Fri, 25 Sep 2026 09:00:00 +1000")
+    _seed(store, "g3", thread_id="T", message_id="m3",
+          date="2026-09-24T10:00:00+00:00")
+    batches = thread_enrich.group_unenriched_threads(store, thread_cap=10)
+    msgs = thread_enrich.reassemble_thread(store, batches[0])
+    assert [m["message_id"] for m in msgs] == ["m1", "m3", "m2"]
+
+
+def test_lead_is_earliest_message():
+    msgs = [{"message_id": "late", "date": "Fri, 25 Sep 2026 09:00:00 +1000"},
+            {"message_id": "early", "date": "Wed, 23 Sep 2026 22:01:59 -0700"},
+            {"message_id": "junk", "date": "garbage"}]
+    # unparseable sorts first by contract; drop it to check the real pair
+    assert min(msgs[:2], key=thread_enrich.message_time)["message_id"] == "early"
+    assert thread_enrich.message_time(msgs[2]) < thread_enrich.message_time(msgs[1])

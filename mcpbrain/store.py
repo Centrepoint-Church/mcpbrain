@@ -5798,7 +5798,7 @@ class Store:
                        else None for m in ids]
         with self._connect() as db:
             rows = db.execute(self._doc_ids_query(len(ids)),
-                              ids + ids + event_ids + session_ids + ids).fetchall()
+                              ids + ids + event_ids + session_ids + ids + ids).fetchall()
         return [r["doc_id"] for r in rows]
 
     @staticmethod
@@ -5826,7 +5826,8 @@ class Store:
         The session_id arm is the anarlog analogue: a meeting's chunks are
         anarlog-<session_id>-<kind>-<i>, never the bare `anarlog-<session_id>`,
         so this arm is what makes one key resolve every chunk of the meeting.
-        It must stay AFTER the event_id arm and BEFORE the doc_id fallback arm,
+        The note_id arm (one captured note = one thread) follows it, also index-backed
+        (idx_chunks_noteid). It must stay AFTER the event_id arm and BEFORE the doc_id fallback arm,
         since the caller's bind list is positional per arm."""
         ph = ",".join("?" * n)
         return (
@@ -5841,6 +5842,9 @@ class Store:
             f"UNION "
             f"SELECT doc_id, rowid FROM chunks "
             f"WHERE {_meta_extract('$.session_id')} IN ({ph}) "
+            f"UNION "
+            f"SELECT doc_id, rowid FROM chunks "
+            f"WHERE {_meta_extract('$.note_id')} IN ({ph}) "
             f"UNION "
             f"SELECT doc_id, rowid FROM chunks "
             f"WHERE {_meta_extract('$.message_id')} IS NULL "

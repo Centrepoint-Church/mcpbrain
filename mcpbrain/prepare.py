@@ -155,7 +155,7 @@ def thread_is_noise(messages) -> bool:
     """
     if not messages:
         return False
-    lead = min(messages, key=lambda m: m.get("date", ""))
+    lead = min(messages, key=thread_enrich.message_time)
     if _is_noise(lead.get("sender", ""), lead.get("subject", "")):
         return True
     return _is_bulk_body(lead.get("text", ""))
@@ -748,7 +748,7 @@ def _apply_trivial_threads(store, batches, *, home=None, bulk_section=None,
         if not is_trivial_thread(messages):
             kept.append(batch)
             continue
-        lead = min(messages, key=lambda m: m.get("date", "") or "") if messages else {}
+        lead = min(messages, key=thread_enrich.message_time) if messages else {}
         extraction = {
             "thread_id": block["thread_id"],
             "org": block["org_hint"] or "unknown",
@@ -808,7 +808,7 @@ def _thread_block(store, batch) -> dict:
     org_hint = ""
     if messages:
         from mcpbrain import graph_write, orgs
-        lead = min(messages, key=lambda m: m.get("date", "") or "")
+        lead = min(messages, key=thread_enrich.message_time)
         email = graph_write._extract_email_addr(lead.get("sender", "") or "")
         if email:
             org_hint = graph_write.org_from_email(email, orgs.taxonomy_from_config())

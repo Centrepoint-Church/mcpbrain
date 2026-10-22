@@ -1117,7 +1117,8 @@ def apply(store, extraction, *, doc_ids, identity=None,
     # Thread lead = earliest message by date. Falls back to first listed.
     lead = None
     if messages:
-        lead = min(messages, key=lambda m: m.get("date", "") or "")
+        from mcpbrain.thread_enrich import message_time
+        lead = min(messages, key=message_time)
     if lead is None:
         # No provenance — nothing structural to anchor on.
         return {"entities": 0, "relations": 0, "topics": 0, "email_context": 0}

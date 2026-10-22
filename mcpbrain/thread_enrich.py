@@ -21,6 +21,8 @@ returns every message in date order; prepare decides how to chunk them.
 
 import re
 from dataclasses import dataclass, field
+from datetime import datetime, timezone
+from email.utils import parsedate_to_datetime
 
 
 # Chunking split bodies on blank lines (chunking.chunk_text splits and rejoins
@@ -51,9 +53,38 @@ class ThreadBatch:
 _ATTACHMENT_INDEX = re.compile(r"-att-(\d+)-\d+$")
 
 
+_MIN_TIME = datetime.min.replace(tzinfo=timezone.utc)
+
+
+def message_time(m: dict) -> datetime:
+    """A message's real time as an aware UTC datetime, for ordering and lead
+    selection. Gmail dates are RFC-2822 ("Wed, 23 Sep ..."), so sorting the raw
+    string orders by weekday name, not time. ISO strings (and `date_iso`) are the
+    fallback; anything unparseable sorts first."""
+    for raw in (m.get("date"), m.get("date_iso")):
+        raw = str(raw or "").strip()
+        if not raw:
+            continue
+        dt = None
+        try:
+            dt = parsedate_to_datetime(raw)
+        except (TypeError, ValueError, IndexError, OverflowError):
+            pass
+        if dt is None:
+            try:
+                dt = datetime.fromisoformat(raw.replace("Z", "+00:00"))
+            except (TypeError, ValueError, OverflowError):
+                continue
+        if dt.tzinfo is None:
+            dt = dt.replace(tzinfo=timezone.utc)
+        return dt.astimezone(timezone.utc)
+    return _MIN_TIME
+
+
 def _chunk_key(meta: dict, doc_id: str) -> str:
     """Message-identity key shared by _group_key and reassemble_thread: file_id,
-    else ``anarlog-<session_id>``, else ``cal-<event_id>``, else message_id, else
+    else ``anarlog-<session_id>``, else ``cal-<event_id>``, else ``note_id``
+    (one captured note = one thread, however many pieces), else message_id, else
     doc_id.
 
     This is the value reassemble_thread emits as a message's `message_id`, so
@@ -147,6 +178,11 @@ def _chunk_key(meta: dict, doc_id: str) -> str:
         return f"anarlog-{meta['session_id']}"
     if meta.get("event_id"):
         return f"cal-{meta['event_id']}"
+    # A chunked note is one document: its pieces are note-<hash>-<i> and carry
+    # note_id, so without this each piece became its own thread. Resolvable by
+    # store._doc_ids_query's note_id arm.
+    if meta.get("note_id"):
+        return meta["note_id"]
     return meta.get("message_id") or doc_id
 
 
@@ -421,5 +457,5 @@ def reassemble_thread(chunks: list[dict]) -> list[dict]:
             "chunk_has_gap": chunk_has_gap,
         })
 
-    messages.sort(key=lambda m: m.get("date", ""))
+    messages.sort(key=message_time)
     return messages
