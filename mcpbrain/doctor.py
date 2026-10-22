@@ -555,6 +555,7 @@ def run_doctor(home, *, conns=None, repairs=None, reprobe=None, platform=None,
     # how the 2026-09-10 sync_cursors corruption stayed invisible for hours.
     lines.append(integrity_line(home))
     lines.append(reflow_line(store))
+    lines.append(ingestion_cleanup_line(store))
 
     # Scheduled tasks: inferred from enrichment, never auto. Stated honestly.
     enr = conns.get("enrichment", {}).get("state", "not_started")
@@ -889,6 +890,22 @@ def reflow_line(store) -> str:
             gate = "; not yet seeded"
         return f"⏳ {'Reflow':<16} {st['queued']} queued; {detail}{gate}"
     return f"✅ {'Reflow':<16} idle ({detail})"
+
+
+def ingestion_cleanup_line(store) -> str:
+    """One doctor line for the one-shot ingestion clean-up (ruling I13):
+    done / failed / deferred (no backup in 24 h) / disabled / running /
+    pending. A deferral is a warning: until it runs, every relation reads as
+    legacy and derived-source actions stay open."""
+    try:
+        from mcpbrain import ingestion_cleanup as ic
+        st = ic.status(store)
+    except Exception as exc:  # noqa: BLE001 — a diagnostic must never be fatal
+        return f"➖ {'Clean-up':<16} skipped ({exc})"
+    state = st["state"]
+    icon = {"done": "✅", "failed": "❌", "deferred_no_backup": "⚠️",
+            "disabled": "➖", "running": "⏳", "pending": "⏳"}.get(state, "⚠️")
+    return f"{icon} {'Clean-up':<16} {ic.summary_line(st)}"
 
 
 def version_drift_line(home, installed: str | None = None) -> str | None:

@@ -554,6 +554,13 @@ _CADENCE_PASSES: tuple[CadencePass, ...] = (
     # backup -- see _run_reflow_seed.
     CadencePass("reflow_seed", "_reflow_seed_interval_s",
                 "_last_reflow_seed", "_run_reflow_seed"),
+    # Ingestion integrity (2026-10-22, ruling I13): the one-shot clean-up,
+    # once per install. Marker-gated (the attended CLI shares the marker),
+    # backup-gated like the reflow seed, fleet kill switch
+    # ingestion_cleanup_enabled. Bulk lock: it rewrites chunk rows.
+    CadencePass("ingestion_cleanup", "_ingestion_cleanup_interval_s",
+                "_last_ingestion_cleanup", "_run_ingestion_cleanup",
+                needs_bulk_lock=True),
 )
 
 
@@ -1240,6 +1247,11 @@ class Daemon:
         # set reflow_seed_interval_s: 0 in the cadences config to disable.
         self._reflow_seed_interval_s: float | None = None
         self._last_reflow_seed = None
+        # One-shot ingestion clean-up: default 3600s via _CADENCE_DEFAULTS (the
+        # retry interval while deferred; a done/failed marker makes each tick a
+        # single meta read). Set ingestion_cleanup_interval_s: 0 to disable.
+        self._ingestion_cleanup_interval_s: float | None = None
+        self._last_ingestion_cleanup = None
         # Drain the legacy doc_id-keyed enrich_payloads table store.init()
         # renames aside. Hourly and hardcoded (not config-driven): this is a
         # one-time-ish drain, not a tunable maintenance policy, and it
@@ -1964,6 +1976,14 @@ class Daemon:
             reflow = self._store.reflow_status()
         except Exception as exc:  # noqa: BLE001
             log.debug("status: reflow block degraded: %s", exc)
+        # Ingestion integrity one-shot clean-up (ruling I13): pending /
+        # deferred_no_backup / disabled / running / done / failed.
+        ingestion_cleanup = None
+        try:
+            from mcpbrain import ingestion_cleanup as _ic
+            ingestion_cleanup = _ic.status(self._store)
+        except Exception as exc:  # noqa: BLE001
+            log.debug("status: ingestion_cleanup block degraded: %s", exc)
         return {
             "paused": self.is_paused(),
             "chunk_count": self._store.chunk_count(),
@@ -1988,6 +2008,7 @@ class Daemon:
                 watchdog_exits >= getattr(self, "_watchdog_max_exits", WATCHDOG_MAX_EXITS),
             "version": __import__("mcpbrain", fromlist=["__version__"]).__version__,
             "reflow": reflow,
+            "ingestion_cleanup": ingestion_cleanup,
             # Non-null while any Google build is waiting on a transient-failure
             # retry -- so a multi-day "token fine, network was not" outage is
             # visible here and in doctor, not only in the log.
@@ -2451,6 +2472,7 @@ class Daemon:
         self._org_curate_interval_s = cadences["org_curate_interval_s"]
         self._ocr_setup_interval_s = cadences["ocr_setup_interval_s"]
         self._reflow_seed_interval_s = cadences["reflow_seed_interval_s"]
+        self._ingestion_cleanup_interval_s = cadences["ingestion_cleanup_interval_s"]
 
     def apply_config(self, body: dict) -> None:
         """Persist config updates, then re-wire enrich + backup from disk.
@@ -4002,6 +4024,28 @@ class Daemon:
             log.info("action_hygiene: archived=%d deduped=%d",
                      summary["actions_archived"], summary["actions_deduped"])
         return summary
+
+    def _run_ingestion_cleanup(self) -> dict | None:
+        """The one-shot ingestion clean-up (ruling I13), on the maintenance
+        thread under _bulk_lock (needs_bulk_lock). ingestion_cleanup.
+        run_migration owns every gate and the marker; this only rate-limits
+        the call and logs a state change."""
+        if not self._is_due("_ingestion_cleanup_interval_s", "_last_ingestion_cleanup"):
+            return None
+        self._last_ingestion_cleanup = self._clock()
+        from mcpbrain import ingestion_cleanup
+        before = ingestion_cleanup.read_marker(self._store).get("state")
+        if before in ("done", "failed"):
+            return {"ingestion_cleanup": before}
+        rec = ingestion_cleanup.run_migration(
+            self._store, str(app_dir()), embedder_factory=lambda: self._embedder)
+        state = rec.get("state")
+        line = ingestion_cleanup.summary_line(rec)
+        if state == "failed":
+            log.error("ingestion_cleanup: %s", line)
+        elif state != before:
+            log.info("ingestion_cleanup: %s", line)
+        return {"ingestion_cleanup": state}
 
     def _reflow_source_sets(self, home) -> tuple[set[str], set[str]]:
         """(workable_now, workable). `workable` is reflow.workable_reflow_sources
@@ -5723,6 +5767,7 @@ _CADENCE_DEFAULTS: dict[str, float] = {
     "org_curate_interval_s":          86400.0,   # Phase 0 stub: daily curator adjudication
     "ocr_setup_interval_s":           86400.0,   # once-ever OCR binary install (marker-gated)
     "reflow_seed_interval_s":         3600.0,    # extraction-fidelity: hourly reflow queue top-up
+    "ingestion_cleanup_interval_s":   3600.0,    # one-shot clean-up; hourly retry while deferred
 }
 
 _CADENCE_KEYS = (
@@ -5753,6 +5798,7 @@ _CADENCE_KEYS = (
     "org_curate_interval_s",
     "ocr_setup_interval_s",
     "reflow_seed_interval_s",
+    "ingestion_cleanup_interval_s",
 )
 
 
@@ -5896,6 +5942,7 @@ def main(argv=None) -> None:
     daemon._org_curate_interval_s = cadences["org_curate_interval_s"]
     daemon._ocr_setup_interval_s = cadences["ocr_setup_interval_s"]
     daemon._reflow_seed_interval_s = cadences["reflow_seed_interval_s"]
+    daemon._ingestion_cleanup_interval_s = cadences["ingestion_cleanup_interval_s"]
     # Task 7 tuning knobs: not constructor params either, wired the same way
     # as the cadences just above (see _tuning_from_config / Daemon.__init__).
     daemon._cycle_budget_s = tuning["cycle_budget_s"]

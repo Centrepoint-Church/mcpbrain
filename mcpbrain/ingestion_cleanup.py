@@ -1000,6 +1000,132 @@ def undo(store: Store, step: str, *, dry: bool) -> tuple[int, int]:
         return len(done), drifted
 
 
+# ---------------------------------------------------------------------------
+# Shared marker + the daemon's one-shot migration (ruling I13)
+# ---------------------------------------------------------------------------
+
+# Store meta key: {"state", "by", "at", "steps", "skipped", "counts", "error",
+# "attempts"}. The CLI and the daemon read and write the same row, so
+# whichever applies the clean-up first wins and it never runs twice by itself.
+MARKER_KEY = "ingestion_cleanup"
+# States a status reader can see. `pending` = no marker yet (nothing ran).
+STATES = ("pending", "deferred_no_backup", "disabled", "running", "done", "failed")
+# Same bar as the reflow seed: a restore point no older than a day.
+BACKUP_MAX_AGE_S = 86400.0
+# A run interrupted mid-way (the process died: sleep, a watchdog restart, a
+# crash) leaves `running`. Each step is one transaction and idempotent, so a
+# rerun is safe, but never in a loop: after this many starts it is `failed`.
+MAX_ATTEMPTS = 3
+FLEET_FLAG = "ingestion_cleanup_enabled"
+
+
+def read_marker(store) -> dict:
+    try:
+        raw = store.get_meta(MARKER_KEY)
+        rec = json.loads(raw) if raw else {}
+        return rec if isinstance(rec, dict) else {}
+    except Exception:  # noqa: BLE001 — a missing table / garbage reads as "none"
+        return {}
+
+
+def _write_marker(store, rec: dict) -> dict:
+    rec = {**rec, "at": _now()}
+    store.set_meta(MARKER_KEY, json.dumps(rec, sort_keys=True))
+    return rec
+
+
+def status(store) -> dict:
+    """The marker as status/doctor show it; `pending` when nothing ran."""
+    rec = read_marker(store)
+    return {**rec, "state": rec.get("state") or "pending"}
+
+
+def _counts_json(results: dict) -> dict:
+    return {step: dict(c) for step, c in results.items()}
+
+
+def brief_rules_configured(rules) -> bool:
+    return bool(rules.subject_prefixes or rules.drive_folders or rules.generated_label_ids)
+
+
+def _integrity(store) -> str:
+    with store._connect() as db:
+        return db.execute("PRAGMA integrity_check").fetchone()[0]
+
+
+def run_migration(store, home, *, embedder_factory=None, last_backup=None,
+                  clock=time.time) -> dict:
+    """The daemon's one-shot clean-up (ruling I13). Call with the daemon's
+    bulk lock held, after Store.init. Returns the marker it leaves.
+
+    No-op once `done` or `failed` (by either entry point). Otherwise, gated in
+    order: the fleet kill switch `ingestion_cleanup_enabled` (default ON) ->
+    `disabled`; a successful backup in the last 24 h (`last_backup`, epoch
+    seconds; looked up when None) -> `deferred_no_backup`, retried on the
+    next call. Then every step runs, source_brief SKIPPED (not refused) when
+    no brief rule is configured, each step logged to cleanup_log so
+    `mcpbrain clean-ingestion --undo STEP` works on any install.
+    PRAGMA integrity_check runs after; a failed check or any error records
+    `failed` with the reason and is never retried automatically."""
+    rec = read_marker(store)
+    if rec.get("state") in ("done", "failed"):
+        return rec
+    if not config.fleet_flag(home, FLEET_FLAG, True):
+        return _write_marker(store, {**rec, "state": "disabled"})
+    if last_backup is None:
+        from mcpbrain.probes import last_backup_success
+        last_backup = last_backup_success(home)
+    if last_backup is None or clock() - last_backup > BACKUP_MAX_AGE_S:
+        return _write_marker(store, {**rec, "state": "deferred_no_backup",
+                                     "last_backup": last_backup})
+    attempts = int(rec.get("attempts") or 0) + 1
+    if rec.get("state") == "running" and attempts > MAX_ATTEMPTS:
+        return _write_marker(store, {**rec, "state": "failed", "by": "daemon",
+                                     "error": f"interrupted {attempts - 1} time(s)"})
+    with store._connect() as db:
+        rules = sc.Rules.from_config(home, generated_label_ids=_cached_label_ids(db))
+    steps = list(STEPS)
+    skipped = []
+    if not brief_rules_configured(rules):
+        steps.remove("source_brief")
+        skipped.append("source_brief")
+    base = {"by": "daemon", "steps": steps, "skipped": skipped, "attempts": attempts}
+    _write_marker(store, {"state": "running", **base})
+    try:
+        emb = embedder_factory() if embedder_factory is not None else None
+        results = run(store, home, steps, dry=False, embedder=emb)
+        ok = _integrity(store)
+    except Exception as exc:  # noqa: BLE001 — recorded, never retried in a loop
+        return _write_marker(store, {"state": "failed", **base,
+                                     "error": f"{type(exc).__name__}: {exc}"})
+    if ok != "ok":
+        return _write_marker(store, {"state": "failed", **base,
+                                     "counts": _counts_json(results),
+                                     "error": f"integrity_check: {ok}"})
+    return _write_marker(store, {"state": "done", **base,
+                                 "counts": _counts_json(results)})
+
+
+def summary_line(st: dict) -> str:
+    """Short human text for a status dict (doctor, logs)."""
+    state = st.get("state") or "pending"
+    if state == "done":
+        n = sum(v for c in (st.get("counts") or {}).values() for v in c.values())
+        skip = f"; skipped {', '.join(st['skipped'])}" if st.get("skipped") else ""
+        return f"done by {st.get('by', '?')} at {st.get('at', '?')} ({n} row(s) changed{skip})"
+    if state == "failed":
+        return (f"FAILED ({st.get('error', 'unknown')}) — nothing retries it; inspect "
+                "with `mcpbrain clean-ingestion` (dry run), undo a step with "
+                "`--undo STEP --yes`, or re-run with `--yes --rerun`")
+    if state == "deferred_no_backup":
+        return "waiting for a successful backup in the last 24 h"
+    if state == "disabled":
+        return f"disabled by the `{FLEET_FLAG}` flag"
+    if state == "running":
+        return f"running (attempt {st.get('attempts', 1)})"
+    return "not yet run"
+
+
 def _print_summary(results: dict, *, dry: bool) -> None:
     print(f"\n[clean] {'DRY RUN — nothing written' if dry else 'APPLIED'}")
     print(f"{'step':<22}{'rows':>9}  by class")
@@ -1042,9 +1168,13 @@ def main(argv=None, *, embedder=None, dim=None) -> int:
     ap.add_argument("--no-brief-rules", action="store_true",
                     help="apply even though no brief rule is configured (briefs "
                          "then read as primary mail/docs)")
+    ap.add_argument("--rerun", action="store_true",
+                    help="run the full clean-up again although the shared marker "
+                         "says it already ran (by the daemon or an earlier --yes)")
     ap.add_argument("--skip-snapshot-for-tests", action="store_true",
                     help=argparse.SUPPRESS)
     ns = ap.parse_args(argv)
+    full_run = not ns.steps.strip() and not ns.undo
 
     home = Path(ns.home) if ns.home else config.app_dir()
     store_path = Path(ns.store) if ns.store else home / "brain.sqlite3"
@@ -1085,6 +1215,13 @@ def main(argv=None, *, embedder=None, dim=None) -> int:
             print("[clean] REFUSED: configure the brief rules, or pass --no-brief-rules.")
             return 1
 
+    marker = status(ro) if has_schema else {"state": "pending"}
+    print(f"[clean] shared marker: {summary_line(marker)}")
+    if write and full_run and marker["state"] == "done" and not ns.rerun:
+        print("[clean] already applied; nothing to do. Pass --rerun to run every "
+              "step again (idempotent), or --steps / --undo for one step.")
+        return 0
+
     if not write:
         store = ro
         if not has_schema:
@@ -1109,6 +1246,13 @@ def main(argv=None, *, embedder=None, dim=None) -> int:
         print(f"[clean] verified snapshot: {snap}")
     store = Store(store_path, dim=dim)
     store.init()
+    # Any attended write claims the shared marker for the CLI first, so the
+    # daemon's one-shot migration never runs on top of (or re-applies after an
+    # undo of) attended work.
+    prior = read_marker(store)
+    claim = {"by": "cli", "steps": [ns.undo] if ns.undo else steps,
+             "undo": bool(ns.undo), "full": full_run}
+    results: dict = {}
     if ns.undo:
         restored, drifted = undo(store, ns.undo, dry=False)
         print(f"[clean] --undo {ns.undo}: restored {restored} logged value(s)")
@@ -1117,13 +1261,20 @@ def main(argv=None, *, embedder=None, dim=None) -> int:
                   "the step ran (kept in cleanup_log); undo later steps first — "
                   "reverse step order")
     else:
-        _print_summary(run(store, str(home), steps, dry=False, embedder=embedder), dry=False)
-    with store._connect() as db:
-        ok = db.execute("PRAGMA integrity_check").fetchone()[0]
+        results = run(store, str(home), steps, dry=False, embedder=embedder)
+        _print_summary(results, dry=False)
+    ok = _integrity(store)
     if ok != "ok":
+        _write_marker(store, {**prior, "state": "failed", **claim,
+                              "error": f"integrity_check: {ok}"})
         print(f"[clean] INTEGRITY CHECK FAILED: {ok}")
         if snap:
             print(f"[clean] restore the snapshot (daemon stopped): {snap}")
         return 2
+    if prior.get("state") == "done" and not full_run:
+        _write_marker(store, {**prior, "last_cli": claim})
+    else:
+        _write_marker(store, {"state": "done", **claim,
+                              "counts": _counts_json(results)})
     print("[clean] integrity_check ok")
     return 0
