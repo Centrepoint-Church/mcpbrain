@@ -183,6 +183,8 @@ def test_recompute_core_promotes_top_durable_notes(store, home):
     store.set_chunk_type("sem-lo", "semantic"); store.set_chunk_salience("sem-lo", 2.0)
     store.upsert_chunk("epi-1", "A raw email thread.", "h3", {})
     store.set_chunk_type("epi-1", "episodic"); store.set_chunk_salience("epi-1", 10.0)
+    for d in ("sem-hi", "sem-lo", "epi-1"):        # all durable (M8): salience decides
+        _seen(store, d, 3)
 
     n = recompute_core(store, home, max_items=1)
     assert n == 1
@@ -200,6 +202,8 @@ def test_recompute_core_demotes_dropouts_to_hot(store, home):
     store.set_chunk_tier("old-core", "core")
     store.upsert_chunk("new-top", "new top semantic note", "h2", {})
     store.set_chunk_type("new-top", "semantic"); store.set_chunk_salience("new-top", 9.0)
+    for d in ("old-core", "new-top"):
+        _seen(store, d, 3)
 
     recompute_core(store, home, max_items=1)
     tiers = {c["doc_id"]: "core" for c in store.chunks_by_tier("core")}
@@ -284,3 +288,53 @@ def test_run_tier_pass_no_seed_when_flag_off(store, tmp_path):
             "SELECT doc_id FROM chunks WHERE doc_id=?", (_IDENTITY_SEED_DOC_ID,)
         ).fetchone()
     assert row is None, "Seed should not be written when tiered_memory is off"
+
+
+# ---------------------------------------------------------------------------
+# M8: core requires identity/procedural or a durability signal (spec §2)
+# ---------------------------------------------------------------------------
+
+def _seen(store, doc_id, weeks):
+    from datetime import datetime, timedelta, timezone
+    base = datetime(2026, 9, 7, tzinfo=timezone.utc)          # a Monday
+    for w in range(weeks):
+        for _ in range(2):                                    # twice in the same week
+            store.record_recall_feedback(
+                doc_id, "s", "exposure",
+                (base + timedelta(weeks=w, hours=1)).strftime("%Y-%m-%dT%H:%M:%SZ"))
+
+
+def test_core_requires_durability_not_tied_salience(store, home):
+    from mcpbrain.memory_tier import recompute_core
+    for d in ("sem-2wk", "sem-3wk", "sem-none"):
+        store.upsert_chunk(d, f"note {d}", "h" + d, {})
+        store.set_chunk_type(d, "semantic"); store.set_chunk_salience(d, 3.0)
+    _seen(store, "sem-2wk", 2)
+    _seen(store, "sem-3wk", 3)
+    recompute_core(store, home, max_items=12)
+    assert {c["doc_id"] for c in store.chunks_by_tier("core")} == {"sem-3wk"}
+
+
+def test_core_keeps_identity_seed_and_procedural_first(store, tmp_path):
+    from mcpbrain.memory_tier import _IDENTITY_SEED_DOC_ID, recompute_core
+    h = tmp_path / "h"; h.mkdir()
+    (h / "config.json").write_text(json.dumps({"tiered_memory": True,
+                                               "owner_full_name": "Dana Okafor"}))
+    store.upsert_chunk("proc", "how Dana writes", "hp", {})
+    store.set_chunk_type("proc", "procedural"); store.set_chunk_salience("proc", 1.0)
+    store.upsert_chunk("dur", "a durable fact", "hd", {})
+    store.set_chunk_type("dur", "semantic"); store.set_chunk_salience("dur", 9.9)
+    _seen(store, "dur", 5)
+    store.upsert_chunk("note-consolidated-x", "summary", "hc",
+                       {"observation_type": "consolidated"})
+    store.set_chunk_type("note-consolidated-x", "semantic")
+    store.set_chunk_salience("note-consolidated-x", 9.9)
+    store.set_enrich_state(["note-consolidated-x"], "cold")
+    _seen(store, "note-consolidated-x", 5)
+    recompute_core(store, str(h), max_items=2)
+    core = [c["doc_id"] for c in store.top_core_candidates(2)]
+    assert core == [_IDENTITY_SEED_DOC_ID, "proc"]
+    assert {c["doc_id"] for c in store.chunks_by_tier("core")} == {_IDENTITY_SEED_DOC_ID, "proc"}
+    # The seed stays core even if something cold-marked it.
+    store.set_enrich_state([_IDENTITY_SEED_DOC_ID], "cold")
+    assert store.top_core_candidates(1)[0]["doc_id"] == _IDENTITY_SEED_DOC_ID

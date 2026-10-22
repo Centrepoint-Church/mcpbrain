@@ -7208,20 +7208,40 @@ class Store:
             result.append({"doc_id": r["doc_id"], "text": r["text"], "metadata": meta})
         return result
 
+    # Core-tier durability (spec 2026-10-22 §2, M8): a semantic note earns core
+    # only when recall surfaced it (exposure) or it was used in at least this
+    # many distinct ISO weeks. Core is never refreshed by the core block itself
+    # (/api/core records no exposures), so the signal is not self-feeding.
+    CORE_DURABLE_WEEKS = 3
+
     def top_core_candidates(self, limit: int = 12) -> list[dict]:
-        """Top durable notes for the 'core' tier: highest-salience semantic/
-        procedural chunks (consolidated knowledge + voice model), excluding cold.
+        """Durable notes for the 'core' tier (spec 2026-10-22 §2): core
+        requires an identity or procedural note, or a durability signal —
+        surfaced by recall in >= CORE_DURABLE_WEEKS distinct weeks — never tied
+        salience alone. Ranked identity first, then procedural, then durable
+        notes by weeks seen, salience, recency. Cold chunks are excluded (a
+        consolidated note is cold: derived, never core), except the identity
+        seed, which is always core.
 
         Returns [{doc_id}]. Episodic email is intentionally excluded — core is for
         durable distilled facts, not raw correspondence.
         """
+        ot = _meta_extract("$.observation_type")
         with self._connect() as db:
             rows = db.execute(
-                "SELECT doc_id FROM chunks "
-                "WHERE memory_type IN ('semantic','procedural') "
-                "  AND COALESCE(enrich_state,'') != 'cold' "
-                "ORDER BY COALESCE(salience,0.0) DESC, rowid DESC LIMIT ?",
-                (limit,),
+                f"SELECT doc_id, rank, weeks FROM ("
+                f"  SELECT c.doc_id, c.rowid AS rid, COALESCE(c.salience,0.0) AS sal, "
+                f"    CASE WHEN {ot} IN ('identity_seed','identity') THEN 0 "
+                f"         WHEN c.memory_type = 'procedural' OR {ot} = 'procedural' THEN 1 "
+                f"         ELSE 2 END AS rank, "
+                f"    (SELECT COUNT(DISTINCT strftime('%Y-%W', rf.ts)) "
+                f"       FROM recall_feedback rf WHERE rf.doc_id = c.doc_id "
+                f"       AND rf.event_type IN ('exposure','used')) AS weeks, "
+                f"    COALESCE(c.enrich_state,'') AS st "
+                f"  FROM chunks c WHERE c.memory_type IN ('semantic','procedural')"
+                f") WHERE (rank = 0) OR (st != 'cold' AND (rank = 1 OR weeks >= ?)) "
+                f"ORDER BY rank, weeks DESC, sal DESC, rid DESC LIMIT ?",
+                (self.CORE_DURABLE_WEEKS, limit),
             ).fetchall()
         return [{"doc_id": r["doc_id"]} for r in rows]
 
