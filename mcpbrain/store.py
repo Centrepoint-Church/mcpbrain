@@ -2093,6 +2093,14 @@ class Store:
                 for _c, _decl in _cols:
                     if _c not in _have:
                         db.execute(f"ALTER TABLE {_tbl} ADD COLUMN {_c} {_decl}")
+            # Content-duplicate carry (spec §4): upsert_chunk looks a new
+            # chunk's content_hash up among existing rows, and every write
+            # that changes or removes a canonical looks up its dups -- both
+            # would be full scans of chunks without these.
+            db.execute("CREATE INDEX IF NOT EXISTS idx_chunks_content_hash "
+                       "ON chunks(content_hash)")
+            db.execute("CREATE INDEX IF NOT EXISTS idx_chunks_dup_of "
+                       "ON chunks(dup_of) WHERE dup_of IS NOT NULL")
             # note_id lookups (consolidated-note provenance); same pattern as
             # idx_chunks_threadid -- expression comes from _meta_extract.
             db.execute("CREATE INDEX IF NOT EXISTS idx_chunks_noteid "
@@ -2457,15 +2465,103 @@ class Store:
             self._uncover_changed_chunk(db, doc_id)
             if row:
                 db.execute(
-                    "UPDATE chunks SET text=?,content_hash=?,metadata=?,embedded=0,enriched=0 WHERE doc_id=?",
+                    "UPDATE chunks SET text=?,content_hash=?,metadata=?,embedded=0,"
+                    "enriched=0,dup_of=NULL,"
+                    "enrich_state=CASE WHEN enrich_state='duplicate' THEN '' "
+                    "ELSE enrich_state END WHERE doc_id=?",
                     (text, content_hash, json.dumps(metadata), doc_id),
                 )
+                # Its text moved: chunks carried as duplicates of the old text
+                # must be extracted on their own now.
+                self._release_stale_dups(db, [doc_id])
             else:
                 db.execute(
                     "INSERT INTO chunks(doc_id,text,content_hash,metadata) VALUES(?,?,?,?)",
                     (doc_id, text, content_hash, json.dumps(metadata)),
                 )
+            self._carry_duplicate(db, doc_id, text, content_hash, metadata)
             return True
+
+    # A chunk shorter than this is never carried as a duplicate: short lines
+    # (sign-offs, boilerplate, "Thanks!") repeat across unrelated sources.
+    DUP_MIN_CHARS = 200
+
+    @classmethod
+    def _carry_duplicate(cls, db, doc_id, text, content_hash, metadata) -> bool:
+        """Spec §4: if `doc_id`'s text equals an already-ENRICHED EVIDENCE
+        chunk's, mark it a duplicate of that chunk (dup_of, enriched=1,
+        enrich_state='duplicate') instead of letting it queue for extraction;
+        its evidence is the canonical's (graph_write.extraction_sources), so it
+        adds no support. The canonical is the oldest qualifying chunk (lowest
+        rowid). Never carried: short text, a derived new chunk (a draft copy
+        keeps its own class), or a canonical that is cold, derived, itself a
+        duplicate or unenriched. Returns True when carried."""
+        from mcpbrain import source_class as sc
+        if not content_hash or len(text or "") < cls.DUP_MIN_CHARS:
+            return False
+        label_ids = cls._generated_label_ids(db)
+        rules = sc.Rules(generated_label_ids=label_ids)
+        if not sc.is_evidence(sc.classify(doc_id, metadata or {}, rules)):
+            return False
+        for r in db.execute(
+                "SELECT doc_id, text, metadata, enriched_version FROM chunks "
+                "WHERE content_hash=? AND doc_id != ? AND enriched=1 "
+                "AND dup_of IS NULL "
+                "AND COALESCE(enrich_state,'') NOT IN ('cold','duplicate') "
+                "ORDER BY rowid LIMIT 20", (content_hash, doc_id)):
+            if r["text"] != text:
+                continue  # a hash that is not sha256(text) must not collide
+            try:
+                cmeta = json.loads(r["metadata"] or "{}") or {}
+            except (ValueError, TypeError):
+                cmeta = {}
+            if not sc.is_evidence(sc.classify(r["doc_id"], cmeta, rules)):
+                continue
+            db.execute(
+                "UPDATE chunks SET dup_of=?, enriched=1, enriched_version=?, "
+                "enrich_state='duplicate' WHERE doc_id=?",
+                (r["doc_id"], r["enriched_version"] or 0, doc_id))
+            return True
+        return False
+
+    @staticmethod
+    def _generated_label_ids(db) -> frozenset:
+        """source_class.cached_generated_label_ids, on an open connection."""
+        from mcpbrain import source_class as sc
+        try:
+            row = db.execute("SELECT v FROM meta WHERE k=?",
+                             (sc.GENERATED_LABEL_META_KEY,)).fetchone()
+            ids = (json.loads(row[0]).get("ids") or []) if row and row[0] else []
+            return frozenset(str(i) for i in ids if str(i).strip())
+        except Exception:  # noqa: BLE001 — a cache miss never blocks a write
+            return frozenset()
+
+    @staticmethod
+    def _release_stale_dups(db, canon_ids) -> int:
+        """Chunks carried as duplicates of `canon_ids` whose canonical no longer
+        exists or no longer holds the same text go back to extraction on their
+        own (dup_of cleared, enriched=0, enrich_state ''). Returns the count."""
+        ids = [d for d in dict.fromkeys(canon_ids or []) if d]
+        released = 0
+        for i in range(0, len(ids), 500):
+            batch = ids[i:i + 500]
+            qs = ",".join("?" * len(batch))
+            released += db.execute(
+                "UPDATE chunks SET dup_of=NULL, enriched=0, enriched_version=0, "
+                "enrich_state=CASE WHEN enrich_state='duplicate' THEN '' "
+                "ELSE enrich_state END "
+                f"WHERE dup_of IN ({qs}) AND NOT EXISTS (SELECT 1 FROM chunks c "
+                "WHERE c.doc_id = chunks.dup_of "
+                "AND c.content_hash = chunks.content_hash)", batch).rowcount
+        return released
+
+    def canonical_for(self, doc_id: str) -> str:
+        """The chunk whose extraction `doc_id` carries: its dup_of (followed
+        once -- a canonical is never itself a duplicate), else `doc_id`."""
+        with self._connect() as db:
+            r = db.execute("SELECT dup_of FROM chunks WHERE doc_id=?",
+                           (doc_id,)).fetchone()
+        return (r["dup_of"] if r and r["dup_of"] else doc_id)
 
     @staticmethod
     def _uncover_changed_chunk(db, doc_id: str) -> None:
@@ -2548,6 +2644,9 @@ class Store:
             db.execute(f"DELETE FROM vec_chunks WHERE rowid IN ({placeholders})", rowids)
             db.execute(f"DELETE FROM fts_chunks WHERE rowid IN ({placeholders})", rowids)
             db.execute(f"DELETE FROM chunks WHERE rowid IN ({placeholders})", rowids)
+            Store._release_stale_dups(db, [r["dup_of"] for r in db.execute(
+                "SELECT DISTINCT dup_of FROM chunks WHERE dup_of IS NOT NULL "
+                "AND NOT EXISTS (SELECT 1 FROM chunks c WHERE c.doc_id=chunks.dup_of)")])
             return len(rowids)
 
     def doc_ids_for_drive(self, drive_id: str) -> list[str]:
@@ -2723,8 +2822,9 @@ class Store:
                 elif row["content_hash"] != h:
                     db.execute(
                         "UPDATE chunks SET text=?,content_hash=?,metadata=?,"
-                        "embedded=0,enriched=0 WHERE doc_id=?",
+                        "embedded=0,enriched=0,dup_of=NULL WHERE doc_id=?",
                         (text, h, json.dumps(meta), doc_id))
+                    self._release_stale_dups(db, [doc_id])
                     changed = True
                 else:
                     try:
@@ -2768,6 +2868,7 @@ class Store:
             db.execute(f"DELETE FROM vec_chunks WHERE rowid IN ({ph})", rowids)
             db.execute(f"DELETE FROM fts_chunks WHERE rowid IN ({ph})", rowids)
             db.execute(f"DELETE FROM chunks WHERE rowid IN ({ph})", rowids)
+            Store._release_stale_dups(db, doc_ids)
         # A file's cached payload dies only with its LAST chunk. Before the
         # re-key each chunk had its own row and the file's others survived a
         # partial delete, so dropping it on any delete would be a behaviour
@@ -3055,7 +3156,7 @@ class Store:
             rows = db.execute(
                 "SELECT doc_id FROM chunks "
                 "WHERE enriched=1 AND COALESCE(enriched_version,0) < ? "
-                "AND doc_id NOT LIKE 'enriched-%' "
+                "AND doc_id NOT LIKE 'enriched-%' AND dup_of IS NULL "
                 "ORDER BY rowid LIMIT ?",
                 (version, cap),
             ).fetchall()
@@ -3397,6 +3498,11 @@ class Store:
                 "enriched=?,enriched_version=? WHERE rowid=?",
                 (text, content_hash, json.dumps(metadata),
                  1 if enriched else 0, enriched_version, rowid))
+            if row["content_hash"] != content_hash:
+                # New text at this id: it is no longer a copy of anything, and
+                # copies of its old text must extract on their own.
+                db.execute("UPDATE chunks SET dup_of=NULL WHERE rowid=?", (rowid,))
+                Store._release_stale_dups(db, [doc_id])
         else:
             cur = db.execute(
                 "INSERT INTO chunks(doc_id,text,content_hash,metadata,embedded,"
@@ -4163,6 +4269,13 @@ class Store:
                     f"WHERE {col} IN (SELECT old FROM reflow_tmp) "
                     f"AND {col} != (SELECT new FROM reflow_tmp WHERE old={table}.{col})"
                 ).rowcount
+            # Content duplicates follow their canonical to its new id; any
+            # whose canonical's text did not survive there are released
+            # (after the deletes below) to extract on their own.
+            db.execute(
+                "UPDATE chunks SET dup_of=(SELECT new FROM reflow_tmp "
+                "WHERE old=chunks.dup_of) "
+                "WHERE dup_of IN (SELECT old FROM reflow_tmp)")
             if "chunk_quality" in tables and old_ids:
                 self._merge_chunk_quality(db, plan.remap)
             if plan.deletes:
@@ -4174,6 +4287,9 @@ class Store:
                     db.execute(f"DELETE FROM vec_chunks WHERE rowid IN ({rp})", rowids)
                     db.execute(f"DELETE FROM fts_chunks WHERE rowid IN ({rp})", rowids)
                     db.execute(f"DELETE FROM chunks WHERE rowid IN ({rp})", rowids)
+            self._release_stale_dups(
+                db, list(dict.fromkeys(list(plan.remap.values()) + new_ids
+                                       + list(plan.deletes))))
             db.executemany(
                 "INSERT INTO reflow_map(owner, old_doc_id, new_doc_id, reason, at) "
                 "VALUES(?,?,?,?,?)",
