@@ -24,9 +24,10 @@ It upserts entities, relations, role observations, topics and the email_context
 row for one clean contract envelope. Idempotency rests on its upsert/dedup, so
 re-applying the same extraction is safe.
 
-drain forwards its embedder= to apply (only when one is given, so an injected
-apply that does not take the kwarg is unaffected): apply dedupes actions by
-meaning with it and embeds the thread's semantic doc inline.
+drain forwards its embedder= to apply, with one embed_cache dict shared across
+the run (both only when an embedder is given, so an injected apply that does not
+take the kwargs is unaffected): apply dedupes actions by meaning with it and
+embeds the thread's semantic doc inline.
 """
 
 import json
@@ -280,11 +281,6 @@ def _regroup_parts(extractions: list) -> list:
                 "parts are independently applicable (part_doc_ids present)"
                 if independent else "applying incomplete thread")
         merged = dict(ordered[0])
-        if of and len(ordered) != of:
-            # Only some of the thread's parts are here: apply must not treat this
-            # as the whole re-extraction (it would supersede actions the missing
-            # parts re-match). See graph_write._supersede_after_reextract.
-            merged["_incomplete_parts"] = True
         messages = []
         for p in ordered:
             messages.extend(p.get("messages", []))
@@ -470,6 +466,10 @@ def drain(store, *, home=None, apply=None, embedder=None, budget=None,
         except Exception as exc:  # noqa: BLE001
             log.warning("drain: failed to build write-time dedup index: %s", exc)
             _entity_index = None
+
+    # Action-dedupe embeddings (text -> unit vector), shared across this run so
+    # a thread's open actions are embedded once per run, not once per apply.
+    _embed_cache: dict = {}
 
     for path in _iter_inbox(home_dir):
         if budget is not None and budget.expired():
@@ -667,6 +667,7 @@ def drain(store, *, home=None, apply=None, embedder=None, budget=None,
                     _apply_kw = {"entity_index": _entity_index} if _entity_index is not None else {}
                     if embedder is not None:
                         _apply_kw["embedder"] = embedder
+                        _apply_kw["embed_cache"] = _embed_cache
                     res = apply(store, extraction, doc_ids=doc_ids, **_apply_kw)
                 except Exception as exc:
                     log.error("drain: apply failed for thread %s in %s: %s",

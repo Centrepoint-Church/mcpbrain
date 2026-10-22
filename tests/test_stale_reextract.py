@@ -138,32 +138,21 @@ def test_end_to_end_stale_thread_closes_after_reextraction(tmp_path):
     assert row["resolved_by"] == "reext-lead"
 
 
-def test_mark_thread_unenriched_matches_note_file_and_event_keys(tmp_path):
+def test_mark_thread_unenriched_is_thread_id_only(tmp_path):
     s = _store(tmp_path)
-    # A chunked note: pieces carry note_id, no thread_id.
+    # Note / Drive / calendar chunks keyed by note_id / file_id / event_id are
+    # NOT matched (a Drive file's re-extraction would be whole-file and its
+    # thread_signature constant).
     s.upsert_chunk("note-abc-0", "piece one", "h1", {"note_id": "note-abc"})
-    s.upsert_chunk("note-abc-1", "piece two", "h2", {"note_id": "note-abc"})
-    # A Drive file keyed by file_id.
     s.upsert_chunk("gdrive-F1-0", "doc text", "h3", {"file_id": "F1"})
-    # A split calendar event: key is cal-<event_id>.
     s.upsert_chunk("cal-E1-0", "event text", "h4", {"event_id": "E1"})
-    # An unrelated chunk must stay enriched.
-    s.upsert_chunk("other", "x", "h5", {"thread_id": "T9"})
-    s.mark_enriched(["note-abc-0", "note-abc-1", "gdrive-F1-0", "cal-E1-0", "other"])
+    s.upsert_chunk("t9-0", "x", "h5", {"thread_id": "T9"})
+    s.mark_enriched(["note-abc-0", "gdrive-F1-0", "cal-E1-0", "t9-0"])
 
-    assert s.mark_thread_unenriched("note-abc") == 2
-    assert s.mark_thread_unenriched("F1") == 1
-    assert s.mark_thread_unenriched("cal-E1") == 1
+    assert s.mark_thread_unenriched("note-abc") == 0
+    assert s.mark_thread_unenriched("F1") == 0
+    assert s.mark_thread_unenriched("cal-E1") == 0
+    assert s.mark_thread_unenriched("T9") == 1
     with s._connect() as db:
         flags = dict(db.execute("SELECT doc_id, enriched FROM chunks").fetchall())
-    assert flags == {"note-abc-0": 0, "note-abc-1": 0, "gdrive-F1-0": 0,
-                     "cal-E1-0": 0, "other": 1}
-
-
-def test_sweep_trigger_resets_supersede_marker(tmp_path):
-    s = _store(tmp_path)
-    s.set_stale_reextract("T1", "sig", "2026-06-01T00:00:00Z")
-    s.mark_stale_reextract_superseded("T1", "2026-06-02T00:00:00Z")
-    assert s.get_stale_reextract("T1")["superseded_at"] == "2026-06-02T00:00:00Z"
-    s.set_stale_reextract("T1", "sig2", "2026-06-05T00:00:00Z")  # a new trigger
-    assert s.get_stale_reextract("T1")["superseded_at"] == ""
+    assert flags == {"note-abc-0": 1, "gdrive-F1-0": 1, "cal-E1-0": 1, "t9-0": 0}

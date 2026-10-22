@@ -841,13 +841,13 @@ def test_action_routed_with_owner_and_status(tmp_path):
 
 def test_unclear_owner_routed(tmp_path):
     s = _store(tmp_path)
-    # Non-imperative description, no owner, no sender fallback → '', 0.5.
+    # Non-imperative description, no owner, no sender fallback → 'unclear', 0.5.
     ext = _thread(actions=[_action("The venue situation needs resolution",
                                    owner_name="", owner_fallback="")])
     gw.apply(s, ext, doc_ids=["d1"], clock=_clock)
     rows = s.list_unified_actions()
     assert len(rows) == 1
-    assert rows[0]["owner"] == ""  # nobody named: blank, never "unclear"
+    assert rows[0]["owner"] == "unclear"
     assert rows[0]["confidence"] == 0.5
 
 
@@ -1404,13 +1404,12 @@ class _StubEmbedder:
 def test_paraphrase_dedupes_within_thread_at_088(tmp_path):
     s = _store(tmp_path)
     # cos([1,0,0,0], [0.9,0.43589,0,0]) = 0.9 >= 0.88 -- same meaning, no
-    # shared wording the lexical rules would catch. Different owners: the
-    # same-source scope ignores owner and age.
+    # shared wording the lexical rules would catch. Same source: any age.
     emb = _StubEmbedder({
         "Return the signed SOM form": [1.0, 0.0, 0.0, 0.0],
         "Send back the completed school paperwork": [0.9, 0.43589, 0.0, 0.0],
     })
-    old = s.add_unified_action(text="Return the signed SOM form", owner="Dana Okafor",
+    old = s.add_unified_action(text="Return the signed SOM form", owner="Sam",
                                status="open", source="email", thread_id="t-act",
                                created_at="2025-01-01T00:00:00Z")
     ext = _thread(actions=[_action("Send back the completed school paperwork",
@@ -1468,7 +1467,7 @@ def test_fast_path_match_never_embeds(tmp_path):
     assert emb.calls == []
 
 
-def test_owner_alias_canonical_and_claude_owner_blank(tmp_path):
+def test_owner_alias_canonical_and_claude_owner_unclear(tmp_path):
     s = _store(tmp_path)
     ext = _thread(actions=[
         _action("Confirm the booking", owner_name="SAM CHEN"),
@@ -1479,87 +1478,145 @@ def test_owner_alias_canonical_and_claude_owner_blank(tmp_path):
     gw.apply(s, ext, doc_ids=["d1"], clock=_clock, owner=_OWNER_IDENTITY)
     owners = {a["text"]: a["owner"] for a in s.list_unified_actions()}
     assert owners["Confirm the booking"] == "Sam"
-    assert owners["The minutes need tidying"] == ""
-    assert owners["The roster is outstanding"] == ""
-    assert owners["Some decision is pending"] == ""
+    assert owners["The minutes need tidying"] == "unclear"
+    assert owners["The roster is outstanding"] == "unclear"
+    assert owners["Some decision is pending"] == "unclear"
 
 
-def _seed_stale_marker(s, thread_id, triggered_at):
-    s.set_stale_reextract(thread_id, "sig", triggered_at)
-
-
-def test_reextract_supersedes_unmatched_open_actions(tmp_path):
+def test_same_text_two_owners_one_thread_stay_two(tmp_path):
     s = _store(tmp_path)
-    emb = _StubEmbedder({
-        "Return the signed SOM form": [1.0, 0.0, 0.0, 0.0],
-        "Send back the completed SOM paperwork": [0.95, 0.31225, 0.0, 0.0],
-        "Chase the caterer about Sunday": [0.0, 1.0, 0.0, 0.0],
-        "Pay the venue deposit": [0.0, 0.0, 1.0, 0.0],
-    })
-    kept = s.add_unified_action(text="Return the signed SOM form", owner="Sam",
-                                status="open", source="email", thread_id="t-act",
-                                created_at="2026-05-01T00:00:00Z")
-    gone = s.add_unified_action(text="Chase the caterer about Sunday", owner="Sam",
-                                status="open", source="email", thread_id="t-act",
-                                created_at="2026-05-01T00:00:00Z")
-    resolved = s.add_unified_action(text="Pay the venue deposit", owner="Sam",
-                                    status="open", source="email", thread_id="t-act",
-                                    created_at="2026-05-01T00:00:00Z")
-    manual = s.add_unified_action(text="Something the user typed", owner="Sam",
-                                  status="open", source="manual", thread_id="t-act",
-                                  created_at="2026-05-01T00:00:00Z")
-    other = s.add_unified_action(text="Other thread's work", owner="Sam",
-                                 status="open", source="email", thread_id="t-other",
-                                 created_at="2026-05-01T00:00:00Z")
-    _seed_stale_marker(s, "t-act", "2026-05-20T00:00:00+00:00")
-
-    ext = _thread(actions=[_action("Send back the completed SOM paperwork",
-                                   owner_name="Sam")],
-                  resolved_action_ids=[resolved])
-    out = gw.apply(s, ext, doc_ids=["d1"], clock=_clock, owner=_OWNER_IDENTITY,
-                   embedder=emb)
-    rows = {a["id"]: a for a in s.list_unified_actions()}
-    assert out["superseded"] == 1
-    assert rows[kept]["status"] == "open"          # re-matched by meaning
-    assert rows[gone]["status"] == "auto_archived"
-    assert rows[gone]["resolved_by"] == "superseded_reextract"
-    assert rows[resolved]["status"] == "done"      # resolved, not superseded
-    assert rows[manual]["status"] == "open"        # not extraction-sourced
-    assert rows[other]["status"] == "open"         # another thread
-
-    # Once per trigger: a later ordinary extraction of the thread that does
-    # not mention `kept` leaves it alone.
-    ext2 = _thread(actions=[_action("Pay the plumber's invoice", owner_name="Sam")])
-    out2 = gw.apply(s, ext2, doc_ids=["d1"], clock=_clock, owner=_OWNER_IDENTITY,
-                    embedder=emb)
-    assert out2["superseded"] == 0
-    assert {a["id"]: a for a in s.list_unified_actions()}[kept]["status"] == "open"
+    emb = _StubEmbedder({"Bring the signed consent form": [1.0, 0.0, 0.0, 0.0]})
+    s.add_unified_action(
+        text="Bring the signed consent form", owner="Dana Okafor", status="open",
+        source="email", thread_id="t-act",
+        text_fingerprint=gw._compute_fingerprint("Bring the signed consent form"),
+        created_at="2026-05-30T00:00:00Z")
+    ext = _thread(actions=[_action("Bring the signed consent form", owner_name="Sam")])
+    gw.apply(s, ext, doc_ids=["d1"], clock=_clock, owner=_OWNER_IDENTITY,
+             embedder=emb)
+    # And the lexical (no-embedder) path agrees.
+    s2 = Store(tmp_path / "g2.sqlite3", dim=4)
+    s2.init()
+    s2.add_unified_action(
+        text="Bring the signed consent form", owner="Dana Okafor", status="open",
+        source="email", thread_id="t-act", created_at="2026-05-30T00:00:00Z")
+    gw.apply(s2, ext, doc_ids=["d1"], clock=_clock, owner=_OWNER_IDENTITY)
+    for store in (s, s2):
+        assert sorted(a["owner"] for a in store.list_unified_actions()) == \
+            ["Dana Okafor", "Sam"]
 
 
-def test_reextract_never_supersedes_newer_actions_or_without_marker(tmp_path):
+def test_blank_owner_side_still_matches(tmp_path):
     s = _store(tmp_path)
-    newer = s.add_unified_action(text="Chase the caterer about Sunday", owner="Sam",
-                                 status="open", source="email", thread_id="t-act",
-                                 created_at="2026-05-25 00:00:00")
-    ext = _thread(actions=[_action("Pay the plumber's invoice", owner_name="Sam")])
-    # No marker at all: ordinary extraction, nothing archived.
-    assert gw.apply(s, ext, doc_ids=["d1"], clock=_clock,
-                    owner=_OWNER_IDENTITY)["superseded"] == 0
-    # Marker older than the action: the action came after the trigger.
-    _seed_stale_marker(s, "t-act", "2026-05-20T00:00:00+00:00")
-    assert gw.apply(s, ext, doc_ids=["d1"], clock=_clock,
-                    owner=_OWNER_IDENTITY)["superseded"] == 0
-    assert {a["id"]: a for a in s.list_unified_actions()}[newer]["status"] == "open"
+    s.add_unified_action(text="Bring the signed consent form", owner="unclear",
+                         status="open", source="email", thread_id="t-act",
+                         created_at="2026-05-30T00:00:00Z")
+    ext = _thread(actions=[_action("Bring the signed consent form", owner_name="Sam")])
+    gw.apply(s, ext, doc_ids=["d1"], clock=_clock, owner=_OWNER_IDENTITY)
+    assert len(s.list_unified_actions()) == 1
 
 
-def test_reextract_partial_parts_never_supersede(tmp_path):
+class _RaisingEmbedder:
+    dim = 4
+
+    def __init__(self):
+        self.calls = 0
+
+    def embed_passages(self, texts):
+        self.calls += 1
+        raise RuntimeError("model unavailable")
+
+
+class _ShortEmbedder:
+    dim = 4
+
+    def __init__(self):
+        self.calls = 0
+
+    def embed_passages(self, texts):
+        self.calls += 1
+        return [[1.0, 0.0, 0.0, 0.0]] * max(0, len(texts) - 1)
+
+
+def test_embedder_failure_falls_back_to_lexical(tmp_path):
+    for emb in (_RaisingEmbedder(), _ShortEmbedder()):
+        ext = _thread(actions=[
+            # token subset of the open action -> lexical duplicate
+            _action("Send the quarterly report", owner_name="Sam"),
+            _action("Book the hall for youth night", owner_name="Sam"),
+        ])
+        s3 = Store(tmp_path / f"f{type(emb).__name__}.sqlite3", dim=4)
+        s3.init()
+        s3.add_unified_action(text="Send the quarterly report to the board",
+                              owner="Sam", status="open", source="email",
+                              thread_id="t-act", created_at="2026-05-30T00:00:00Z")
+        with s3._connect() as conn:
+            status = {}
+            hit = gw._find_near_duplicate_action(
+                conn, "Send the quarterly report", "Sam", thread_id="t-act",
+                embedder=emb, today="2026-06-01", status=status)
+        assert hit is not None          # lexical fallback found it
+        assert status == {"embed_failed": True}
+        # Through apply: no exception, the duplicate is skipped, the new one
+        # written, and the embedder is not retried for the rest of the apply.
+        calls_before = emb.calls
+        out = gw._write_actions(
+            s3, ext, lead=ext["messages"][0], lead_msg_id="m1",
+            lead_date_iso="2026-05-20", content_type="request", org="Acme",
+            sender_id="", sender_name="", is_self=False, in_inbox=True,
+            name_to_id={}, now=CLOCK_NOW, thread_id="t-act",
+            owner=_OWNER_IDENTITY, embedder=emb)
+        assert out["actions"] == 1
+        assert emb.calls == calls_before + 1
+
+
+def test_embed_cache_shared_across_applies(tmp_path):
     s = _store(tmp_path)
-    old = s.add_unified_action(text="Chase the caterer about Sunday", owner="Sam",
-                               status="open", source="email", thread_id="t-act",
-                               created_at="2026-05-01T00:00:00Z")
-    _seed_stale_marker(s, "t-act", "2026-05-20T00:00:00+00:00")
-    ext = _thread(actions=[])
-    ext["_incomplete_parts"] = True
-    assert gw.apply(s, ext, doc_ids=["d1"], clock=_clock,
-                    owner=_OWNER_IDENTITY)["superseded"] == 0
-    assert {a["id"]: a for a in s.list_unified_actions()}[old]["status"] == "open"
+    emb = _StubEmbedder({})
+    s.add_unified_action(text="Book the hall for youth night", owner="Sam",
+                         status="open", source="email", thread_id="t-act",
+                         created_at="2026-05-30T00:00:00Z")
+    cache: dict = {}
+    for desc in ("Pay the plumber invoice now", "Pay the plumber invoice now"):
+        ext = _thread(actions=[_action(desc, owner_name="Sam")])
+        gw.apply(s, ext, doc_ids=["d1"], clock=_clock, owner=_OWNER_IDENTITY,
+                 embedder=emb, embed_cache=cache)
+    embedded = [t for call in emb.calls for t in call]
+    assert embedded.count("Book the hall for youth night") == 1
+    assert "Book the hall for youth night" in cache
+
+
+def test_window_arm_capped_at_100_same_thread_at_300(tmp_path):
+    s = _store(tmp_path)
+    for i in range(150):
+        s.add_unified_action(text=f"Other source task number {i} xyz", owner="Sam",
+                             status="open", source="email", thread_id=f"t-o{i}",
+                             created_at="2026-05-30T00:00:00Z")
+    for i in range(320):
+        s.add_unified_action(text=f"Same thread task number {i} abc", owner="Sam",
+                             status="open", source="email", thread_id="t-act",
+                             created_at="2026-01-01T00:00:00Z")
+    emb = _StubEmbedder({})
+    with s._connect() as conn:
+        gw._find_near_duplicate_action(
+            conn, "Completely different wording here", "Sam", thread_id="t-act",
+            embedder=emb, today="2026-06-01")
+    texts = emb.calls[0][1:]
+    assert sum(t.startswith("Same thread") for t in texts) == 300
+    assert sum(t.startswith("Other source") for t in texts) == 100
+
+
+def test_stale_reextract_resolving_one_of_three_leaves_two_open(tmp_path):
+    s = _store(tmp_path)
+    emb = _StubEmbedder({})
+    ids = [s.add_unified_action(text=t, owner="Sam", status="open", source="email",
+                                thread_id="t-act", created_at="2026-05-01T00:00:00Z")
+           for t in ("Chase the caterer about Sunday", "Pay the venue deposit",
+                     "Return the signed SOM form")]
+    s.set_stale_reextract("t-act", "sig", "2026-05-20T00:00:00+00:00")
+    # The model stays silent about still-valid open actions, resolving one.
+    ext = _thread(actions=[], resolved_action_ids=[ids[1]])
+    gw.apply(s, ext, doc_ids=["d1"], clock=_clock, owner=_OWNER_IDENTITY,
+             embedder=emb)
+    status = {a["id"]: a["status"] for a in s.list_unified_actions()}
+    assert status == {ids[0]: "open", ids[1]: "done", ids[2]: "open"}

@@ -1770,9 +1770,8 @@ class Store:
                 signature    TEXT NOT NULL,
                 triggered_at TEXT NOT NULL
             ){_S}""")
-            # superseded_at: when apply() last let this trigger's re-extraction
-            # supersede the thread's unmatched open actions -- once per trigger
-            # (a fresh trigger's INSERT OR REPLACE resets it to '').
+            # superseded_at: UNUSED. Added for a supersede-on-re-extraction
+            # rule that was withdrawn; kept because schema changes are additive.
             sr_cols = {row["name"] for row in db.execute(
                 "PRAGMA table_info(stale_reextract)").fetchall()}
             if "superseded_at" not in sr_cols:
@@ -5299,13 +5298,6 @@ class Store:
                 (thread_id,)).fetchone()
             return dict(r) if r else None
 
-    def mark_stale_reextract_superseded(self, thread_id: str, at: str) -> None:
-        """Record that this trigger's re-extraction has superseded the
-        thread's old open actions, so it happens once per trigger."""
-        with self._connect(write=True) as db:
-            db.execute("UPDATE stale_reextract SET superseded_at=? "
-                       "WHERE thread_id=?", (at, thread_id))
-
     def set_stale_reextract(self, thread_id: str, signature: str,
                             triggered_at: str) -> None:
         """Upsert the marker recording that `thread_id` was re-triggered at the
@@ -5736,30 +5728,18 @@ class Store:
             return r is not None
 
     def mark_thread_unenriched(self, thread_id: str) -> int:
-        """Set enriched=0 on every enriched chunk of this logical source so the
-        next enrichment cycle re-extracts it. Returns the number of rows flipped.
-        Leaves embedded untouched.
+        """Set enriched=0 on every enriched chunk in the thread so the next
+        enrichment cycle re-extracts it. Returns the number of rows flipped.
+        Touches only this thread; leaves embedded untouched.
 
-        An action's thread_id is the extraction's thread key (thread_enrich.
-        _chunk_key), which is a Gmail thread id, a base note id, a Drive file id
-        or a `cal-<event_id>` -- so each is matched on its own key. One UPDATE
-        per arm, not an OR, so each stays on its expression index (SQLite will
-        not union expression indexes across an OR)."""
-        if not thread_id:
-            return 0
-        arms = [(_meta_extract('$.thread_id'), thread_id),
-                (_meta_extract('$.note_id'), thread_id),
-                (_meta_extract('$.file_id'), thread_id),
-                ("doc_id", thread_id)]
-        if thread_id.startswith("cal-"):
-            arms.append((_meta_extract('$.event_id'), thread_id[len("cal-"):]))
-        n = 0
+        Deliberately `$.thread_id` only: matching note_id/file_id too would
+        re-extract whole Drive files whose thread_signature never changes."""
         with self._connect(write=True) as db:
-            for expr, val in arms:
-                n += db.execute(
-                    f"UPDATE chunks SET enriched=0 WHERE {expr}=? AND enriched=1",
-                    (val,)).rowcount
-        return n
+            cur = db.execute(
+                "UPDATE chunks SET enriched=0 "
+                f"WHERE {_meta_extract('$.thread_id')}=? AND enriched=1",
+                (thread_id,))
+            return cur.rowcount
 
     def thread_signature(self, thread_id: str) -> str:
         """sha256 over the thread's (doc_id, content_hash) pairs in doc_id order.

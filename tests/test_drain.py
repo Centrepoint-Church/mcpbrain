@@ -8,9 +8,9 @@ quarantined to enrich_inbox/bad/ rather than crashing the daemon.
 
 apply() is graph_write.apply, injected as a parameter. These tests pass a
 recording stub matching its real signature: apply(store, extraction, *,
-doc_ids, entity_index=None, embedder=None). drain forwards its embedder= to
-apply only when one is given (apply dedupes actions by meaning with it), so the
-stub accepts it. entity_index is forwarded only when write_time_dedup_enabled is
+doc_ids, entity_index=None, embedder=None, embed_cache=None). drain forwards
+its embedder= (and one run-wide embed_cache) to apply only when an embedder is
+given (apply dedupes actions by meaning with it), so the stub accepts them. entity_index is forwarded only when write_time_dedup_enabled is
 True (default since Task 5.3), so the stub must accept (and can ignore) it.
 The end-to-end round trip against the real apply lives in
 test_integration_spool.py.
@@ -127,13 +127,14 @@ class RecordingApply:
         self.returns = returns
 
     def __call__(self, store, extraction, *, doc_ids, entity_index=None,
-                 embedder=None):
+                 embedder=None, embed_cache=None):
         thread_id = extraction["thread_id"]
         self.calls.append({
             "thread_id": thread_id,
             "extraction": extraction,
             "doc_ids": list(doc_ids),
             "embedder": embedder,
+            "embed_cache": embed_cache,
         })
         if thread_id in self.fail_threads:
             raise RuntimeError(f"apply failed for {thread_id}")
@@ -1286,15 +1287,21 @@ def test_drain_payload_covers_only_what_the_unit_held(store, home):
 
 def test_drain_forwards_embedder(store, home):
     _seed_chunk(store, "d-a", "t-a")
-    _write_inbox(home, "batch.json", _batch("batch-1", [_envelope("t-a")]))
+    _seed_chunk(store, "d-b", "t-b")
+    _write_inbox(home, "batch.json",
+                 _batch("batch-1", [_envelope("t-a"), _envelope("t-b")]))
     emb = object()
     app = RecordingApply()
     drain.drain(store, home=home, apply=app, embedder=emb)
-    assert app.calls and app.calls[0]["embedder"] is emb
+    assert len(app.calls) == 2
+    assert all(c["embedder"] is emb for c in app.calls)
+    # one cache dict shared across the whole run
+    assert isinstance(app.calls[0]["embed_cache"], dict)
+    assert app.calls[0]["embed_cache"] is app.calls[1]["embed_cache"]
 
 
 def test_drain_without_embedder_passes_none_kwarg_free(store, home):
-    # No embedder -> the kwarg is not sent, so an apply without it still works.
+    # No embedder -> neither kwarg is sent, so an apply without them still works.
     _seed_chunk(store, "d-a", "t-a")
     _write_inbox(home, "batch.json", _batch("batch-1", [_envelope("t-a")]))
     seen = {}
@@ -1305,12 +1312,3 @@ def test_drain_without_embedder_passes_none_kwarg_free(store, home):
 
     drain.drain(store, home=home, apply=apply_no_embedder)
     assert seen == {"ok": True}
-
-
-def test_regroup_marks_incomplete_parts():
-    a = _envelope("t-long", part=1, of=2)
-    out = drain._regroup_parts([a])
-    assert out[0].get("_incomplete_parts") is True
-    full = drain._regroup_parts([_envelope("t-x", part=1, of=2),
-                                 _envelope("t-x", part=2, of=2)])
-    assert "_incomplete_parts" not in full[0]
