@@ -13,7 +13,8 @@ NOTE_A = "note-" + "a" * 32          # session capture 1 (older)
 NOTE_B = "note-" + "b" * 32          # session capture 2 (same session, latest)
 NOTE_C = "note-" + "c" * 32          # an ordinary owner note
 M1, M2, M3, M4 = "a" * 15 + "1", "a" * 15 + "2", "a" * 15 + "3", "a" * 15 + "4"
-T1, T2, T4 = "b" * 15 + "1", "b" * 15 + "2", "b" * 15 + "4"
+M6, M7 = "a" * 15 + "6", "a" * 15 + "7"
+T1, T2, T4, T6 = "b" * 15 + "1", "b" * 15 + "2", "b" * 15 + "4", "b" * 15 + "6"
 GONE_MSG = "c" * 15 + "9"
 GONE_FILE = "1GoneFileIdAbcdefghijklmnopqrstuv"
 TABLES = ("chunks", "actions", "email_entities", "entity_relations",
@@ -90,6 +91,11 @@ def env(tmp_path):
         _chunk(db, f"gmail-{M4}-body-0", {**gm, "message_id": M4, "thread_id": T4,
                                           "labels": "SENT", "subject": "Brief — Mon 1 Sep",
                                           "sender": OWNER, "to": OWNER})
+        # A thread with inbound mail AND a draft the actions were anchored on.
+        _chunk(db, f"gmail-{M6}-body-0", {**gm, "message_id": M6, "thread_id": T6,
+                                          "labels": "INBOX", "sender": "x@other.org"})
+        _chunk(db, f"gmail-{M7}-body-0", {**gm, "message_id": M7, "thread_id": T6,
+                                          "labels": "DRAFT"})
         _chunk(db, "gdrive-FBRIEF-0", {"source_type": "gdrive", "file_id": "FBRIEF",
                                        "folder_path": "My Drive/Daily Briefs"})
         sess = {"source": "note", "tags": "session",
@@ -106,6 +112,7 @@ def env(tmp_path):
 
         ids["primary"] = _action(db, "Reply to the board", src=M1, thread=T1)
         ids["draft"] = _action(db, "Send draft reply", src=M2, thread=T2)
+        ids["draft_mixed"] = _action(db, "Fill in the form", src=M7, thread=T6)
         ids["brief"] = _action(db, "Brief item", src=M4, thread=T4)
         ids["session"] = _action(db, "Write lesson 2", thread=f"{NOTE_A}-0")
         ids["note1"] = _action(db, "Email the venue about the booking",
@@ -136,7 +143,9 @@ def env(tmp_path):
         ids["r_primary"] = _rel(db, "p1", "p2", "knows", src=f"gmail-{M1}-body-0",
                                 strength=7)
         ids["r_session"] = _rel(db, "p2", "t-topic", "involved_in", src=f"{NOTE_A}-0",
-                                strength=4)
+                                strength=1)
+        ids["r_session_hot"] = _rel(db, "p1", "p2", "works_at", src=f"{NOTE_A}-1",
+                                    strength=4)
         ids["r_two"] = _rel(db, "p2", "p1", "manages", src=f"gmail-{M1}-body-0",
                             strength=9)
         ids["r_att"] = _rel(db, "t-topic", "p2", "mentions", src=f"gmail-{M1}-att-0-0",
@@ -202,14 +211,15 @@ def test_steps_apply_in_order_and_counts(env, capsys):
     out = capsys.readouterr().out
     assert out.index("source_session") < out.index("owner_aliases")
     assert "actions:session=1" in out and "chunks_cold:session=3" in out
-    assert "chunks_superseded:repeat_capture=2" in out
     assert "actions:owner_alias=1" in out and "actions:non_person=1" in out
     assert "integrity_check ok" in out
     assert _act(env, "session")["status"] == "auto_archived"
     assert _act(env, "session")["resolved_by"] == "source_session"
     assert _act(env, "draft")["status"] == "open"            # not selected
-    assert json.loads(_state(env, f"{NOTE_A}-0")["metadata"])["superseded"] is True
-    assert "superseded" not in json.loads(_state(env, f"{NOTE_B}-0")["metadata"])
+    # Repeat captures stay in recall: cold, never superseded.
+    for d in (f"{NOTE_A}-0", f"{NOTE_B}-0"):
+        assert _state(env, d)["enrich_state"] == "cold"
+        assert "superseded" not in json.loads(_state(env, d)["metadata"])
     assert _act(env, "alias")["owner"] == "Dana"
     assert _act(env, "alias")["prior_owner"] == "Dana Okafor"
     assert (_act(env, "claude")["owner"], _act(env, "claude")["prior_owner"]) == \
@@ -269,6 +279,10 @@ def test_sources_backfill_strength_and_legacy(env):
     assert rel("r_att")["strength"] == 1
     # Session-sourced relation is derived, strength 0, source row recorded.
     assert (rel("r_session")["derived"], rel("r_session")["strength"]) == (1, 0)
+    # Re-observed since its derived first sighting: stays live, strength kept
+    # (prior saved as legacy), derived-class source row recorded.
+    hot = rel("r_session_hot")
+    assert (hot["derived"], hot["strength"], hot["legacy_strength"]) == (0, 4, 4)
     with env["store"]._connect() as db:
         srcs = {tuple(r) for r in db.execute(
             "SELECT relation_id, source_key, source_class FROM relation_sources")}
@@ -276,6 +290,7 @@ def test_sources_backfill_strength_and_legacy(env):
                           "WHERE observation_id=?", (ids["o_cal"],)).fetchone()
     assert (ids["r_primary"], T1, "primary_mail") in srcs
     assert (ids["r_session"], NOTE_A, "session") in srcs
+    assert (ids["r_session_hot"], NOTE_A, "session") in srcs
     assert not any(r[0] == ids["r_legacy"] for r in srcs)
     assert tuple(osrc) == ("cal-EV1", "primary_event")
     # email_count = non-derived links: M1 kept; draft / digest / gone derived.
@@ -349,3 +364,80 @@ def test_refuses_with_daemon_running(env, tmp_path, monkeypatch, capsys):
     assert _main(env, "--yes", "--skip-snapshot-for-tests", store=copy) == 0
     assert _dump(path) == before
     assert _dump(copy) != before
+
+
+def test_draft_anchored_thread_with_evidence_is_requeued(env, capsys):
+    path = env["store"].path
+    prior = ",".join(ci.STEPS[:ci.STEPS.index("source_draft")])
+    assert _main(env, "--yes", "--skip-snapshot-for-tests", "--steps", prior) == 0
+    before = _dump(path)
+    assert _main(env, "--yes", "--skip-snapshot-for-tests", "--steps", "source_draft") == 0
+    out = capsys.readouterr().out
+    assert "threads_requeued=1" in out          # T6 only; T2 holds drafts alone
+    assert _act(env, "draft_mixed")["resolved_by"] == "source_draft"
+    assert _state(env, f"gmail-{M6}-body-0")["enriched"] == 0
+    assert _state(env, f"gmail-{M1}-body-0")["enriched"] == 1
+    assert _main(env, "--yes", "--skip-snapshot-for-tests", "--undo", "source_draft") == 0
+    assert _dump(path) == before
+    assert _state(env, f"gmail-{M6}-body-0")["enriched"] == 1
+    assert _act(env, "draft_mixed")["status"] == "open"
+
+
+def test_refuses_without_brief_rules(env, capsys):
+    cfg = json.loads((env["home"] / "config.json").read_text())
+    cfg.pop("ingest")
+    (env["home"] / "config.json").write_text(json.dumps(cfg))
+    path = env["store"].path
+    before = _dump(path)
+    assert _main(env) == 0
+    assert "NO BRIEF RULE IS CONFIGURED" in capsys.readouterr().out
+    assert _main(env, "--yes", "--skip-snapshot-for-tests") == 1
+    assert "--no-brief-rules" in capsys.readouterr().out
+    assert _dump(path) == before
+    assert _main(env, "--yes", "--skip-snapshot-for-tests", "--no-brief-rules") == 0
+    assert _act(env, "brief")["status"] == "open"     # read as primary mail
+
+
+def test_undo_skips_drifted_rows(env, capsys):
+    assert _main(env, "--yes", "--skip-snapshot-for-tests", "--steps", "owner_aliases") == 0
+    with env["store"]._connect(write=True) as db:
+        db.execute("UPDATE actions SET owner='Marcus' WHERE id=?", (env["ids"]["alias"],))
+    capsys.readouterr()
+    assert _main(env, "--yes", "--skip-snapshot-for-tests", "--undo", "owner_aliases") == 0
+    assert "SKIPPED" in capsys.readouterr().out
+    assert _act(env, "alias")["owner"] == "Marcus"           # not overwritten
+    assert _act(env, "claude")["owner"] == "Claude"          # undrifted: restored
+    with env["store"]._connect() as db:
+        left = db.execute("SELECT column_name FROM cleanup_log WHERE step='owner_aliases'"
+                          ).fetchall()
+    assert [r[0] for r in left] == ["owner"]
+
+
+def test_refuses_when_store_is_the_configured_live_store(env, tmp_path, monkeypatch):
+    copy = tmp_path / "elsewhere" / "brain.sqlite3"
+    copy.parent.mkdir()
+    shutil.copy2(env["store"].path, copy)
+    before = _dump(copy)
+    monkeypatch.setattr(ci.config, "store_path", lambda: copy)
+    monkeypatch.setattr(ci.restore, "daemon_running", lambda home: True)
+    assert _main(env, "--yes", "--skip-snapshot-for-tests", store=copy) == 1
+    assert _dump(copy) == before
+
+
+def test_snapshot_taken_before_init(env, monkeypatch):
+    calls = []
+    import mcpbrain.backup as backup
+    real_init = ci.Store.init
+
+    def snap(src, out, *, home=None):
+        calls.append("snapshot")
+        return out
+
+    def init(self):
+        calls.append("init")
+        return real_init(self)
+
+    monkeypatch.setattr(backup, "snapshot", snap)
+    monkeypatch.setattr(ci.Store, "init", init)
+    assert _main(env, "--yes", "--steps", "owner_aliases") == 0
+    assert calls[:2] == ["snapshot", "init"]

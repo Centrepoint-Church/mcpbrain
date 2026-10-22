@@ -2138,7 +2138,13 @@ class Store:
                 row_key     TEXT,
                 column_name TEXT,
                 old_value   TEXT,
-                at          TEXT){_S}""")
+                at          TEXT,
+                new_value   TEXT){_S}""")
+            # new_value: the value the clean-up wrote, so --undo restores only
+            # rows nobody has changed since (additive; NULL on older rows).
+            if "new_value" not in {r["name"] for r in
+                                   db.execute("PRAGMA table_info(cleanup_log)")}:
+                db.execute("ALTER TABLE cleanup_log ADD COLUMN new_value TEXT")
 
     # --- S2 recall-acceptance feedback methods --------------------------------
 

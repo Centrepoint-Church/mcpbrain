@@ -33,7 +33,8 @@ def test_fresh_init_has_columns_tables_and_index(tmp_path):
     assert set(_cols(p, "observation_sources")) == {
         "observation_id", "source_key", "source_class", "first_seen"}
     assert set(_cols(p, "cleanup_log")) == {
-        "id", "step", "table_name", "row_key", "column_name", "old_value", "at"}
+        "id", "step", "table_name", "row_key", "column_name", "old_value", "at",
+        "new_value"}
     c = sqlite3.connect(p)
     names = {r[0] for r in c.execute(
         "SELECT name FROM sqlite_master WHERE type='index'")}

@@ -21,21 +21,24 @@ matters: the source-class archives run before the similarity dedupe, or the
 dedupe could keep a derived copy and archive the real one.
 
   source_session      archive open actions from Claude session notes; cold-mark
-                      session chunks; repeat captures of one session (same
-                      8-char id prefix + date, or claude_session_id) collapse to
-                      the latest — the others are also marked superseded
-                      (recall skips superseded chunks).
+                      every session chunk. Repeat captures are NOT superseded:
+                      an older capture can hold text the latest lacks (the old
+                      24k tail cap), so all stay in recall.
   rekey_notes         chunk-keyed note actions (thread_id `note-<hex>-<n>`) get
                       the base note id; the old value goes to prior_thread_id.
   source_brief        archive brief actions; cold-mark brief chunks.
-  source_draft        archive draft actions; supersede older draft versions per
+  source_draft        archive draft actions; a thread whose actions were anchored
+                      on its draft but which also holds evidence mail gets that
+                      mail re-queued (enriched=0) so the daemon extracts the
+                      real commitments; supersede older draft versions per
                       thread (store.supersede_older_drafts); cold-mark drafts.
   source_consolidated archive consolidated-note actions; cold-mark them.
   source_digest       archive digest (`enriched-*`) actions; cold-mark digests.
   derived_links       entity links / relations / observations whose source is a
                       derived class -> derived=1 (relations also strength 0 and
                       their endpoints' degree -1, matching graph_write's derived
-                      rows). Nothing is deleted.
+                      rows). A relation re-observed since (strength > 1) stays
+                      live: later sightings may be evidence. Nothing is deleted.
   dedup_embed         open email actions, single-link clusters at cosine >= 0.88
                       within one logical source (thread_id after rekey_notes),
                       owner-compatible (equal, or either blank/'unclear'); keeps
@@ -57,10 +60,16 @@ dedupe could keep a derived copy and archive the real one.
                       "claude"/"assistant" -> "unclear" (prior in prior_owner).
 
 Every changed value is written to `cleanup_log` (step, table, row key, column,
-old value as JSON) in the same transaction as the change, one transaction per
-step; inserted support rows are logged as inserts. `--undo STEP` restores the
-logged values (newest first), deletes the inserted rows and then the log rows,
-so a second undo is a no-op.
+old and new value as JSON) in the same transaction as the change, one
+transaction per step; inserted support rows are logged as inserts. `--undo
+STEP` restores the logged values (newest first) of rows that still hold the
+value the step wrote, deletes the inserted rows and then those log rows, so a
+second undo is a no-op. A row changed since (by the daemon or a later step) is
+skipped and reported, its log row kept: UNDO STEPS IN REVERSE STEP ORDER.
+
+`--yes` refuses when no brief rule is configured (ingest subject prefixes /
+Drive folders empty and no cached `mcpbrain/generated` label) unless
+`--no-brief-rules` is passed; the dry run warns.
 
 Dry-run counts of later steps assume the earlier steps' ACTION changes (it
 tracks them in memory); link/relation counts read the current store.
@@ -107,7 +116,6 @@ _INSERT = "*insert*"
 SIM_THRESHOLD = gw.ACTION_SIM_THRESHOLD          # 0.88 (global constraint)
 _EMBED_BATCH = 256
 _NON_PERSON = frozenset(gw._NON_PERSON_OWNERS) - {gw._UNCLEAR_OWNER}
-_SESSION_TITLE = re.compile(r"^Session ([0-9a-f]{8}) (\d{4}-\d{2}-\d{2})")
 _NOTE_CHUNK = re.compile(r"^(note-[0-9a-f]{32})-\d+$")
 _DRIVE_CHUNK = re.compile(r"^gdrive-(.+)-\d+$")
 _GMAIL_CHUNK = re.compile(r"^gmail-([0-9a-f]+)-")
@@ -145,6 +153,10 @@ class Resolver:
         self.note_of: dict[str, str] = {}
         self.session_notes: dict[str, dict] = {}
         self.draft_threads: set[str] = set()
+        # Gmail thread -> its evidence (non-duplicate) chunk doc_ids, and
+        # message id -> thread id: for re-queuing a draft-anchored thread.
+        self.thread_evidence: dict[str, list[str]] = defaultdict(list)
+        self.msg_thread: dict[str, str] = {}
 
     @classmethod
     def build(cls, db, rules) -> "Resolver":
@@ -209,8 +221,13 @@ class Resolver:
             m = metas.get(d, {})
             for ident in self._identities(m):
                 self.keys[ident].add((c, k))
-            if c == SC.DRAFT.value and m.get("source_type") == "gmail" and m.get("thread_id"):
-                self.draft_threads.add(m["thread_id"])
+            if m.get("source_type") == "gmail" and m.get("thread_id"):
+                if c == SC.DRAFT.value:
+                    self.draft_threads.add(m["thread_id"])
+                if c in _EVIDENCE and d not in dups:
+                    self.thread_evidence[m["thread_id"]].append(d)
+                if m.get("message_id"):
+                    self.msg_thread[m["message_id"]] = m["thread_id"]
         return self
 
     @staticmethod
@@ -287,12 +304,14 @@ class Tx:
         self.counts: Counter = Counter()
         self.at = _now()
 
-    def _log(self, table, key, column, old):
+    def _log(self, table, key, column, old, new=None):
+        ins = column == _INSERT
         self.db.execute(
             "INSERT INTO cleanup_log(step, table_name, row_key, column_name, "
-            "old_value, at) VALUES (?, ?, ?, ?, ?, ?)",
+            "old_value, new_value, at) VALUES (?, ?, ?, ?, ?, ?, ?)",
             (self.step, table, json.dumps(key, sort_keys=True), column,
-             None if column == _INSERT else json.dumps(old), self.at))
+             None if ins else json.dumps(old), None if ins else json.dumps(new),
+             self.at))
 
     def update(self, table, key: dict, old: dict, new: dict) -> set:
         changed = {c: v for c, v in new.items() if old.get(c) != v}
@@ -304,7 +323,7 @@ class Tx:
             self.db.execute(f"UPDATE {table} SET {sets} WHERE {where}",
                             (*changed.values(), *key.values()))
             for c in changed:
-                self._log(table, key, c, old.get(c))
+                self._log(table, key, c, old.get(c), changed[c])
         if table == "actions" and key["id"] in self.ctx.actions:
             self.ctx.actions[key["id"]].update(changed)
         if table == "entity_relations" and changed.get("derived"):
@@ -338,7 +357,7 @@ class Tx:
                 continue
             diff = [c for c in old if c not in cols and old[c] != new[c]]
             for c in diff:
-                self._log(table, dict(zip(cols, kt)), c, old[c])
+                self._log(table, dict(zip(cols, kt)), c, old[c], new[c])
             n += bool(diff)
         return n
 
@@ -408,13 +427,16 @@ def _cached_label_ids(db) -> frozenset:
 # Steps
 # ---------------------------------------------------------------------------
 
-def _archive_class(ctx, tx, cls) -> None:
+def _archive_class(ctx, tx, cls) -> list[dict]:
+    done = []
     for a in ctx.open_email_actions():
         if ctx.action_class(a) == cls.value:
             tx.update("actions", {"id": a["id"]}, a,
                       {"status": "auto_archived", "resolved_by": tx.step,
                        "resolved_at": tx.at})
             tx.counts[f"actions:{cls.value}"] += 1
+            done.append(a)
+    return done
 
 
 def _cold_mark(ctx, tx, doc_ids, label, skip=()) -> None:
@@ -427,41 +449,11 @@ def _cold_mark(ctx, tx, doc_ids, label, skip=()) -> None:
 
 
 def step_source_session(ctx, tx):
+    """Archive session actions and cold-mark every session chunk. Repeat
+    captures are NOT superseded (ruling I11): an older capture can hold text
+    the latest lacks (the old 24k tail cap), so all stay in recall, cold."""
     _archive_class(ctx, tx, SC.SESSION)
-    notes: dict[str, list[str]] = defaultdict(list)
-    rank: dict[str, tuple] = {}
-    group_of: dict[str, tuple] = {}
-    for d, info in ctx.res.session_notes.items():
-        note = info["note"]
-        notes[note].append(d)
-        rank[note] = max(rank.get(note, ("", 0)), (info["at"], info["rowid"]))
-        m = _SESSION_TITLE.match(info["title"])
-        if m:
-            group_of[note] = (m.group(1), m.group(2))
-        elif info["csid"]:
-            group_of[note] = (info["csid"][:8], info["csid"])
-    groups: dict[tuple, list[str]] = defaultdict(list)
-    for note, g in group_of.items():
-        groups[g].append(note)
-    superseded = set()
-    for members in groups.values():
-        if len(members) > 1:
-            latest = max(members, key=lambda n: rank[n])
-            superseded |= {n for n in members if n != latest}
-    rows = _fetch(tx.db, "chunks", "doc_id", ctx.res.session_notes,
-                  ("enrich_state", "metadata"))
-    for d, row in rows.items():
-        new = {"enrich_state": "cold"}
-        if ctx.res.session_notes[d]["note"] in superseded:
-            meta = json.loads(row["metadata"] or "{}")
-            if meta.get("superseded") is not True:
-                meta["superseded"] = True
-                new["metadata"] = json.dumps(meta)
-        changed = tx.update("chunks", {"doc_id": d}, row, new)
-        if "enrich_state" in changed:
-            tx.counts["chunks_cold:session"] += 1
-        if "metadata" in changed:
-            tx.counts["chunks_superseded:repeat_capture"] += 1
+    _cold_mark(ctx, tx, ctx.res.session_notes, "session")
 
 
 def step_rekey_notes(ctx, tx):
@@ -476,17 +468,41 @@ def step_rekey_notes(ctx, tx):
         prior = a["prior_thread_id"] if a["prior_thread_id"] is not None else t
         tx.update("actions", {"id": a["id"]}, a,
                   {"thread_id": base, "prior_thread_id": prior})
-        tx.counts[f"actions:{a['status']}"] += 1
+        tx.counts["actions_open" if a["status"] == "open" else "actions_not_open"] += 1
 
 
 def _step_class(cls):
     def step(ctx, tx):
-        _archive_class(ctx, tx, cls)
+        archived = _archive_class(ctx, tx, cls)
         skip = set()
         if cls is SC.DRAFT:
+            _requeue_draft_threads(ctx, tx, archived)
             skip = _supersede_drafts(ctx, tx)
         _cold_mark(ctx, tx, ctx.res.by_class.get(cls.value, ()), cls.value, skip)
     return step
+
+
+def _requeue_draft_threads(ctx, tx, archived) -> None:
+    """A thread whose actions were anchored on its draft but which also holds
+    evidence mail (the sent version, inbound replies) is re-queued: its
+    evidence chunks get enriched=0 (logged) so the next daemon cycles extract
+    the real mail, now that the draft is no longer an action source."""
+    threads = set()
+    for a in archived:
+        t = a["thread_id"] or ""
+        if t not in ctx.res.thread_evidence:
+            t = ctx.res.msg_thread.get(a["source_doc_id"] or "", t)
+        if ctx.res.thread_evidence.get(t):
+            threads.add(t)
+    for t in sorted(threads):
+        rows = _fetch(tx.db, "chunks", "doc_id", ctx.res.thread_evidence[t], ("enriched",))
+        n = 0
+        for d, row in rows.items():
+            if tx.update("chunks", {"doc_id": d}, row, {"enriched": 0}):
+                n += 1
+        if n:
+            tx.counts["threads_requeued"] += 1
+            tx.counts["chunks_requeued:evidence"] += n
 
 
 def _supersede_drafts(ctx, tx) -> set:
@@ -538,6 +554,13 @@ def step_derived_links(ctx, tx):
             continue
         c = cls_of(r["source_doc_id"] or "") or cls_of(r["contrib_doc_id"] or "")
         if c not in _DERIVED:
+            continue
+        if (r["strength"] if r["strength"] is not None else 1) > 1:
+            # Re-observed since its (derived) first sighting: the later
+            # sightings may be evidence, so it stays live (ruling I11).
+            # sources_backfill records the derived-class source row, which
+            # adds no strength.
+            tx.counts[f"relations_kept_reobserved:{c}"] += 1
             continue
         tx.update("entity_relations", {"id": r["id"]},
                   {"derived": r["derived"], "strength": r["strength"]},
@@ -848,16 +871,21 @@ def run(store: Store, home, steps, *, dry: bool, embedder=None) -> dict:
     return out
 
 
-def undo(store: Store, step: str, *, dry: bool) -> int:
-    """Restore every value `step` logged (newest first), delete the rows it
-    inserted, then its log rows. Returns the number of log rows handled."""
+def undo(store: Store, step: str, *, dry: bool) -> tuple[int, int]:
+    """Restore every value `step` logged (newest first) and delete the rows it
+    inserted, then delete those log rows. A value is restored only while the
+    row still holds the value the step wrote (new_value): a row changed since
+    (by the daemon, or by a LATER step — undo steps in reverse step order) is
+    left alone, its log row kept, and counted as drifted. Returns
+    (restored, drifted); a second undo finds nothing to restore."""
     with store._connect(write=not dry) as db:
-        rows = db.execute("SELECT id, table_name, row_key, column_name, old_value "
-                          "FROM cleanup_log WHERE step=? ORDER BY id DESC",
+        rows = db.execute("SELECT id, table_name, row_key, column_name, old_value, "
+                          "new_value FROM cleanup_log WHERE step=? ORDER BY id DESC",
                           (step,)).fetchall()
         if dry:
-            return len(rows)
+            return len(rows), 0
         cols_of: dict[str, set] = {}
+        done, drifted = [], 0
         for r in rows:
             table = r["table_name"]
             if table not in _KEYS:
@@ -872,13 +900,25 @@ def undo(store: Store, step: str, *, dry: bool) -> int:
             if col == _INSERT:
                 db.execute(f"DELETE FROM {table} WHERE {where}",  # admin-delete-ok
                            tuple(key.values()))
+                done.append(r["id"])
                 continue
             if col not in cols_of[table]:
                 raise ValueError(f"cleanup_log row {r['id']}: unknown column {col!r}")
+            cur = db.execute(f"SELECT {col} FROM {table} WHERE {where}",
+                             tuple(key.values())).fetchone()
+            if cur is None:
+                done.append(r["id"])               # row gone: nothing to restore
+                continue
+            if r["new_value"] is not None and cur[0] != json.loads(r["new_value"]):
+                drifted += 1
+                continue
             db.execute(f"UPDATE {table} SET {col}=? WHERE {where}",
                        (json.loads(r["old_value"]), *key.values()))
-        db.execute("DELETE FROM cleanup_log WHERE step=?", (step,))  # admin-delete-ok
-        return len(rows)
+            done.append(r["id"])
+        for part in _batched(done):
+            db.execute(f"DELETE FROM cleanup_log WHERE id IN ({','.join('?' * len(part))})",  # admin-delete-ok
+                       part)
+        return len(done), drifted
 
 
 def _print_summary(results: dict, *, dry: bool) -> None:
@@ -888,6 +928,18 @@ def _print_summary(results: dict, *, dry: bool) -> None:
         total = sum(counts.values())
         detail = ", ".join(f"{k}={v}" for k, v in sorted(counts.items())) or "-"
         print(f"{step:<22}{total:>9}  {detail}")
+
+
+def _daemon_owns(store_path: Path, home: Path) -> bool:
+    """True when a running daemon may be writing this store file: it is the
+    configured live store (config.store_path()), or lies inside --home."""
+    try:
+        live = store_path.resolve() == config.store_path().resolve()
+    except OSError:
+        live = False
+    if live and restore.daemon_running(str(config.app_dir())):
+        return True
+    return _inside(store_path, home) and restore.daemon_running(str(home))
 
 
 def _inside(path: Path, home: Path) -> bool:
@@ -908,6 +960,9 @@ def main(argv=None, *, embedder=None, dim=None) -> int:
     ap.add_argument("--yes", action="store_true", help="apply (default: dry run)")
     ap.add_argument("--steps", default="", help="comma-separated subset, order kept")
     ap.add_argument("--undo", default=None, metavar="STEP")
+    ap.add_argument("--no-brief-rules", action="store_true",
+                    help="apply even though no brief rule is configured (briefs "
+                         "then read as primary mail/docs)")
     ap.add_argument("--skip-snapshot-for-tests", action="store_true",
                     help=argparse.SUPPRESS)
     ns = ap.parse_args(argv)
@@ -927,40 +982,61 @@ def main(argv=None, *, embedder=None, dim=None) -> int:
         dim = embedder_dim("bge-small")
 
     write = ns.yes
-    if write and _inside(store_path, home) and restore.daemon_running(str(home)):
+    if write and _daemon_owns(store_path, home):
         print("[clean] REFUSED: the mcpbrain daemon is running for this home. Stop it "
               "with `launchctl bootout gui/$(id -u)/com.mcpbrain` (not `launchctl "
               "stop`), re-run, then `launchctl bootstrap gui/$(id -u) "
               "~/Library/LaunchAgents/com.mcpbrain.plist`.")
         return 1
 
+    ro = Store(store_path, dim=dim, read_only=True)
+    with ro._connect() as db:
+        has_schema = db.execute(
+            "SELECT 1 FROM sqlite_master WHERE name='cleanup_log'").fetchone() is not None
+        label_ids = _cached_label_ids(db) if has_schema else frozenset()
+    rules = sc.Rules.from_config(str(home), generated_label_ids=label_ids)
+    no_brief_rules = not (rules.subject_prefixes or rules.drive_folders
+                          or rules.generated_label_ids)
+    if no_brief_rules and not ns.undo:
+        print("[clean] WARNING: NO BRIEF RULE IS CONFIGURED (ingest."
+              "generated_gmail_subject_prefixes / ingest.generated_drive_folders "
+              "empty, no cached mcpbrain/generated label): briefs will read as "
+              "primary mail/docs, keep their actions, and can win the dedupe.")
+        if write and not ns.no_brief_rules:
+            print("[clean] REFUSED: configure the brief rules, or pass --no-brief-rules.")
+            return 1
+
     if not write:
-        store = Store(store_path, dim=dim, read_only=True)
-        with store._connect() as db:
-            if db.execute("SELECT 1 FROM sqlite_master WHERE name='cleanup_log'").fetchone() is None:
-                print("[clean] store predates the ingestion-integrity schema; run the "
-                      "current daemon (or --yes on a copy) once first")
-                return 1
+        store = ro
+        if not has_schema:
+            print("[clean] store predates the ingestion-integrity schema; run the "
+                  "current daemon (or --yes on a copy) once first")
+            return 1
         if ns.undo:
-            n = undo(store, ns.undo, dry=True)
-            print(f"[clean] DRY RUN: --undo {ns.undo} would restore {n} logged value(s)")
+            n, _ = undo(store, ns.undo, dry=True)
+            print(f"[clean] DRY RUN: --undo {ns.undo} would restore up to {n} logged "
+                  "value(s); undo steps in REVERSE step order")
             return 0
         _print_summary(run(store, str(home), steps, dry=True, embedder=embedder), dry=True)
         print("[clean] re-run with --yes to apply")
         return 0
 
-    store = Store(store_path, dim=dim)
-    store.init()
     snap = None
-    if not ns.skip_snapshot_for_tests:
+    if not ns.skip_snapshot_for_tests:       # before init(): init writes too
         from mcpbrain.backup import snapshot
         tag = f"pre-undo-{ns.undo}" if ns.undo else "pre-clean"
         snap = snapshot(store_path, Path(f"{store_path}.{tag}-{int(time.time())}"),
                         home=str(home))
         print(f"[clean] verified snapshot: {snap}")
+    store = Store(store_path, dim=dim)
+    store.init()
     if ns.undo:
-        print(f"[clean] --undo {ns.undo}: restored {undo(store, ns.undo, dry=False)} "
-              "logged value(s)")
+        restored, drifted = undo(store, ns.undo, dry=False)
+        print(f"[clean] --undo {ns.undo}: restored {restored} logged value(s)")
+        if drifted:
+            print(f"[clean] --undo {ns.undo}: SKIPPED {drifted} value(s) changed since "
+                  "the step ran (kept in cleanup_log); undo later steps first — "
+                  "reverse step order")
     else:
         _print_summary(run(store, str(home), steps, dry=False, embedder=embedder), dry=False)
     with store._connect() as db:
