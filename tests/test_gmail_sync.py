@@ -961,3 +961,30 @@ def test_older_drafts_superseded_newest_stays_searchable(tmp_path):
     assert "superseded" not in store.get_chunk("gmail-x1-body-0")["metadata"]
     # Idempotent: re-running changes nothing.
     assert store.supersede_older_drafts("T1") == []
+
+
+def test_reingest_messages_resupersedes_older_drafts(tmp_path):
+    """A repair re-ingest that rewrites a superseded draft (losing its flag)
+    re-derives the superseded state for the thread."""
+    from mcpbrain.sync.gmail import reingest_messages
+    store = Store(tmp_path / "test.sqlite3", dim=4)
+    store.init()
+    msgs = {"d1": _draft_msg("d1", "T9", "Tue, 21 Oct 2026 09:00:00 +0000",
+                             "Old draft: we might confirm Hall B for Sunday."),
+            "d2": _draft_msg("d2", "T9", "Tue, 21 Oct 2026 10:00:00 +0000",
+                             "New draft: confirmed Hall B for Sunday at 9.")}
+    svc = FakeService(messages=msgs)
+    for mid in ("d1", "d2"):
+        handle_gmail_item(svc, store, {"ref_id": mid, "version": "", "event": "upsert",
+                                       "modified_at": "2026-10-21T00:00:00"})
+    # Simulate a re-render that dropped the flag and reset the state.
+    import json as _j
+    md = store.get_chunk("gmail-d1-body-0")["metadata"]
+    md.pop("superseded")
+    with store._connect(write=True) as db:
+        db.execute("UPDATE chunks SET metadata=?, enrich_state='' WHERE doc_id=?",
+                   (_j.dumps(md), "gmail-d1-body-0"))
+    reingest_messages(svc, store, ["T9"])
+    assert store.get_chunk("gmail-d1-body-0")["metadata"]["superseded"] is True
+    assert _state(store, "gmail-d1-body-0") == "cold"
+    assert "superseded" not in store.get_chunk("gmail-d2-body-0")["metadata"]

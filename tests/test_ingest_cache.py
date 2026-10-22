@@ -581,3 +581,54 @@ def test_import_apply_coerces_float_idx_to_int_doc_id(tmp_path):
     assert s.get_chunk("gdrive-FID-0") is not None        # int doc_id, not 0.0
     with s._connect() as db:
         assert db.execute("SELECT COUNT(*) c FROM entities").fetchone()["c"] >= 1
+
+
+def _derived_artifact(fs, fid, meta_extra):
+    import gzip, json
+    vec = _b64([0.1, 0.2, 0.3, 0.4])
+    extraction = {"thread_id": f"gdrive-{fid}", "org": "Acme", "content_type": "update",
+                  "summary": "brief", "entities": [{"name": "Marcus Reyes", "type": "person"}],
+                  "relations": [], "actions": [{"text": "Follow up with Marcus"}], "topics": [],
+                  "messages": [{"message_id": f"gdrive-{fid}-0",
+                                "text": "Marcus Reyes owns the plan"}]}
+    art = CacheArtifact(
+        file_id=fid, content_hash="vh1", extraction_method="gdocs",
+        chunker_version=str(CHUNKER_VERSION), embed_model="bge-small", dim=4,
+        chunks=(CacheChunk(idx=0, text="Marcus Reyes owns the plan", embedding_b64=vec,
+                           metadata={"source_type": "gdrive", "file_id": fid,
+                                     "chunk_index": 0, **meta_extra}),),
+        enrich={"logic_version": ENRICH_LOGIC_VERSION, "extraction": extraction},
+        published_by="p@x.org", published_at="2026-07-04")
+    fs.put_bytes(f"{ingest_cache.CACHE_DIR}/"
+                 f"{artifact_filename(fid, 'vh1', 'bge-small', 4, str(CHUNKER_VERSION))}",
+                 gzip.compress(json.dumps(art.to_dict()).encode()))
+
+
+def test_import_of_derived_artifact_is_cold_and_never_applied(tmp_path):
+    """A peer's artifact for a generated brief (appProperties marker, or a
+    configured brief folder) imports searchable but cold: not marked enriched,
+    and its cached extraction is never applied to the graph."""
+    import json
+    home = tmp_path / "home"
+    home.mkdir()
+    (home / "config.json").write_text(json.dumps(
+        {"ingest": {"generated_drive_folders": ["My Drive/Daily Briefs"]}}))
+    s, fs = _store(tmp_path), LocalDirFleetStorage(tmp_path / "drv")
+    _derived_artifact(fs, "GEN", {"app_generated": "1"})
+    _derived_artifact(fs, "FOLD", {"folder_path": "My Drive/Daily Briefs/2026"})
+    for fid in ("GEN", "FOLD"):
+        assert ingest_cache.try_import(s, fs, "D1", fid, "vh1", PIN, home=home) is True
+    with s._connect() as db:
+        rows = db.execute("SELECT doc_id, enriched, enrich_state FROM chunks "
+                          "WHERE doc_id IN ('gdrive-GEN-0','gdrive-FOLD-0')").fetchall()
+        n_ent = db.execute("SELECT COUNT(*) c FROM entities").fetchone()["c"]
+    assert len(rows) == 2
+    assert all(r["enriched"] == 0 and r["enrich_state"] == "cold" for r in rows)
+    assert n_ent == 0                     # no cached extraction applied
+    # An ordinary artifact under the same home still imports enriched + applied.
+    _derived_artifact(fs, "PRIM", {"folder_path": "My Drive/Projects"})
+    assert ingest_cache.try_import(s, fs, "D1", "PRIM", "vh1", PIN, home=home) is True
+    with s._connect() as db:
+        r = db.execute("SELECT enriched, enrich_state FROM chunks "
+                       "WHERE doc_id='gdrive-PRIM-0'").fetchone()
+    assert r["enriched"] == 1 and (r["enrich_state"] or "") != "cold"

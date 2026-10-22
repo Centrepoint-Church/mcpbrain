@@ -70,7 +70,9 @@ def _stitch_with_gaps(chunks: list[dict]) -> str:
 def expand_parent(store, group: dict, *, window_n: int, short_doc_max_chunks: int) -> str:
     kind, key = group["kind"], group["key"]
     if kind == "thread":
-        chunks = _by_date(store.thread_chunks(key))
+        # Superseded draft versions are out of recall, expansion included.
+        chunks = _by_date([c for c in store.thread_chunks(key)
+                           if not (c.get("metadata") or {}).get("superseded")])
         return _JOIN.join(c["text"] for c in chunks)
     if kind == "file":
         chunks = store.chunks_for_file(key)  # already sorted by idx

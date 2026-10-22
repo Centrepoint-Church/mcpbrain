@@ -585,6 +585,14 @@ def reingest_messages(service, store, thread_ids: list, *,
             except Exception as exc:  # noqa: BLE001 -- one bad message must not end the run
                 log.warning("reingest_messages: %s failed: %s", mid, exc)
                 summary["failed"] += 1
+        # A re-render may have rewritten a superseded draft's metadata
+        # wholesale (upsert_chunk replaces it), dropping the flag: re-derive
+        # which draft version of this thread is newest. Idempotent, cheap.
+        try:
+            store.supersede_older_drafts(thread_id)
+        except Exception as exc:  # noqa: BLE001 -- recall hygiene, not the repair
+            log.warning("reingest_messages: draft supersede for %s failed: %s",
+                        thread_id, exc)
     if report is not None:
         for key, count in att_skips.items():
             report[key] = report.get(key, 0) + count

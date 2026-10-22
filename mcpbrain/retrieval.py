@@ -457,6 +457,11 @@ def hybrid_search(store, embedder, query: str, limit: int = 10, *,
                 meta = {}
         if meta.get("expired"):
             continue
+        # An older draft version (Store.supersede_older_drafts): only the newest
+        # version of a draft thread stays in recall (spec §2). Read off the
+        # candidate's already-fetched metadata — no extra query, no scan.
+        if meta.get("superseded"):
+            continue
         if exclude_cold and c.get("memory_tier") == "cold":
             continue
         rrf_score = (fused[d] / top) if top > 0 else 0.0

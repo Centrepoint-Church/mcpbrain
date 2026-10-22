@@ -682,3 +682,32 @@ def test_content_dedupe_prefers_a_dated_copy_over_an_undated_one(tmp_path):
 
     ids = [h["doc_id"] for h in hits]
     assert "gdrive-dated-0" in ids and "gdrive-undated-0" not in ids, ids
+
+
+def test_superseded_draft_versions_out_of_recall(tmp_path):
+    """Two draft versions of a reply plus the SENT message: after superseding,
+    search returns only the newest draft and the SENT message — never the older
+    draft — and thread expansion leaves it out too."""
+    s = Store(tmp_path / "b.sqlite3", dim=4)
+    s.init()
+    base = {"source_type": "gmail", "thread_id": "T1", "subject": "Re: budget",
+            "sender": "dana@northgatetrust.org", "chunk_index": 0, "chunk_total": 1}
+    s.upsert_chunk("gmail-d1-body-0", "budget draft one for the board", "h1",
+                   {**base, "message_id": "d1", "labels": "DRAFT",
+                    "date": "Tue, 21 Oct 2026 09:00:00 +0000"})
+    s.upsert_chunk("gmail-d2-body-0", "budget draft two for the board", "h2",
+                   {**base, "message_id": "d2", "labels": "DRAFT",
+                    "date": "Tue, 21 Oct 2026 10:00:00 +0000"})
+    s.upsert_chunk("gmail-s1-body-0", "budget as sent to the board", "h3",
+                   {**base, "message_id": "s1", "labels": "SENT",
+                    "date": "Tue, 21 Oct 2026 11:00:00 +0000"})
+    from mcpbrain.index import index_pending
+    index_pending(s, FakeEmbedder())
+    assert s.supersede_older_drafts("T1") == ["gmail-d1-body-0"]
+    ids = [r["doc_id"] for r in hybrid_search(s, FakeEmbedder(), "budget draft", limit=10)]
+    assert "gmail-d1-body-0" not in ids
+    assert "gmail-d2-body-0" in ids and "gmail-s1-body-0" in ids
+    from mcpbrain.retrieval_expand import expand_parent
+    text = expand_parent(s, {"kind": "thread", "key": "T1"},
+                         window_n=1, short_doc_max_chunks=5)
+    assert "draft one" not in text and "draft two" in text and "as sent" in text

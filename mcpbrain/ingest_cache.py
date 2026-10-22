@@ -492,9 +492,22 @@ def _import_artifact(store, drive_id: str, art: CacheArtifact, pin,
     if home is None:
         from mcpbrain import config as _cfg
         home = _cfg.app_dir()
+    # A peer's artifact goes through the SAME source classifier as local
+    # ingest: a derived file (a generated brief by folder or appProperties
+    # marker) is imported searchable but cold, never marked enriched, and its
+    # cached extraction is never applied — otherwise the cache would be a side
+    # door around "derived sources are never evidence".
+    derived = _artifact_is_derived(rows, home)
+    if derived:
+        mark_enriched = False
+        for r in rows:
+            r["enriched"], r["enriched_version"] = False, 0
     written, apply_extraction = _write_rows(store, art, rows, mark_enriched, logic_v, home)
     if not written:
         return False
+    if derived:
+        store.set_enrich_state([r["doc_id"] for r in rows], "cold")
+        return True
     # A#4: apply the cached enrichment so the importer's graph gets this doc's
     # entities/relations without re-running Haiku. Validate through the SAME
     # guards drain uses before apply — never apply a peer's payload raw.
@@ -514,6 +527,21 @@ def _import_artifact(store, drive_id: str, art: CacheArtifact, pin,
             log.info("ingest_cache: cached-enrichment apply skipped for %s: %s",
                      art.file_id, exc, exc_info=True)
     return True
+
+
+def _artifact_is_derived(rows: list[dict], home) -> bool:
+    """True when any of the artifact's chunks classifies as a derived source
+    (not evidence, not a duplicate) under this install's rules."""
+    from mcpbrain import source_class as sc
+    try:
+        rules = sc.Rules.from_config(home)
+    except Exception:  # noqa: BLE001 — unreadable config: rule-free classes only
+        rules = sc.Rules()
+    for r in rows:
+        cls = sc.classify(r["doc_id"], r["metadata"], rules)
+        if not (cls is sc.SourceClass.DUPLICATE or sc.is_evidence(cls)):
+            return True
+    return False
 
 
 def _load(fleet_storage, path) -> CacheArtifact | None:
