@@ -159,7 +159,8 @@ def test_daemon_run_undoes_like_the_cli(env):
 
 def test_summary_line_states():
     assert "not yet run" in ic.summary_line({"state": "pending"})
-    assert "24 h" in ic.summary_line({"state": "deferred_no_backup"})
+    assert "24 h" in ic.summary_line({"state": "deferred_no_backup", "last_backup": 1.0})
+    assert "first backup" in ic.summary_line({"state": "deferred_no_backup"})
     assert "FAILED" in ic.summary_line({"state": "failed", "error": "x"})
     assert "done by daemon" in ic.summary_line(
         {"state": "done", "by": "daemon", "at": "t", "counts": {"a": {"b": 2}}})
@@ -175,7 +176,8 @@ def test_doctor_line_per_state(env):
     assert doctor.ingestion_cleanup_line(s).startswith("⏳")
     for state, icon in (("deferred_no_backup", "⚠️"), ("failed", "❌"),
                         ("disabled", "➖"), ("done", "✅")):
-        s.set_meta(ic.MARKER_KEY, json.dumps({"state": state, "error": "e"}))
+        s.set_meta(ic.MARKER_KEY, json.dumps({"state": state, "error": "e",
+                                              "last_backup": 1.0}))
         line = doctor.ingestion_cleanup_line(s)
         assert line.startswith(icon), (state, line)
 
@@ -183,15 +185,31 @@ def test_doctor_line_per_state(env):
 def test_daemon_pass_is_registered_gated_and_bulk_locked():
     from mcpbrain import daemon as d
     cp = next(c for c in d._CADENCE_PASSES if c.name == "ingestion_cleanup")
-    assert cp.needs_bulk_lock and cp.needs_configured
+    assert cp.needs_configured and not cp.needs_bulk_lock   # takes the lock itself
     assert "ingestion_cleanup_interval_s" in d._CADENCE_KEYS
     assert d._CADENCE_DEFAULTS["ingestion_cleanup_interval_s"] == 3600.0
+
+
+def _bare_daemon(env):
+    import threading
+    from mcpbrain import daemon as d
+    dm = d.Daemon.__new__(d.Daemon)
+    dm._store = env["store"]
+    dm._clock = lambda: 1000.0
+    dm._ingestion_cleanup_interval_s = 3600.0
+    dm._last_ingestion_cleanup = None
+    dm._bulk_lock = threading.Lock()
+    dm._bulk_lock_wait_s = 1.0
+    dm._bulk_lock_waiters = 0
+    dm._bulk_lock_waiters_lock = threading.Lock()
+    dm._embedder_factory = object()
+    dm._embedder_bounded = lambda timeout=None: "EMB"
+    return dm
 
 
 def test_daemon_pass_runs_migration_once(env, monkeypatch):
     """_run_ingestion_cleanup calls run_migration with the daemon's store and
     embedder; once the marker is done it does not call it again."""
-    from mcpbrain import daemon as d
     calls = []
 
     def fake(store, home, *, embedder_factory=None, **k):
@@ -200,13 +218,7 @@ def test_daemon_pass_runs_migration_once(env, monkeypatch):
         return {"state": "done", "by": "daemon"}
 
     monkeypatch.setattr(ic, "run_migration", fake)
-    dm = d.Daemon.__new__(d.Daemon)
-    dm._store = env["store"]
-    dm._clock = lambda: 1000.0
-    dm._ingestion_cleanup_interval_s = 3600.0
-    dm._last_ingestion_cleanup = None
-    dm._embedder_obj = "EMB"
-    monkeypatch.setattr(d.Daemon, "_embedder", property(lambda self: self._embedder_obj))
+    dm = _bare_daemon(env)
     assert dm._run_ingestion_cleanup() == {"ingestion_cleanup": "done"}
     assert calls == ["EMB"]
     dm._last_ingestion_cleanup = None
@@ -216,3 +228,167 @@ def test_daemon_pass_runs_migration_once(env, monkeypatch):
     dm._ingestion_cleanup_interval_s = None
     dm._last_ingestion_cleanup = None
     assert dm._run_ingestion_cleanup() is None
+
+
+def test_daemon_pass_skips_while_model_loads_and_lexical_on_failure(env, monkeypatch):
+    seen = []
+    monkeypatch.setattr(ic, "run_migration",
+                        lambda store, home, *, embedder_factory=None, **k:
+                        seen.append(embedder_factory()) or {"state": "done"})
+    dm = _bare_daemon(env)
+    dm._embedder_bounded = lambda timeout=None: None          # still building
+    assert dm._run_ingestion_cleanup() == {"ingestion_cleanup": "embedder_loading"}
+    assert seen == [] and dm._last_ingestion_cleanup is None  # retried next tick
+
+    def boom(timeout=None):
+        raise RuntimeError("no model")
+
+    dm._embedder_bounded = boom
+    assert dm._run_ingestion_cleanup() == {"ingestion_cleanup": "done"}
+    assert seen == [ic.LEXICAL]
+
+
+# ---------------------------------------------------------------------------
+# Residuals (ruling I17)
+# ---------------------------------------------------------------------------
+
+def _strip_new_schema(path):
+    """Make an initialised store look like one the new code never opened."""
+    import sqlite3
+    db = sqlite3.connect(str(path))
+    for t in ("cleanup_log", "relation_sources", "observation_sources"):
+        db.execute(f"DROP TABLE IF EXISTS {t}")
+    db.execute("DROP INDEX IF EXISTS idx_chunks_dup_of")
+    db.execute("ALTER TABLE chunks DROP COLUMN dup_of")
+    db.commit()
+    db.close()
+
+
+def test_n1_runs_init_on_a_never_initialised_store(env):
+    """N1: a store swapped in by the wizard restore was never re-initialised;
+    the migration initialises it instead of recording a terminal failure."""
+    from mcpbrain.store import Store
+    _strip_new_schema(env["store"].path)
+    fresh = Store(env["store"].path, dim=4)          # no init()
+    rec = ic.run_migration(fresh, str(env["home"]),
+                           embedder_factory=FakeEmbedder, last_backup=FRESH,
+                           clock=lambda: NOW)
+    assert rec["state"] == "done", rec.get("error")
+    assert _act(env, "session")["status"] == "auto_archived"
+
+
+def test_n2_gate_reads_restore_point_capture_time(env, monkeypatch):
+    """N2: an old capture committed just now is NOT a fresh restore point."""
+    import mcpbrain.probes as probes
+    (env["home"] / "backup_state.json").write_text(json.dumps(
+        {"ok": True, "last_success": time.time(), "restore_point": time.time() - 3 * 86400}))
+    rec = ic.run_migration(env["store"], str(env["home"]), embedder_factory=FakeEmbedder)
+    assert rec["state"] == "deferred_no_backup"
+    (env["home"] / "backup_state.json").write_text(json.dumps(
+        {"ok": True, "last_success": time.time(), "restore_point": time.time() - 600}))
+    assert probes.last_restore_point(str(env["home"])) is not None
+    rec = ic.run_migration(env["store"], str(env["home"]), embedder_factory=FakeEmbedder)
+    assert rec["state"] == "done"
+
+
+def test_n2_restore_point_falls_back_to_last_success(env):
+    import mcpbrain.probes as probes
+    (env["home"] / "backup_state.json").write_text(json.dumps(
+        {"ok": True, "last_success": 1234.0}))
+    assert probes.last_restore_point(str(env["home"])) == 1234.0
+
+
+def test_n3_embedder_failure_falls_back_to_lexical(env):
+    """N3: an embedder that cannot be built is not a permanent failure: the
+    dedupe runs on the lexical rules, and says so in its counts."""
+    def broken():
+        raise RuntimeError("model download failed")
+
+    rec = ic.run_migration(env["store"], str(env["home"]), embedder_factory=broken,
+                           last_backup=FRESH, clock=lambda: NOW)
+    assert rec["state"] == "done"
+    assert rec["counts"]["dedup_embed"].get("dedup:lexical_fallback") == 1
+    # The lexical rules still collapse the near-identical note actions.
+    assert rec["counts"]["dedup_embed"].get("actions:duplicate", 0) >= 1
+
+
+def test_n3_lexical_marker_object(env):
+    rec = ic.run_migration(env["store"], str(env["home"]),
+                           embedder_factory=lambda: ic.LEXICAL,
+                           last_backup=FRESH, clock=lambda: NOW)
+    assert rec["state"] == "done"
+    assert rec["counts"]["dedup_embed"].get("dedup:lexical_fallback") == 1
+
+
+def test_n4_cli_claims_running_before_it_runs(env, monkeypatch):
+    seen = {}
+    real_run = ic.run
+
+    def spy(store, home, steps, **kw):
+        seen["marker"] = ic.read_marker(store)
+        # A daemon relaunched mid-run stands off.
+        seen["daemon"] = ic.run_migration(store, home, embedder_factory=FakeEmbedder,
+                                          last_backup=time.time())
+        return real_run(store, home, steps, **kw)
+
+    monkeypatch.setattr(ic, "run", spy)
+    assert _main(env, "--yes", "--skip-snapshot-for-tests") == 0
+    assert seen["marker"]["state"] == "running" and seen["marker"]["by"] == "cli"
+    assert seen["daemon"]["state"] == "running" and seen["daemon"]["by"] == "cli"
+    assert ic.status(env["store"])["state"] == "done"
+
+
+def test_n4_stale_cli_claim_is_visible_and_not_blocking(env):
+    """A crashed CLI run leaves `running` by cli; once it is older than
+    CLI_CLAIM_TTL_S the daemon treats it as interrupted and runs, and the
+    status line says so meanwhile."""
+    old = {"state": "running", "by": "cli", "attempts": 0,
+           "at": "2000-01-01T00:00:00+00:00"}
+    env["store"].set_meta(ic.MARKER_KEY, json.dumps(old))
+    st = ic.status(env["store"])
+    assert "interrupted" in ic.summary_line(st)
+    from mcpbrain import doctor
+    assert doctor.ingestion_cleanup_line(env["store"]).startswith("⚠️")
+    env["store"].set_meta(ic.MARKER_KEY, json.dumps(old))     # status() does not write
+    assert _mig(env)["state"] == "done"
+
+
+def test_n4_partial_steps_never_mark_done(env):
+    assert _main(env, "--yes", "--skip-snapshot-for-tests", "--steps", "owner_aliases") == 0
+    st = ic.status(env["store"])
+    assert st["state"] == "pending"
+    assert st["last_cli"]["steps"] == ["owner_aliases"]
+    assert _mig(env)["state"] == "done"                # the daemon still runs the rest
+    assert _act(env, "session")["status"] == "auto_archived"
+
+
+def test_n6_no_warning_before_first_backup(env):
+    from mcpbrain import doctor
+    rec = ic.run_migration(env["store"], str(env["home"]), embedder_factory=FakeEmbedder,
+                           clock=lambda: NOW)                # no backup state at all
+    assert rec["state"] == "deferred_no_backup"
+    line = doctor.ingestion_cleanup_line(env["store"])
+    assert line.startswith("⏳") and "first backup" in line
+    _mig(env, last_backup=STALE)                             # had one, now stale
+    assert doctor.ingestion_cleanup_line(env["store"]).startswith("⚠️")
+
+
+def test_n3_daemon_loads_embedder_before_taking_bulk_lock(env, monkeypatch):
+    """The pass builds the embedder (bounded) BEFORE it takes _bulk_lock, and
+    holds the lock only around run_migration."""
+    order = []
+    dm = _bare_daemon(env)
+
+    def fake(store, home, *, embedder_factory=None, **k):
+        order.append(("run", dm._bulk_lock.locked(), embedder_factory()))
+        return {"state": "done", "by": "daemon"}
+
+    def bounded(timeout=None):
+        order.append(("embedder", dm._bulk_lock.locked()))
+        return "EMB"
+
+    monkeypatch.setattr(ic, "run_migration", fake)
+    dm._embedder_bounded = bounded
+    assert dm._run_ingestion_cleanup() == {"ingestion_cleanup": "done"}
+    assert order == [("embedder", False), ("run", True, "EMB")]
+    assert not dm._bulk_lock.locked()

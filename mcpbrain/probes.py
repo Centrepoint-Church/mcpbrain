@@ -277,6 +277,25 @@ def last_backup_success(home) -> float | None:
     return v or None
 
 
+def last_restore_point(home) -> float | None:
+    """Epoch seconds of the newest committed restore point's CAPTURE time
+    (`restore_point`), falling back to `last_success` for a state file from
+    an older daemon; None when no backup is known. A capture taken days ago
+    that only commits now is old: gates that promise "a restore point less
+    than a day old" must read this, not the commit time."""
+    state = _read_backup_state(home)
+    if state is None or state is _CORRUPT:
+        return None
+    for key in ("restore_point", "last_success"):
+        try:
+            v = float(state.get(key) or 0)
+        except (TypeError, ValueError):
+            v = 0
+        if v:
+            return v
+    return None
+
+
 # Sentinel: backup_state.json EXISTS but could not be parsed as a JSON object
 # (truncated by a crash mid-write, hand-edited, disk corruption). Distinct
 # from "file absent" (a fresh install, or before the first backup): a corrupt

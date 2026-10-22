@@ -558,9 +558,10 @@ _CADENCE_PASSES: tuple[CadencePass, ...] = (
     # once per install. Marker-gated (the attended CLI shares the marker),
     # backup-gated like the reflow seed, fleet kill switch
     # ingestion_cleanup_enabled. Bulk lock: it rewrites chunk rows.
+    # The pass takes _bulk_lock ITSELF (needs_bulk_lock=False), after building
+    # the embedder, so a cold model build never runs under the lock (I17 N3).
     CadencePass("ingestion_cleanup", "_ingestion_cleanup_interval_s",
-                "_last_ingestion_cleanup", "_run_ingestion_cleanup",
-                needs_bulk_lock=True),
+                "_last_ingestion_cleanup", "_run_ingestion_cleanup"),
 )
 
 
@@ -4026,19 +4027,47 @@ class Daemon:
         return summary
 
     def _run_ingestion_cleanup(self) -> dict | None:
-        """The one-shot ingestion clean-up (ruling I13), on the maintenance
-        thread under _bulk_lock (needs_bulk_lock). ingestion_cleanup.
-        run_migration owns every gate and the marker; this only rate-limits
-        the call and logs a state change."""
+        """The one-shot ingestion clean-up (ruling I13). The embedder is built
+        FIRST, bounded and outside _bulk_lock (a cold model build must never
+        park the lock or the watchdog -- see _embedder_bounded); a build still
+        in progress skips this tick, a build that fails means lexical dedupe.
+        Then _bulk_lock is taken the way _run_gated_pass takes it (intent,
+        bounded acquire, skip on timeout) around ingestion_cleanup.
+        run_migration, which owns every gate and the marker."""
         if not self._is_due("_ingestion_cleanup_interval_s", "_last_ingestion_cleanup"):
             return None
-        self._last_ingestion_cleanup = self._clock()
         from mcpbrain import ingestion_cleanup
         before = ingestion_cleanup.read_marker(self._store).get("state")
         if before in ("done", "failed"):
+            self._last_ingestion_cleanup = self._clock()
             return {"ingestion_cleanup": before}
-        rec = ingestion_cleanup.run_migration(
-            self._store, str(app_dir()), embedder_factory=lambda: self._embedder)
+        if getattr(self, "_embedder_factory", None) is None:
+            emb = ingestion_cleanup.LEXICAL
+        else:
+            try:
+                emb = self._embedder_bounded()
+            except Exception as exc:  # noqa: BLE001 — lexical, never a failure
+                log.warning("ingestion_cleanup: embedder failed (%s); lexical dedupe", exc)
+                emb = ingestion_cleanup.LEXICAL
+            if emb is None:
+                log.info("ingestion_cleanup: search model still loading; retry next tick")
+                return {"ingestion_cleanup": "embedder_loading"}
+        with self._bulk_lock_intent():
+            acquired = self._bulk_lock.acquire(timeout=self._bulk_lock_wait_s)
+        if not acquired:
+            log.warning("ingestion_cleanup skipped this tick: bulk lock busy; will retry")
+            return {"ingestion_cleanup": "lock_busy"}
+        self._last_ingestion_cleanup = self._clock()
+        active = getattr(self, "_bulk_pass_active", None)
+        if active is not None:
+            active.set()
+        try:
+            rec = ingestion_cleanup.run_migration(
+                self._store, str(app_dir()), embedder_factory=lambda: emb)
+        finally:
+            if active is not None:
+                active.clear()
+            self._bulk_lock.release()
         state = rec.get("state")
         line = ingestion_cleanup.summary_line(rec)
         if state == "failed":

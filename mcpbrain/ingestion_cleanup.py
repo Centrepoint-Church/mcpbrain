@@ -101,6 +101,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import logging
 import re
 import time
 from collections import Counter, defaultdict
@@ -114,6 +115,7 @@ from mcpbrain import source_class as sc
 from mcpbrain.store import _IN_BATCH, Store
 
 SC = sc.SourceClass
+log = logging.getLogger("mcpbrain.ingestion_cleanup")
 
 STEPS = ("source_session", "rekey_notes", "source_brief", "source_draft",
          "source_consolidated", "source_digest", "derived_links",
@@ -418,6 +420,8 @@ class Ctx:
 
     @property
     def embedder(self):
+        if self._embedder is LEXICAL:
+            raise RuntimeError("no embedder (lexical dedupe requested)")
         if self._embedder is None:
             from mcpbrain.embed import get_embedder
             self._embedder = get_embedder("bge-small")
@@ -687,10 +691,34 @@ def _unit_vectors(ctx, texts) -> dict:
     return vecs
 
 
+def _lexical_same(a: str, b: str) -> bool:
+    """graph_write's lexical action-dedupe rules (its fallback when the
+    embedder fails): normalised-title equality, then — length-gated — token
+    subset, Jaccard >= 0.85, SequenceMatcher >= 0.82."""
+    import difflib
+    na, nb = gw._normalise_title_for_dedup(a), gw._normalise_title_for_dedup(b)
+    if not na or not nb:
+        return False
+    if na == nb:
+        return True
+    if min(len(na), len(nb)) / max(len(na), len(nb)) < 0.6:
+        return False
+    ta, tb = set(na.split()), set(nb.split())
+    if ta and tb and (ta <= tb or tb <= ta):
+        return True
+    return (gw._token_jaccard(na, nb) >= 0.85
+            or difflib.SequenceMatcher(None, na, nb).ratio() >= 0.82)
+
+
 def _clusters(ctx, rows, vecs) -> list[list[dict]]:
     """Single-link clusters at SIM_THRESHOLD, strongest pairs first, never
-    joining two different named owners (ruling I6: blank/'unclear' joins any)."""
+    joining two different named owners (ruling I6: blank/'unclear' joins any).
+    vecs=None: lexical pairs (_lexical_same) instead of cosine."""
     n = len(rows)
+    if vecs is None:
+        pairs = [(1.0, i, j) for i in range(n) for j in range(i + 1, n)
+                 if _lexical_same(rows[i]["text"], rows[j]["text"])]
+        return _union(ctx, rows, pairs)
     try:
         import numpy as np
         m = np.array([vecs[r["text"]] for r in rows], dtype="float32")
@@ -705,6 +733,11 @@ def _clusters(ctx, rows, vecs) -> list[list[dict]]:
                 s = sum(a * b for a, b in zip(vi, vecs[rows[j]["text"]]))
                 if s >= SIM_THRESHOLD:
                     pairs.append((s, i, j))
+    return _union(ctx, rows, pairs)
+
+
+def _union(ctx, rows, pairs) -> list[list[dict]]:
+    n = len(rows)
     parent = list(range(n))
     owners = [{_owner_key(ctx, r["owner"])} - {""} for r in rows]
 
@@ -734,7 +767,12 @@ def step_dedup_embed(ctx, tx):
     groups = [sorted(g, key=lambda a: a["id"]) for g in by_source.values() if len(g) > 1]
     if not groups:
         return
-    vecs = _unit_vectors(ctx, [a["text"] for g in groups for a in g])
+    try:
+        vecs = _unit_vectors(ctx, [a["text"] for g in groups for a in g])
+    except Exception as exc:  # noqa: BLE001 — never a permanent failure (I17 N3)
+        log.warning("dedup_embed: embedder unavailable (%s); using the lexical rules", exc)
+        vecs = None
+        tx.counts["dedup:lexical_fallback"] = 1
     for g in groups:
         for cluster in _clusters(ctx, g, vecs):
             keep = min(cluster, key=lambda a: (
@@ -1017,6 +1055,13 @@ BACKUP_MAX_AGE_S = 86400.0
 # rerun is safe, but never in a loop: after this many starts it is `failed`.
 MAX_ATTEMPTS = 3
 FLEET_FLAG = "ingestion_cleanup_enabled"
+# An attended CLI run claims the marker as `running` by cli before it writes.
+# A daemon (relaunched mid-run by KeepAlive) stands off while the claim is
+# younger than this; an older one is a crashed CLI run, shown as interrupted
+# and taken over by the daemon. A full CLI run takes about a minute.
+CLI_CLAIM_TTL_S = 2 * 3600.0
+# embedder_factory may return this to ask for lexical dedupe (no model).
+LEXICAL = object()
 
 
 def read_marker(store) -> dict:
@@ -1053,46 +1098,84 @@ def _integrity(store) -> str:
         return db.execute("PRAGMA integrity_check").fetchone()[0]
 
 
+def _age_s(iso: str, now: float) -> float:
+    try:
+        return now - datetime.fromisoformat(iso).timestamp()
+    except (TypeError, ValueError):
+        return float("inf")
+
+
+def cli_claim_stale(rec: dict, now: float | None = None) -> bool:
+    return (rec.get("state") == "running" and rec.get("by") == "cli"
+            and _age_s(rec.get("at") or "", time.time() if now is None else now)
+            > CLI_CLAIM_TTL_S)
+
+
 def run_migration(store, home, *, embedder_factory=None, last_backup=None,
                   clock=time.time) -> dict:
     """The daemon's one-shot clean-up (ruling I13). Call with the daemon's
-    bulk lock held, after Store.init. Returns the marker it leaves.
+    bulk lock held. Returns the marker it leaves.
 
-    No-op once `done` or `failed` (by either entry point). Otherwise, gated in
-    order: the fleet kill switch `ingestion_cleanup_enabled` (default ON) ->
-    `disabled`; a successful backup in the last 24 h (`last_backup`, epoch
-    seconds; looked up when None) -> `deferred_no_backup`, retried on the
-    next call. Then every step runs, source_brief SKIPPED (not refused) when
-    no brief rule is configured, each step logged to cleanup_log so
+    No-op once `done` or `failed` (by either entry point), and while an
+    attended CLI run holds a fresh `running` claim (CLI_CLAIM_TTL_S; an older
+    claim is a crashed run and is taken over). Otherwise, gated in order: the
+    fleet kill switch `ingestion_cleanup_enabled` (default ON) -> `disabled`;
+    a restore point CAPTURED in the last 24 h (`last_backup`, epoch seconds;
+    looked up via probes.last_restore_point when None) ->
+    `deferred_no_backup` (retried on the next call; `last_backup` None in the
+    marker means this install has never had one). Then Store.init (idempotent
+    and additive: a store swapped in by the wizard restore was never
+    initialised) and every step, source_brief SKIPPED (not refused) when no
+    brief rule is configured, each step logged to cleanup_log so
     `mcpbrain clean-ingestion --undo STEP` works on any install.
-    PRAGMA integrity_check runs after; a failed check or any error records
-    `failed` with the reason and is never retried automatically."""
+
+    The embedder comes from `embedder_factory` (the daemon builds it before
+    taking the bulk lock). A factory that raises or returns None/LEXICAL
+    means lexical dedupe, never a failure. PRAGMA integrity_check runs after;
+    a failed check or any other error records `failed` with the reason and
+    is never retried automatically."""
     rec = read_marker(store)
     if rec.get("state") in ("done", "failed"):
+        return rec
+    now = clock()
+    if (rec.get("state") == "running" and rec.get("by") == "cli"
+            and not cli_claim_stale(rec, now)):
         return rec
     if not config.fleet_flag(home, FLEET_FLAG, True):
         return _write_marker(store, {**rec, "state": "disabled"})
     if last_backup is None:
-        from mcpbrain.probes import last_backup_success
-        last_backup = last_backup_success(home)
-    if last_backup is None or clock() - last_backup > BACKUP_MAX_AGE_S:
+        from mcpbrain.probes import last_restore_point
+        last_backup = last_restore_point(home)
+    if last_backup is None or now - last_backup > BACKUP_MAX_AGE_S:
         return _write_marker(store, {**rec, "state": "deferred_no_backup",
                                      "last_backup": last_backup})
     attempts = int(rec.get("attempts") or 0) + 1
     if rec.get("state") == "running" and attempts > MAX_ATTEMPTS:
         return _write_marker(store, {**rec, "state": "failed", "by": "daemon",
                                      "error": f"interrupted {attempts - 1} time(s)"})
-    with store._connect() as db:
-        rules = sc.Rules.from_config(home, generated_label_ids=_cached_label_ids(db))
+    base = {"by": "daemon", "attempts": attempts}
+    try:
+        store.init()
+        with store._connect() as db:
+            rules = sc.Rules.from_config(home, generated_label_ids=_cached_label_ids(db))
+    except Exception as exc:  # noqa: BLE001 — recorded, never retried in a loop
+        return _write_marker(store, {"state": "failed", **base,
+                                     "error": f"init: {type(exc).__name__}: {exc}"})
     steps = list(STEPS)
     skipped = []
     if not brief_rules_configured(rules):
         steps.remove("source_brief")
         skipped.append("source_brief")
-    base = {"by": "daemon", "steps": steps, "skipped": skipped, "attempts": attempts}
+    base.update(steps=steps, skipped=skipped)
     _write_marker(store, {"state": "running", **base})
+    emb = LEXICAL
+    if embedder_factory is not None:
+        try:
+            emb = embedder_factory() or LEXICAL
+        except Exception as exc:  # noqa: BLE001 — lexical dedupe, not a failure
+            log.warning("ingestion_cleanup: embedder unavailable (%s); "
+                        "dedup_embed uses the lexical rules", exc)
     try:
-        emb = embedder_factory() if embedder_factory is not None else None
         results = run(store, home, steps, dry=False, embedder=emb)
         ok = _integrity(store)
     except Exception as exc:  # noqa: BLE001 — recorded, never retried in a loop
@@ -1120,9 +1203,16 @@ def summary_line(st: dict) -> str:
                 "with `mcpbrain clean-ingestion` (dry run), undo a step with "
                 "`--undo STEP --yes`, or re-run with `--yes --rerun`")
     if state == "deferred_no_backup":
-        return "waiting for a successful backup in the last 24 h"
+        if st.get("last_backup") is None:
+            return "pending: runs after this install's first backup"
+        return "waiting for a restore point captured in the last 24 h"
     if state == "disabled":
         return f"disabled by the `{FLEET_FLAG}` flag"
+    if state == "running" and st.get("by") == "cli":
+        if cli_claim_stale(st):
+            return (f"attended run since {st.get('at', '?')} looks interrupted; "
+                    "the daemon takes over at its next pass")
+        return f"attended run in progress since {st.get('at', '?')}"
     if state == "running":
         return f"running (attempt {st.get('attempts', 1)})"
     return "not yet run"
@@ -1248,24 +1338,34 @@ def main(argv=None, *, embedder=None, dim=None) -> int:
         print(f"[clean] verified snapshot: {snap}")
     store = Store(store_path, dim=dim)
     store.init()
-    # Any attended write claims the shared marker for the CLI first, so the
-    # daemon's one-shot migration never runs on top of (or re-applies after an
-    # undo of) attended work.
+    # The shared marker (I17 N4): claim it as `running` by cli BEFORE writing,
+    # so a daemon relaunched mid-run (the `launchctl stop` KeepAlive trap)
+    # stands off. Afterwards: a FULL run marks the clean-up done; an --undo
+    # claims it done too (the daemon must not re-apply what was undone); a
+    # partial --steps run never marks the whole clean-up done — the prior
+    # state comes back, so the daemon still runs the rest. A crash leaves the
+    # claim, which goes stale after CLI_CLAIM_TTL_S (shown as interrupted).
     prior = read_marker(store)
     claim = {"by": "cli", "steps": [ns.undo] if ns.undo else steps,
              "undo": bool(ns.undo), "full": full_run}
+    _write_marker(store, {**prior, "state": "running", "by": "cli",
+                          "claim": claim})
     results: dict = {}
-    if ns.undo:
-        restored, drifted = undo(store, ns.undo, dry=False)
-        print(f"[clean] --undo {ns.undo}: restored {restored} logged value(s)")
-        if drifted:
-            print(f"[clean] --undo {ns.undo}: SKIPPED {drifted} value(s) changed since "
-                  "the step ran (kept in cleanup_log); undo later steps first — "
-                  "reverse step order")
-    else:
-        results = run(store, str(home), steps, dry=False, embedder=embedder)
-        _print_summary(results, dry=False)
-    ok = _integrity(store)
+    try:
+        if ns.undo:
+            restored, drifted = undo(store, ns.undo, dry=False)
+            print(f"[clean] --undo {ns.undo}: restored {restored} logged value(s)")
+            if drifted:
+                print(f"[clean] --undo {ns.undo}: SKIPPED {drifted} value(s) changed "
+                      "since the step ran (kept in cleanup_log); undo later steps "
+                      "first — reverse step order")
+        else:
+            results = run(store, str(home), steps, dry=False, embedder=embedder)
+            _print_summary(results, dry=False)
+        ok = _integrity(store)
+    except BaseException as exc:
+        _write_marker(store, {**prior, "last_cli": {**claim, "error": repr(exc)}})
+        raise
     if ok != "ok":
         _write_marker(store, {**prior, "state": "failed", **claim,
                               "error": f"integrity_check: {ok}"})
@@ -1273,10 +1373,12 @@ def main(argv=None, *, embedder=None, dim=None) -> int:
         if snap:
             print(f"[clean] restore the snapshot (daemon stopped): {snap}")
         return 2
-    if prior.get("state") == "done" and not full_run:
-        _write_marker(store, {**prior, "last_cli": claim})
-    else:
+    if full_run:
         _write_marker(store, {"state": "done", **claim,
                               "counts": _counts_json(results)})
+    elif ns.undo and prior.get("state") not in ("done", "failed"):
+        _write_marker(store, {"state": "done", **claim})
+    else:
+        _write_marker(store, {**prior, "last_cli": claim})
     print("[clean] integrity_check ok")
     return 0

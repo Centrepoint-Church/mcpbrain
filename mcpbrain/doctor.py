@@ -895,8 +895,9 @@ def reflow_line(store) -> str:
 def ingestion_cleanup_line(store) -> str:
     """One doctor line for the one-shot ingestion clean-up (ruling I13):
     done / failed / deferred (no backup in 24 h) / disabled / running /
-    pending. A deferral is a warning: until it runs, every relation reads as
-    legacy and derived-source actions stay open."""
+    pending. A deferral is a warning once the install HAS had a backup (until
+    it runs, derived-source actions stay open); before the first backup it
+    is just pending."""
     try:
         from mcpbrain import ingestion_cleanup as ic
         st = ic.status(store)
@@ -905,6 +906,10 @@ def ingestion_cleanup_line(store) -> str:
     state = st["state"]
     icon = {"done": "✅", "failed": "❌", "deferred_no_backup": "⚠️",
             "disabled": "➖", "running": "⏳", "pending": "⏳"}.get(state, "⚠️")
+    if state == "deferred_no_backup" and st.get("last_backup") is None:
+        icon = "⏳"          # a new install before its first backup: pending (I17 N6)
+    if ic.cli_claim_stale(st):
+        icon = "⚠️"          # a crashed attended run (I17 N4)
     return f"{icon} {'Clean-up':<16} {ic.summary_line(st)}"
 
 
