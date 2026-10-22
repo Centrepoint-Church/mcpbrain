@@ -1035,6 +1035,26 @@ def owner_email(home) -> str:
     return read_config(home).get("owner_email", "") or ""
 
 
+def _ingest_list(home, key: str) -> list[str]:
+    block = read_config(home).get("ingest") or {}
+    vals = block.get(key) if isinstance(block, dict) else None
+    if not isinstance(vals, list):
+        return []
+    return [str(v).strip() for v in vals if str(v).strip()]
+
+
+def generated_gmail_subject_prefixes(home) -> list[str]:
+    """Subject prefixes of mail the owner's own automation sends to themselves
+    (`ingest.generated_gmail_subject_prefixes`). Default []."""
+    return _ingest_list(home, "generated_gmail_subject_prefixes")
+
+
+def generated_drive_folders(home) -> list[str]:
+    """Drive folder paths holding generated documents
+    (`ingest.generated_drive_folders`). Default []."""
+    return _ingest_list(home, "generated_drive_folders")
+
+
 def prompt_recall_enabled(home) -> bool:
     """Whether the UserPromptSubmit hook injects brain recall (default ON).
 
