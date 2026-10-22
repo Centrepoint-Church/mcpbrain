@@ -1110,9 +1110,11 @@ def summary_line(st: dict) -> str:
     """Short human text for a status dict (doctor, logs)."""
     state = st.get("state") or "pending"
     if state == "done":
-        n = sum(v for c in (st.get("counts") or {}).values() for v in c.values())
+        n = sum(v for c in (st.get("counts") or {}).values()
+                for k, v in c.items() if k.startswith("actions:"))
         skip = f"; skipped {', '.join(st['skipped'])}" if st.get("skipped") else ""
-        return f"done by {st.get('by', '?')} at {st.get('at', '?')} ({n} row(s) changed{skip})"
+        return (f"done by {st.get('by', '?')} at {st.get('at', '?')} "
+                f"({n} open action(s) archived or re-owned{skip})")
     if state == "failed":
         return (f"FAILED ({st.get('error', 'unknown')}) — nothing retries it; inspect "
                 "with `mcpbrain clean-ingestion` (dry run), undo a step with "
