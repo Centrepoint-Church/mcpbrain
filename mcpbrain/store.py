@@ -2013,6 +2013,52 @@ class Store:
                 "    OR source LIKE 'drive:%:resume_removed_ids' "
                 "    OR source LIKE 'drive:%:page_token')")
 
+            # --- ingestion integrity: source classes, per-source support,
+            # reversible clean-up (spec 2026-10-22). Additive only.
+            for _tbl, _cols in (
+                ("chunks", (("dup_of", "TEXT DEFAULT NULL"),)),
+                ("email_entities", (("derived", "INTEGER NOT NULL DEFAULT 0"),)),
+                ("entity_relations", (
+                    ("derived", "INTEGER NOT NULL DEFAULT 0"),
+                    ("legacy_strength", "INTEGER DEFAULT NULL"))),
+                ("entity_observations", (
+                    ("derived", "INTEGER NOT NULL DEFAULT 0"),)),
+                ("actions", (
+                    ("prior_thread_id", "TEXT DEFAULT NULL"),
+                    ("prior_owner", "TEXT DEFAULT NULL"))),
+            ):
+                _have = {r["name"] for r in
+                         db.execute(f"PRAGMA table_info({_tbl})")}
+                for _c, _decl in _cols:
+                    if _c not in _have:
+                        db.execute(f"ALTER TABLE {_tbl} ADD COLUMN {_c} {_decl}")
+            # note_id lookups (consolidated-note provenance); same pattern as
+            # idx_chunks_threadid -- expression comes from _meta_extract.
+            db.execute("CREATE INDEX IF NOT EXISTS idx_chunks_noteid "
+                       f"ON chunks({_meta_extract('$.note_id')})")
+            db.execute(f"""CREATE TABLE IF NOT EXISTS relation_sources(
+                relation_id  INTEGER NOT NULL
+                             REFERENCES entity_relations(id) ON DELETE CASCADE,
+                source_key   TEXT NOT NULL,
+                source_class TEXT NOT NULL,
+                first_seen   TEXT NOT NULL,
+                PRIMARY KEY (relation_id, source_key)){_S}""")
+            db.execute(f"""CREATE TABLE IF NOT EXISTS observation_sources(
+                observation_id INTEGER NOT NULL
+                               REFERENCES entity_observations(id) ON DELETE CASCADE,
+                source_key     TEXT NOT NULL,
+                source_class   TEXT NOT NULL,
+                first_seen     TEXT NOT NULL,
+                PRIMARY KEY (observation_id, source_key)){_S}""")
+            db.execute(f"""CREATE TABLE IF NOT EXISTS cleanup_log(
+                id          INTEGER PRIMARY KEY,
+                step        TEXT,
+                table_name  TEXT,
+                row_key     TEXT,
+                column_name TEXT,
+                old_value   TEXT,
+                at          TEXT){_S}""")
+
     # --- S2 recall-acceptance feedback methods --------------------------------
 
     def record_recall_feedback(self, doc_id: str, session_id: str,
