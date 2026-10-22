@@ -50,6 +50,6 @@ def test_session_arm_uses_the_index_on_an_existing_store(tmp_path):
     with s._connect() as db:
         plan = "\n".join(
             str(r[3]) for r in db.execute(f"EXPLAIN QUERY PLAN {sql}",
-                                          ["x", "x", "x", "x", "x"]).fetchall())
+                                          ["x"] * 6).fetchall())
     assert "idx_chunks_sessionid" in plan
     assert "SCAN chunks" not in plan
