@@ -262,3 +262,26 @@ def test_dup_own_change_clears_dup_of(tmp_path):
     _put(s, "gdrive-B-0", BODY, _md("B"))
     _put(s, "gdrive-B-0", BODY + " Reply.", _md("B"))
     assert _row(s, "gdrive-B-0") == (0, "", None)
+
+
+def test_reflow_same_owner_canonical_never_self_references(tmp_path):
+    """Canonical and duplicate in the SAME file; the canonical moves to a new
+    id. No chunk may end up dup_of itself."""
+    s = _store(tmp_path)
+    _put(s, "gdrive-D-0", BODY, _md("D", 0, 2))
+    s.mark_enriched(["gdrive-D-0"])
+    _put(s, "gdrive-D-1", BODY, _md("D", 1, 2))
+    assert _row(s, "gdrive-D-1") == (1, "duplicate", "gdrive-D-0")
+    _reflow(s, "D", ["Preface. " * 30, BODY, BODY])
+    with s._connect() as db:
+        selfref = db.execute(
+            "SELECT doc_id FROM chunks WHERE dup_of=doc_id").fetchall()
+        rows = {r["doc_id"]: (r["dup_of"], r["enrich_state"] or "") for r in db.execute(
+            "SELECT doc_id, dup_of, enrich_state FROM chunks WHERE doc_id LIKE 'gdrive-D-%'")}
+    assert not selfref
+    for d, (dup, state) in rows.items():
+        assert s.canonical_for(d) == (dup or d)
+        if dup is None:
+            assert state != "duplicate", (d, state)
+        else:
+            assert rows.get(dup, (None,))[0] is None  # canonical is not itself a dup

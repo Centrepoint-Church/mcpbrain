@@ -4281,7 +4281,10 @@ class Store:
                             else "episodic",
                             c.doc_id))
                 dup = old_dups.get(c.content_hash)
-                if dup and dup != c.doc_id:
+                # Store the OLD canonical id (the dup_of remap below translates
+                # it exactly once) but judge self-reference on where it lands:
+                # a canonical in this same owner may move onto this very id.
+                if dup and plan.remap.get(dup, dup) != c.doc_id:
                     db.execute("UPDATE chunks SET dup_of=? WHERE doc_id=?",
                                (dup, c.doc_id))
                 else:
@@ -4333,6 +4336,11 @@ class Store:
             self._release_stale_dups(
                 db, list(dict.fromkeys(list(plan.remap.values()) + new_ids
                                        + list(plan.deletes))))
+            # Final guard: a chunk is never its own duplicate.
+            db.execute(
+                "UPDATE chunks SET dup_of=NULL, enrich_state=CASE WHEN "
+                "enrich_state='duplicate' THEN '' ELSE enrich_state END "
+                "WHERE dup_of=doc_id")
             db.executemany(
                 "INSERT INTO reflow_map(owner, old_doc_id, new_doc_id, reason, at) "
                 "VALUES(?,?,?,?,?)",
