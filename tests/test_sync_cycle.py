@@ -1081,7 +1081,7 @@ def test_cycle_discovers_and_publishes_shared_drive_items(tmp_path, monkeypatch)
     s.init()
     order = []
 
-    def fake_discover_shared_drives(service, store, *, pin, budget=None):
+    def fake_discover_shared_drives(service, store, *, pin, budget=None, exclude=()):
         order.append("discover_shared")
         store.enqueue_and_advance(
             [{"ref_id": "f1", "version": "1", "event": "upsert",
@@ -1176,7 +1176,7 @@ def test_run_sync_cycle_flushes_skip_report_per_shared_drive(tmp_path, monkeypat
     s = Store(tmp_path / "c.sqlite3", dim=4)
     s.init()
 
-    def fake_discover_shared_drives(service, store, *, pin, budget=None):
+    def fake_discover_shared_drives(service, store, *, pin, budget=None, exclude=()):
         store.enqueue_and_advance(
             [{"ref_id": "f1", "version": "1", "event": "upsert",
               "modified_at": "2026-09-08T00:00:00"}], source="drive:D1", cursor="2")

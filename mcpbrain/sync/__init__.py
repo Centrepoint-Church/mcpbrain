@@ -247,8 +247,18 @@ def run_sync_cycle(store, embedder, *, gmail_service=None,
                 # identically to how it already fails inside that call.
                 all_drive_ids = [d.get("id") for d in list_shared_drives(drive_service)
                                 if d.get("id")]
+                # mcpbrain's OWN drives (backups, fleet folder, escrow) are
+                # never a document source -- see mcpbrain/infra_drives.py. Taken
+                # out of the enumeration itself, so discovery, the work handler
+                # (drives_fs), publish, backfill AND note_drive_presence all see
+                # the same set; their content is removed below.
+                from mcpbrain import infra_drives
+                infra_ids = infra_drives.resolve(
+                    home, store, drive_service, listed_drive_ids=all_drive_ids)
+                all_drive_ids = [d for d in all_drive_ids if d not in infra_ids]
                 discovered_sd = discover_shared_drives(
-                    drive_service, store, pin=pin, budget=disc_budget)
+                    drive_service, store, pin=pin, budget=disc_budget,
+                    exclude=infra_ids)
                 discovered.update(
                     {f"drive:{did}": n for did, n in discovered_sd.items()})
                 from mcpbrain.fleet_storage import cache_storage_factory
@@ -290,6 +300,18 @@ def run_sync_cycle(store, embedder, *, gmail_service=None,
                 # exact call ran unlocked and was flagged in adversarial
                 # review; mirrored here deliberately).
                 from mcpbrain import ingest_cache
+                # Remove anything already taken from an infrastructure drive,
+                # through the revocation path (purge_drive + sync state), BEFORE
+                # note_drive_presence: the purge also forgets the drive, so it
+                # is never counted as an absent drive afterwards.
+                for did in sorted(infra_ids):
+                    try:
+                        with (bulk_section or nullcontext)():
+                            ingest_cache.purge_infrastructure_drive(
+                                store, did, fleet_storage=storage_factory(did))
+                    except Exception as exc:  # noqa: BLE001 — retried next cycle
+                        log.warning("sync: could not purge infrastructure drive "
+                                    "%s (will retry): %s", did, exc)
                 present = all_drive_ids
                 with (bulk_section or nullcontext)():
                     revoked_now = ingest_cache.note_drive_presence(

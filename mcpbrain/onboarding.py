@@ -243,6 +243,13 @@ def run_bootstrap(home, store, *, drive_service=None, fleet_storage=None,
         fleet_storage = make_fleet_storage(home, drive_service)
     if drives is None:
         drives = enumerate_drives(drive_service) if cache_on else []
+    # mcpbrain's own backup/fleet/escrow drives are never a document source,
+    # so their cached artifacts are never imported either (infra_drives.py).
+    if drives:
+        from mcpbrain import infra_drives
+        infra_ids = infra_drives.resolve(home, store, drive_service,
+                                         listed_drive_ids=drives)
+        drives = [d for d in drives if d not in infra_ids]
     # Build the per-drive cache-storage factory only on the real path (a Drive
     # service is present). When callers inject fleet_storage directly without a
     # service, leave it None so bootstrap_baseline falls back to that storage.

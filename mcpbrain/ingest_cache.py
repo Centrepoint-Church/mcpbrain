@@ -956,3 +956,62 @@ def note_drive_presence(store, present_ids, *, threshold: int = 3) -> dict:
     known -= set(purged)
     store.set_meta(_KNOWN_DRIVES_META, json.dumps(sorted(known)))
     return {"purged": purged, "tracked": len(known)}
+
+
+# -- mcpbrain's own infrastructure drives ------------------------------------
+
+def _infra_purged_key(drive_id: str) -> str:
+    return f"ingest_cache.infra_purged:{drive_id}"
+
+
+def _infra_cache_cleared_key(drive_id: str) -> str:
+    return f"ingest_cache.infra_cache_cleared:{drive_id}"
+
+
+def purge_infrastructure_drive(store, drive_id, *, fleet_storage=None) -> dict | None:
+    """Remove everything ingested from a drive that holds mcpbrain's OWN
+    infrastructure (infra_drives.resolve), through the revocation path:
+    purge_drive (relations invalidated bitemporally, then chunks/vectors/FTS
+    deleted), store.purge_drive_sync_state (queue, cursors, pending publishes),
+    and the drive is forgotten by note_drive_presence's bookkeeping.
+
+    Runs the local purge once per drive (a meta marker), not every cycle:
+    purge_drive's lookup is an unindexed metadata scan. It runs again if the
+    drive somehow reappears in the known-drive set. `fleet_storage` is that
+    drive's ingest-cache storage; its artifacts are deleted best-effort until
+    one pass succeeds (a transient Drive failure retries next cycle).
+
+    Returns the purge summary when the local purge ran this call, else None."""
+    out = None
+    try:
+        known = set(json.loads(store.get_meta(_KNOWN_DRIVES_META) or "[]"))
+    except (ValueError, TypeError):
+        known = set()
+    if drive_id in known or not store.get_meta(_infra_purged_key(drive_id)):
+        out = purge_drive(store, drive_id)
+        out["sync_state"] = store.purge_drive_sync_state(drive_id)
+        if drive_id in known:
+            known.discard(drive_id)
+            store.set_meta(_KNOWN_DRIVES_META, json.dumps(sorted(known)))
+        store.delete_meta(_absence_key(drive_id))
+        store.set_meta(_infra_purged_key(drive_id),
+                       datetime.now(timezone.utc).isoformat())
+        log.warning("ingest_cache: drive %s holds mcpbrain's own backups/fleet "
+                    "data and is never ingested; removed %d chunk(s) already "
+                    "taken from it", drive_id, out["chunks_deleted"])
+    if fleet_storage is not None and not store.get_meta(
+            _infra_cache_cleared_key(drive_id)):
+        try:
+            paths = fleet_storage.list_paths(CACHE_DIR + "/")
+            for path in paths:
+                fleet_storage.delete(path)
+        except Exception as exc:  # noqa: BLE001 — best-effort, retried next cycle
+            log.info("ingest_cache: could not clear the ingest cache of "
+                     "infrastructure drive %s (will retry): %s", drive_id, exc)
+        else:
+            store.set_meta(_infra_cache_cleared_key(drive_id),
+                           datetime.now(timezone.utc).isoformat())
+            if paths:
+                log.warning("ingest_cache: deleted %d cached artifact(s) for "
+                            "infrastructure drive %s", len(paths), drive_id)
+    return out

@@ -833,10 +833,11 @@ def discover_shared_drive(service, store, drive_id: str, source: str, *,
     return enqueued
 
 
-def discover_shared_drives(service, store, *, pin, budget=None) -> dict:
+def discover_shared_drives(service, store, *, pin, budget=None, exclude=()) -> dict:
     """Enumerate pinned Shared Drives and discover each. Per-drive failures
     are isolated -- one broken drive must not abort the others, exactly as
-    today's sync_shared_drives.
+    today's sync_shared_drives. Drives in `exclude` (mcpbrain's own
+    infrastructure drives, infra_drives.resolve) are never listed for changes.
 
     Deliberately does not run note_drive_presence/revocation -- that stays
     an unmigrated, per-cycle, full-enumeration concern (see this plan's
@@ -846,7 +847,7 @@ def discover_shared_drives(service, store, *, pin, budget=None) -> dict:
     out = {}
     for d in drives:
         drive_id = d.get("id")
-        if not drive_id:
+        if not drive_id or drive_id in exclude:
             continue
         source = f"drive:{drive_id}"
         try:
