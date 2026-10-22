@@ -331,3 +331,79 @@ def test_session_notes_are_cold(tmp_path):
     # cold chunks never reach the enrichment backlog
     backlog = {c["doc_id"] for c in s.unenriched_chunks(limit=1000)}
     assert not backlog & {r["doc_id"] for r in sess}
+
+
+def _rows_by_id(s, prefix="note-session-"):
+    with s._connect() as db:
+        return {r["doc_id"]: dict(r) for r in db.execute(
+            "SELECT doc_id, content_hash, embedded, metadata, enrich_state "
+            "FROM chunks WHERE doc_id LIKE ?", (prefix + "%",))}
+
+
+def test_appended_recapture_keeps_history_and_leading_pieces(tmp_path):
+    s = _store(tmp_path)
+    first = "user: FIRST TURN marker\n\n" + "\n\n".join(
+        f"assistant: reply {i} " + "y" * 400 for i in range(70))   # > 24k chars
+    assert len(first) > 24000
+    _spool(tmp_path, "cap-1.json", _session_env(first))
+    drain.drain_captures(s, home=tmp_path)
+    before = _rows_by_id(s)
+    assert len(before) > 3
+    with s._connect(write=True) as db:   # pretend everything was embedded
+        db.execute("UPDATE chunks SET embedded=1")
+    env2 = _session_env(first + "\n\nuser: appended turn")
+    env2["captured_at"] = "2026-10-22T02:00:00Z"
+    _spool(tmp_path, "cap-2.json", env2)
+    assert drain.drain_captures(s, home=tmp_path) == 1
+    notes = s.note_chunks()
+    assert len(notes) == 1
+    assert "FIRST TURN marker" in notes[0]["text"]
+    assert notes[0]["text"].endswith("appended turn")
+    after = _rows_by_id(s)
+    last_old = max(before, key=lambda d: int(d.rsplit("-", 1)[1]))
+    for doc_id, row in before.items():
+        if doc_id == last_old:
+            continue
+        assert after[doc_id]["content_hash"] == row["content_hash"]
+        assert after[doc_id]["embedded"] == 1          # no re-embed
+        assert json.loads(after[doc_id]["metadata"])["chunk_total"] == len(after)
+    assert all(r["enrich_state"] == "cold" for r in after.values())
+
+
+def test_identical_session_recapture_is_noop(tmp_path):
+    s = _store(tmp_path)
+    _spool(tmp_path, "cap-1.json", _session_env("user: same body"))
+    drain.drain_captures(s, home=tmp_path)
+    _spool(tmp_path, "cap-2.json", _session_env("user: same body"))
+    assert drain.drain_captures(s, home=tmp_path) == 0
+    assert len(s.recent_changes(10)) == 1
+
+
+def test_older_session_capture_does_not_overwrite_newer(tmp_path):
+    s = _store(tmp_path)
+    newer = _session_env("user: newer and longer body")
+    newer["captured_at"] = "2026-10-22T05:00:00Z"
+    _spool(tmp_path, "cap-1.json", newer)
+    drain.drain_captures(s, home=tmp_path)
+    older = _session_env("user: older body")
+    older["captured_at"] = "2026-10-22T04:00:00Z"
+    _spool(tmp_path, "cap-2.json", older)
+    assert drain.drain_captures(s, home=tmp_path) == 0
+    assert not list((tmp_path / "capture_inbox").glob("cap-*.json"))  # consumed
+    assert s.note_chunks()[0]["text"].endswith("newer and longer body")
+
+
+def test_replace_note_pieces_is_one_transaction(tmp_path):
+    s = _store(tmp_path)
+    base = "note-session-abc"
+    m = {"source": "note", "note_id": base, "tags": "session"}
+    s.replace_note_pieces(base, [(f"{base}-{i}", f"t{i}", {**m, "chunk_index": i})
+                                 for i in range(3)])
+    assert s.replace_note_pieces(base, [(base, "whole", {**m, "chunk_index": 0})])
+    rows = _rows_by_id(s)
+    assert list(rows) == [base] and rows[base]["enrich_state"] == "cold"
+    # a failure mid-way rolls back everything: nothing hot, nothing deleted
+    import pytest
+    with pytest.raises(Exception):
+        s.replace_note_pieces(base, [(f"{base}-0", "a", m), (f"{base}-1", None, m)])
+    assert list(_rows_by_id(s)) == [base]

@@ -556,3 +556,53 @@ def test_is_maintenance_text_detects_scheduled_marker():
     assert not session_hooks.is_maintenance_text("user: please plan the migration")
     assert not session_hooks.is_maintenance_text(
         "user: what is a <scheduled-task> tag?\n\nassistant: it marks runs")
+
+
+def test_long_session_with_id_keeps_whole_history(tmp_path, monkeypatch):
+    big = "x" * 30000
+    lines = [_turn("user", "FIRST TURN marker please plan"),
+             _turn("assistant", big), _turn("user", "and now the last turn")]
+    got = _capture(tmp_path, monkeypatch, lines)
+    assert "FIRST TURN marker" in got[0]["content"]
+    assert len(got[0]["content"]) > 30000
+
+
+def test_legacy_capture_without_any_session_id_keeps_tail_cap(tmp_path, monkeypatch):
+    lines = [{"type": "user", "message": {"role": "user", "content": "FIRST TURN marker"}},
+             {"type": "assistant", "message": {"role": "assistant", "content": "x" * 30000}},
+             {"type": "user", "message": {"role": "user", "content": "last turn here"}}]
+    got = _capture(tmp_path, monkeypatch, lines, hook_extra={"session_id": ""})
+    assert "claude_session_id" not in got[0]
+    assert len(got[0]["content"]) == session_hooks._MAX_CONTENT
+    assert "FIRST TURN marker" not in got[0]["content"]
+
+
+def test_title_uses_session_start_date(tmp_path, monkeypatch):
+    lines = [_turn(r, t, timestamp="2026-01-02T03:04:05Z") for r, t in _SUBSTANTIAL]
+    got = _capture(tmp_path, monkeypatch, lines)
+    assert got[0]["title"] == "Session sess-ful 2026-01-02"
+
+
+def test_entrypoint_denylist_is_exact():
+    assert session_hooks.is_non_interactive_entrypoint("sdk-cli")
+    assert session_hooks.is_non_interactive_entrypoint("sdk-ts")
+    assert session_hooks.is_non_interactive_entrypoint("sdk-py")
+    for ep in ("cli", "claude-desktop", "claude-vscode", "", None, "sdk-something-new"):
+        assert not session_hooks.is_non_interactive_entrypoint(ep)
+
+
+def test_skipped_transcript_logs_why(tmp_path, monkeypatch, caplog):
+    import logging
+    caplog.set_level(logging.INFO, logger="mcpbrain.session_hooks")
+    side = [_turn(r, t, isSidechain=True) for r, t in _SUBSTANTIAL]
+    assert _capture(tmp_path, monkeypatch, side) == []
+    assert "sidechain" in caplog.text
+    caplog.clear()
+    sdk = [_turn(r, t, entrypoint="sdk-cli") for r, t in _SUBSTANTIAL]
+    assert _capture(tmp_path, monkeypatch, sdk) == []
+    assert "entrypoint" in caplog.text
+    caplog.clear()
+    sched = [_turn("user", '<scheduled-task name="x" file="y"> go')] + \
+        [_turn(r, t) for r, t in _SUBSTANTIAL]
+    assert _capture(tmp_path, monkeypatch, sched) == []
+    assert "scheduled tag" in caplog.text

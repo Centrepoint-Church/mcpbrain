@@ -27,6 +27,7 @@ All are best-effort and never hard-fail a session.
 from __future__ import annotations
 
 import json
+import logging
 import sys
 import urllib.request
 from datetime import date, datetime, timezone
@@ -35,10 +36,16 @@ from pathlib import Path
 from mcpbrain import config, probes
 from mcpbrain.capture import write_capture
 
+log = logging.getLogger(__name__)
+
 _MAX_LINES = 8
 _MIN_TURNS = 2          # at least this many user turns to count as "substantial"
 _MIN_CHARS = 200        # ...or this much user text
-# Upper bound on captured conversation text. Matches the enrich spool's per-shard
+# Upper bound on captured conversation text for the LEGACY path only (a capture
+# with no Claude session id). A capture that carries claude_session_id sends the
+# whole rendered body: it becomes the session's single note, replacing the last
+# capture, so a tail cap there would drop the start of every long session for
+# good (36% of local transcripts exceed it). Legacy rationale: matches the enrich spool's per-shard
 # char budget so a session lands as one shard when it fits; longer sessions keep
 # the most recent tail (where decisions/outcomes concentrate) and the pipeline
 # shards the rest. Far larger than the old 2000-char user-only clip on purpose.
@@ -267,12 +274,13 @@ def _action_needed(home: str) -> str:
 # are the brain talking to itself: capturing them minted notes about the
 # brain's own housekeeping (170 live notes).
 _SCHEDULED_TASK_MARKER = "<scheduled-task"
-_NON_INTERACTIVE_ENTRYPOINT_PREFIXES = ("sdk",)
+# Exact denylist of observed non-interactive entrypoints -- an unknown value is
+# treated as interactive, so a new interactive surface is never silently lost.
+_NON_INTERACTIVE_ENTRYPOINTS = frozenset({"sdk-cli", "sdk-ts", "sdk-py"})
 
 
 def is_non_interactive_entrypoint(entrypoint) -> bool:
-    ep = str(entrypoint or "").strip().lower()
-    return bool(ep) and ep.startswith(_NON_INTERACTIVE_ENTRYPOINT_PREFIXES)
+    return str(entrypoint or "").strip().lower() in _NON_INTERACTIVE_ENTRYPOINTS
 
 
 def is_maintenance_text(text: str) -> bool:
@@ -297,7 +305,7 @@ def _read_transcript(transcript_path: str) -> tuple[list[tuple[str, str]], dict]
     Empty turns on any read/parse failure (missing file, bad JSON) so callers
     degrade to "nothing to capture" rather than raising into a hook.
     """
-    info = {"session_id": "", "maintenance": False}
+    info = {"session_id": "", "maintenance": False, "why": "", "started": ""}
     try:
         raw = Path(transcript_path).read_text()
     except OSError:
@@ -314,8 +322,10 @@ def _read_transcript(transcript_path: str) -> tuple[list[tuple[str, str]], dict]
             continue
         if not info["session_id"] and isinstance(ev.get("sessionId"), str):
             info["session_id"] = ev["sessionId"]
+        if not info["started"] and isinstance(ev.get("timestamp"), str):
+            info["started"] = ev["timestamp"]
         if is_non_interactive_entrypoint(ev.get("entrypoint")):
-            info["maintenance"] = True
+            _flag(info, "entrypoint")
         msg = ev.get("message") or {}
         if not isinstance(msg, dict):
             continue
@@ -325,6 +335,8 @@ def _read_transcript(transcript_path: str) -> tuple[list[tuple[str, str]], dict]
         if ev.get("isSidechain") is True:
             saw_side = True
             continue
+        if ev.get("isCompactSummary") is True:
+            continue   # compaction's lossy summary of turns already in the file
         saw_main = True
         c = msg.get("content")
         if isinstance(c, str):
@@ -341,12 +353,17 @@ def _read_transcript(transcript_path: str) -> tuple[list[tuple[str, str]], dict]
                     or (isinstance(origin, dict)
                         and origin.get("subkind") == "scheduled-trigger")
                     or ev.get("turnOrigin") == "scheduled"):
-                info["maintenance"] = True
+                _flag(info, "scheduled tag")
         if text:
             turns.append((role, text))
     if saw_side and not saw_main:
-        info["maintenance"] = True   # a subagent's own transcript
+        _flag(info, "sidechain")   # a subagent's own transcript
     return turns, info
+
+
+def _flag(info: dict, why: str) -> None:
+    info["maintenance"] = True
+    info["why"] = info["why"] or why
 
 
 def _read_transcript_turns(transcript_path: str) -> list[tuple[str, str]]:
@@ -373,6 +390,7 @@ def _capture_session(home: str, transcript_path: str, *, session_id: str,
         return
     turns, info = _read_transcript(transcript_path)
     if info["maintenance"]:
+        log.info("session capture skipped (%s): %s", info["why"], transcript_path)
         return
     user_turns = [t for r, t in turns if r == "user"]
     joined_user = " ".join(user_turns)
@@ -381,17 +399,21 @@ def _capture_session(home: str, transcript_path: str, *, session_id: str,
     body = "\n\n".join(f"{role}: {text}" for role, text in turns).strip()
     if not body:
         return  # no usable text -> nothing to capture
-    if len(body) > _MAX_CONTENT:
-        body = body[-_MAX_CONTENT:]  # keep the most recent context
     sid = (session_id or "").strip()
     if not sid or sid == "unknown":
         sid = info["session_id"]
+    if not sid and len(body) > _MAX_CONTENT:
+        body = body[-_MAX_CONTENT:]  # legacy path only: keep the recent tail
     stamp = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+    # Title date = the session's START (first transcript timestamp), so a
+    # re-capture on a later day keeps the same title -- and so the same
+    # leading piece, which is what lets the drain skip re-embedding it.
+    day = (info["started"] or stamp)[:10] if sid else stamp[:10]
     envelope = {
         "kind": "ingest",
         "source": source,
         "captured_at": stamp,
-        "title": f"Session {(sid or 'unknown')[:8]} {stamp[:10]}",
+        "title": f"Session {(sid or 'unknown')[:8]} {day}",
         "content": body,
         "tags": tags,
         "observation_type": "note",
@@ -423,13 +445,15 @@ def session_end(home: str, stdin=None) -> None:
 
 
 def pre_compact(home: str, stdin=None) -> None:
-    """Capture the full-fidelity thread BEFORE compaction summarises it away.
+    """Capture the session BEFORE compaction, as a safety net.
 
-    Auto-compaction replaces the detailed transcript with a lossy summary. If
-    the session later ends, session_end only sees that compacted transcript —
-    so the decisions/facts from the pre-compaction thread would be lost. This
-    snapshots them to the brain first. Tagged distinctly so the two captures of
-    one long session are distinguishable downstream.
+    Same capture as session_end and the same single note: the envelope carries
+    the session's claude_session_id, so the drain REPLACES the session's note
+    rather than adding a second one, and the later session_end capture
+    (whose transcript file still holds the pre-compaction turns) supersedes
+    this one. Worth taking anyway: a session that never ends cleanly (crash,
+    killed terminal) would otherwise leave nothing. The "pre-compact" tag only
+    records which hook wrote the current version.
     """
     stdin = stdin or sys.stdin
     try:

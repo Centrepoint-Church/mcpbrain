@@ -776,13 +776,20 @@ def _is_session_note(doc_id: str, meta: dict) -> bool:
     return classify(doc_id, meta, Rules()) == SourceClass.SESSION
 
 
-def _prior_note_ids(store, base_doc_id: str) -> list[str]:
-    """Every chunk row currently holding a piece of `base_doc_id`: the pieces
-    stamped with its note_id, plus the bare id itself."""
-    ids = list(store._note_sibling_ids(base_doc_id))
-    if base_doc_id not in ids and store.get_chunk(base_doc_id) is not None:
-        ids.append(base_doc_id)
-    return ids
+class _SkipCapture(Exception):
+    """An envelope that is valid but deliberately not applied (it is
+    consumed, not retried)."""
+
+
+def _older_than_stored(store, base_doc_id: str, captured_at: str) -> bool:
+    """True when the stored note's captured_at is strictly newer than this
+    capture's. Both are the same UTC `...Z` ISO stamp, so they compare as
+    strings; a missing stamp on either side never blocks the write."""
+    if not captured_at:
+        return False
+    meta = store.get_note_metadata(base_doc_id) or {}
+    stored = str(meta.get("captured_at") or "")
+    return bool(stored) and stored > captured_at
 
 
 def drain_captures(store, *, home=None, budget=None, bulk_section=None) -> int:
@@ -867,13 +874,21 @@ def drain_captures(store, *, home=None, budget=None, bulk_section=None) -> int:
                     base_meta["claude_session_id"] = claude_sid
                 is_session = _is_session_note(base_doc_id, base_meta)
                 try:
+                    if claude_sid and _older_than_stored(
+                            store, base_doc_id, env.get("captured_at", "")):
+                        # A retried OLDER capture must not overwrite a newer
+                        # one; it is consumed, not retried.
+                        log.info("capture: %s is older than the stored session "
+                                 "note %s; skipped", path.name, base_doc_id)
+                        raise _SkipCapture
                     # Notes used to bypass chunking entirely: one row per note,
                     # up to 133,791 chars, of which only the first ~2,000 were
                     # ever embedded (the BGE window). Same shape as
                     # consolidation.write_consolidated_note: a note that fits one
                     # chunk keeps the BARE id, so the common case needs no
-                    # migration. chash stays the FULL-note hash on every piece, so
-                    # re-capturing identical content is still a no-op.
+                    # migration. chash stays the FULL-note hash on every piece of an
+                    # ordinary note, so re-capturing identical content is still a
+                    # no-op (session notes hash per piece; see below).
                     #
                     # split_lossless, NOT chunk_text. The note path is the one
                     # caller that needs the split to round-trip: note_chunks()
@@ -899,32 +914,32 @@ def drain_captures(store, *, home=None, budget=None, bulk_section=None) -> int:
                         pieces = [text]
                     if len(pieces) > 1:
                         base_meta = {**base_meta, "split": "lossless"}
-                    changed = False
-                    new_ids = []
+                    built = []
                     for i, piece in enumerate(pieces):
                         doc_id = (base_doc_id if len(pieces) == 1
                                   else f"{base_doc_id}-{i}")
-                        new_ids.append(doc_id)
-                        meta = {**base_meta, "chunk_index": i,
-                                "chunk_total": len(pieces)}
-                        if store.upsert_chunk(doc_id, piece, chash, meta):
-                            changed = True
-                    if claude_sid:
-                        # Replace, not append: pieces of the previous capture
-                        # beyond the new piece count (or the bare id when the
-                        # note grew past one piece) are deleted, never orphaned.
-                        stale = [d for d in _prior_note_ids(store, base_doc_id)
-                                 if d not in set(new_ids)]
-                        if stale and store.delete_chunks(stale):
-                            changed = True
+                        built.append((doc_id, piece, {**base_meta, "chunk_index": i,
+                                                      "chunk_total": len(pieces)}))
                     if is_session:
-                        # Sessions stay searchable but are never mined: they
-                        # are the assistant's account of work, not evidence.
-                        store.set_enrich_state(new_ids, "cold")
+                        # Sessions stay searchable but are never mined: they are
+                        # the assistant's account of work, not evidence. One
+                        # transaction upserts the pieces (per-piece hashes, so an
+                        # appended re-capture leaves the leading pieces and their
+                        # vectors alone), sets them cold, and deletes whatever
+                        # the previous capture had beyond them.
+                        changed = store.replace_note_pieces(
+                            base_doc_id, built, enrich_state="cold")
+                    else:
+                        changed = False
+                        for doc_id, piece, meta in built:
+                            if store.upsert_chunk(doc_id, piece, chash, meta):
+                                changed = True
                     if changed:
                         store.record_change("capture_ingest", ref_id=base_doc_id,
                                             summary=f"Saved note '{env['title'][:60]}'")
                         applied += 1
+                except _SkipCapture:
+                    pass
                 except Exception as exc:
                     log.error("capture: ingest failed for %s: %s", path.name, exc)
                     file_ok = False

@@ -2625,6 +2625,71 @@ class Store:
         with self._connect(write=True) as db:
             return self._delete_chunk_rows(db, doc_ids)
 
+    def replace_note_pieces(self, base_id: str, pieces, *,
+                            enrich_state: str = "cold") -> bool:
+        """Make `pieces` the whole of note `base_id`, in ONE transaction.
+
+        `pieces` is [(doc_id, text, metadata), ...]; each piece's content_hash
+        is the hash of ITS OWN text, so a re-capture that only appends leaves
+        the unchanged leading pieces byte-identical -- no rewrite, no
+        re-embed. An unchanged piece whose metadata moved (chunk_total grows
+        as the note does) gets its metadata updated in place, embedded state
+        kept (fts_context_version reset only when the contextual prefix
+        changed, as patch_chunk_metadata does). Every piece is set to
+        `enrich_state`, and every other row of the note -- carrying
+        metadata.note_id == base_id, or the bare base_id itself -- is
+        deleted through the delete_chunks path. Atomic, so a failure cannot
+        leave a piece hot or a surplus piece orphaned.
+
+        Returns True when any row was inserted, rewritten or deleted.
+        """
+        from mcpbrain.chunking import content_hash
+        from mcpbrain.embed import contextual_prefix
+        pieces = list(pieces)
+        keep = {d for d, _, _ in pieces}
+        changed = False
+        with self._connect(write=True) as db:
+            for doc_id, text, meta in pieces:
+                h = content_hash(text)
+                row = db.execute(
+                    "SELECT content_hash, metadata FROM chunks WHERE doc_id=?",
+                    (doc_id,)).fetchone()
+                if row is None:
+                    db.execute(
+                        "INSERT INTO chunks(doc_id,text,content_hash,metadata) "
+                        "VALUES(?,?,?,?)", (doc_id, text, h, json.dumps(meta)))
+                    changed = True
+                elif row["content_hash"] != h:
+                    db.execute(
+                        "UPDATE chunks SET text=?,content_hash=?,metadata=?,"
+                        "embedded=0,enriched=0 WHERE doc_id=?",
+                        (text, h, json.dumps(meta), doc_id))
+                    changed = True
+                else:
+                    try:
+                        old = json.loads(row["metadata"] or "{}")
+                    except ValueError:
+                        old = {}
+                    if old != meta:
+                        reset = contextual_prefix(old) != contextual_prefix(meta)
+                        db.execute(
+                            "UPDATE chunks SET metadata=?"
+                            + (", fts_context_version=0" if reset else "")
+                            + " WHERE doc_id=?", (json.dumps(meta), doc_id))
+                db.execute("UPDATE chunks SET enrich_state=? WHERE doc_id=?",
+                           (enrich_state, doc_id))
+            prior = [r["doc_id"] for r in db.execute(
+                # UNION, not OR: an OR across the note_id expression index
+                # and the primary key plans as a full SCAN chunks.
+                "SELECT doc_id FROM chunks WHERE "
+                + _meta_extract("$.note_id") + " = ? "
+                "UNION SELECT doc_id FROM chunks WHERE doc_id = ?",
+                (base_id, base_id)).fetchall()]
+            surplus = [d for d in prior if d not in keep]
+            if surplus and self._delete_chunk_rows(db, surplus):
+                changed = True
+        return changed
+
     @staticmethod
     def _delete_chunk_rows(db, doc_ids: list[str]) -> int:
         """delete_chunks' body, on an open write connection (so a caller can
