@@ -1024,3 +1024,16 @@ def test_gmail_404_archives_actions(tmp_path):
         assert db.execute("SELECT derived FROM email_entities WHERE message_id='m1'").fetchone()[0] == 1
         assert db.execute("SELECT derived FROM email_entities WHERE message_id='m2'").fetchone()[0] == 0
         assert db.execute("SELECT email_count FROM entities WHERE id='dana-okafor'").fetchone()[0] == 0
+
+
+def test_gmail_404_keeps_actions_when_thread_still_has_chunks(tmp_path):
+    store = Store(tmp_path / "test.sqlite3", dim=4)
+    store.init()
+    store.upsert_chunk("gmail-m1-body-0", "a", "h1", {"message_id": "m1", "thread_id": "m1"})
+    store.upsert_chunk("gmail-m2-body-0", "b", "h2", {"message_id": "m2", "thread_id": "m1"})
+    a, _ = _seed_source(store, "m1", "m1")
+    err = HttpError(httplib2.Response({"status": 404}), b"gone")
+    svc = FakeService(profile_hid="1000", messages={"m1": err})
+    handle_gmail_item(svc, store, {"ref_id": "m1", "version": "", "event": "upsert",
+                                   "modified_at": "2026-09-04T00:00:00"})
+    assert _action(store, a)["status"] == "open"

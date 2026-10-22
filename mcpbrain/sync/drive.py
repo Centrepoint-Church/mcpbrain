@@ -960,7 +960,8 @@ def handle_drive_item(service, store, item, *, folder_cache=None,
             # Runs even with no chunks left: the file's actions/links may
             # outlive its chunks (an earlier removal, a sweep).
             store.invalidate_sources_for_docs(
-                doc_ids, source_ids=[fid, *doc_ids], reason="source_gone")
+                doc_ids, source_ids=[fid, *doc_ids], file_ids=[fid],
+                reason="source_gone")
             if doc_ids:
                 store.delete_chunks(doc_ids)
         return
@@ -1007,12 +1008,16 @@ def handle_shared_drive_item(service, store, item, *, fleet_storage, pin,
     fid = item["ref_id"]
     if item["event"] == "remove":
         with bulk_section():
-            doc_ids = store.doc_ids_for_file(fid)
-            # Runs even with no chunks left: the file's actions/links may
-            # outlive its chunks (an earlier removal, a sweep).
-            store.invalidate_sources_for_docs(
-                doc_ids, source_ids=[fid, *doc_ids], reason="source_gone")
+            # Scope to THIS drive: a file moved to another synced drive may
+            # already have been upserted there; its chunks, actions and links
+            # belong to that copy now.
+            doc_ids = [d for d in store.doc_ids_for_file(fid)
+                       if ((store.get_chunk(d) or {}).get("metadata") or {}
+                           ).get("drive_id") == drive_id]
             if doc_ids:
+                store.invalidate_sources_for_docs(
+                    doc_ids, source_ids=[fid, *doc_ids], file_ids=[fid],
+                    reason="source_gone")
                 store.delete_chunks(doc_ids)
         # Clear any durable pending-publish row for this file too (final-
         # review fix): a file can be extracted-with-a-miss in one cycle

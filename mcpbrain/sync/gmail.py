@@ -214,9 +214,20 @@ def handle_gmail_item(service, store, item, *, fetch_attachments: bool = False,
             # equals its first message's id, so never match on thread_id).
             mid = item["ref_id"]
             with bulk_section():
-                store.invalidate_sources_for_docs(
-                    store.doc_ids_for_messages([mid]), source_ids=[mid],
-                    reason="source_gone", match_thread=False)
+                docs = store.doc_ids_for_messages([mid])
+                tids = {((store.get_chunk(d) or {}).get("metadata") or {}
+                         ).get("thread_id") for d in docs} - {None, ""}
+                others = any(c["doc_id"] not in set(docs)
+                             for t in tids for c in store.thread_chunks(t))
+                if others:
+                    # The thread lives on (actions are anchored on its lead
+                    # message): only the relations sourced from these chunks go.
+                    store.invalidate_local_relations_for_docs(
+                        docs, reason="source_gone")
+                else:
+                    store.invalidate_sources_for_docs(
+                        docs, source_ids=[mid], reason="source_gone",
+                        match_thread=False)
             return
         raise
     skips: dict = {}

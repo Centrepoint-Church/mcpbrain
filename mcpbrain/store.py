@@ -814,6 +814,9 @@ def _owner_suffix_ok(prefix: str, rest: str) -> bool:
     return True
 
 
+_IN_BATCH = 500   # bound-variable slice for IN lists (SQLite caps variables)
+
+
 class StoreRestoringError(TimeoutError):
     """The store is being swapped for a restored snapshot: every connection is
     refused for that (brief) window. A TimeoutError so callers that classify
@@ -2085,7 +2088,8 @@ class Store:
             # reversible clean-up (spec 2026-10-22). Additive only.
             for _tbl, _cols in (
                 ("chunks", (("dup_of", "TEXT DEFAULT NULL"),)),
-                ("email_entities", (("derived", "INTEGER NOT NULL DEFAULT 0"),)),
+                ("email_entities", (("derived", "INTEGER NOT NULL DEFAULT 0"),
+                                    ("derived_reason", "TEXT DEFAULT NULL"))),
                 ("entity_relations", (
                     ("derived", "INTEGER NOT NULL DEFAULT 0"),
                     ("legacy_strength", "INTEGER DEFAULT NULL"))),
@@ -3004,63 +3008,105 @@ class Store:
         if not doc_ids:
             return 0
         at = at or datetime.now(timezone.utc).isoformat()
-        qs = ",".join("?" * len(doc_ids))
+        n = 0
         with self._connect(write=True) as db:
-            cur = db.execute(
-                f"UPDATE entity_relations SET invalidated_at=?, superseded_reason=? "
-                f"WHERE source_doc_id IN ({qs}) AND invalidated_at IS NULL "
-                f"AND COALESCE(origin,'local')='local'",
-                (at, reason, *doc_ids))
-            return cur.rowcount
+            # Sliced: a whole shared drive is tens of thousands of ids and
+            # SQLite caps bound variables per statement.
+            for i in range(0, len(doc_ids), _IN_BATCH):
+                part = doc_ids[i:i + _IN_BATCH]
+                qs = ",".join("?" * len(part))
+                n += db.execute(
+                    f"UPDATE entity_relations SET invalidated_at=?, superseded_reason=? "
+                    f"WHERE source_doc_id IN ({qs}) AND invalidated_at IS NULL "
+                    f"AND COALESCE(origin,'local')='local'",
+                    (at, reason, *part)).rowcount
+        return n
 
     def invalidate_sources_for_docs(self, doc_ids, *, source_ids=(),
+                                    file_ids=(),
                                     reason: str = "source_gone",
                                     match_thread: bool = True) -> dict:
         """A source (Drive file / Gmail message) is gone: take its derived
         state with it. Reversible: nothing is deleted.
 
-        * local relations sourced from `doc_ids` are invalidated (as
-          invalidate_local_relations_for_docs);
+        * local relations sourced from `doc_ids` are invalidated;
         * OPEN actions with source='email' whose source_doc_id (or, with
-          match_thread, thread_id) is one of `source_ids` become
+          match_thread, thread_id) is one of the source ids become
           status='auto_archived', resolved_by=<reason>, resolved_at set --
           user/manual/clickup actions are never touched;
-        * email_entities rows for `source_ids` are marked derived=1 and the
+        * email_entities rows for the source ids are marked derived=1
+          (derived_reason=<reason>, so a re-link can revive them) and the
           entity's email_count is decremented once per link that was counting
-          (floored at 0), so counts stay equal to the live primary links.
+          (floored at 0). A second call finds nothing counting: idempotent.
+
+        `file_ids` additionally match STALE chunk ids `gdrive-<fid>-<digits>`
+        that reflow replaced but never remapped in email_entities/actions;
+        candidates are found with one prefix scan and confirmed by an exact
+        owner parse, since base64url ids contain '-' and a bare prefix
+        over-matches.
+        All IN lists are sliced; one transaction.
         """
         doc_ids = list(doc_ids or ())
         source_ids = [x for x in dict.fromkeys(source_ids or ()) if x]
+        fid_set = {f for f in (file_ids or ()) if f}
         out = {"relations": 0, "actions": 0, "links": 0}
         out["relations"] = self.invalidate_local_relations_for_docs(
             doc_ids, reason=reason)
-        if not source_ids:
+        if not source_ids and not fid_set:
             return out
         at = datetime.now(timezone.utc).isoformat()
-        qs = ",".join("?" * len(source_ids))
         with self._connect(write=True) as db:
-            cond = f"source_doc_id IN ({qs})"
-            params: list = list(source_ids)
-            if match_thread:
-                cond = f"({cond} OR thread_id IN ({qs}))"
-                params += source_ids
-            cur = db.execute(
-                "UPDATE actions SET status='auto_archived', resolved_by=?, "
-                "resolved_at=? WHERE status='open' AND COALESCE(source,'email')='email' "
-                f"AND {cond}", (reason, at, *params))
-            out["actions"] = cur.rowcount
-            live = db.execute(
-                f"SELECT message_id, entity_id FROM email_entities "
-                f"WHERE message_id IN ({qs}) AND COALESCE(derived,0)=0",
-                source_ids).fetchall()
-            for r in live:
-                db.execute("UPDATE entities SET email_count = MAX(0, COALESCE(email_count,0) - 1) "
-                           "WHERE id=?", (r["entity_id"],))
-            db.execute(
-                f"UPDATE email_entities SET derived=1 WHERE message_id IN ({qs})",
-                source_ids)
-            out["links"] = len(live)
+            ids = set(source_ids)
+            if fid_set:
+                ids |= self._stale_drive_ids(db, fid_set | set(source_ids))
+            ids = list(ids)
+            for i in range(0, len(ids), _IN_BATCH):
+                part = ids[i:i + _IN_BATCH]
+                qs = ",".join("?" * len(part))
+                cond = f"source_doc_id IN ({qs})"
+                params: list = list(part)
+                if match_thread:
+                    cond = f"({cond} OR thread_id IN ({qs}))"
+                    params += part
+                out["actions"] += db.execute(
+                    "UPDATE actions SET status='auto_archived', resolved_by=?, "
+                    "resolved_at=? WHERE status='open' "
+                    f"AND COALESCE(source,'email')='email' AND {cond}",
+                    (reason, at, *params)).rowcount
+                live = db.execute(
+                    f"SELECT message_id, entity_id FROM email_entities "
+                    f"WHERE message_id IN ({qs}) AND COALESCE(derived,0)=0",
+                    part).fetchall()
+                for r in live:
+                    db.execute(
+                        "UPDATE entities SET email_count = "
+                        "MAX(0, COALESCE(email_count,0) - 1) WHERE id=?",
+                        (r["entity_id"],))
+                db.execute(
+                    f"UPDATE email_entities SET derived=1, derived_reason=? "
+                    f"WHERE message_id IN ({qs}) AND COALESCE(derived,0)=0",
+                    (reason, *part))
+                out["links"] += len(live)
         return out
+
+    @staticmethod
+    def _stale_drive_ids(db, file_ids) -> set:
+        """Ids `gdrive-<fid>-<digits>` held by email_entities / open actions
+        whose <fid> is in file_ids (chunk ids that no longer exist)."""
+        pat = re.compile(r"^gdrive-(.+)-\d+$")
+        found: set = set()
+        rows = [r[0] for r in db.execute(
+            "SELECT DISTINCT message_id FROM email_entities "
+            "WHERE message_id LIKE 'gdrive-%'")]
+        rows += [r[0] for r in db.execute(
+            "SELECT thread_id FROM actions WHERE status='open' AND thread_id LIKE 'gdrive-%' "
+            "UNION SELECT source_doc_id FROM actions WHERE status='open' "
+            "AND source_doc_id LIKE 'gdrive-%'")]
+        for v in rows:
+            m = pat.match(v or "")
+            if m and m.group(1) in file_ids:
+                found.add(v)
+        return found
 
     def chunk_count(self) -> int:
         """Total number of rows in the chunks table."""
@@ -5234,7 +5280,19 @@ class Store:
                 "INSERT OR IGNORE INTO email_entities (message_id, entity_id, role, derived) "
                 "VALUES (?, ?, ?, ?)",
                 (message_id, entity_id, role, 1 if derived else 0))
-            return cur.rowcount > 0
+            if cur.rowcount > 0:
+                return True
+            if derived:
+                return False
+            # The source came back: a link a removal marked derived is
+            # evidence again (only removal reasons revive; Task 7's
+            # derived-class links keep derived_reason NULL).
+            rev = db.execute(
+                "UPDATE email_entities SET derived=0, derived_reason=NULL "
+                "WHERE message_id=? AND entity_id=? AND derived=1 "
+                "AND derived_reason IN ('source_gone','drive_revoked','infra_purged')",
+                (message_id, entity_id))
+            return rev.rowcount > 0
 
     def merge_entities(self, loser_id, winner_id, *, canonical_name=None,
                        method="deterministic") -> dict | None:

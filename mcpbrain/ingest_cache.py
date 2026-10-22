@@ -906,7 +906,7 @@ def bootstrap_drive(store, fleet_storage, drive_id, pin, *, home=None) -> dict:
     return summary
 
 
-def purge_drive(store, drive_id) -> dict:
+def purge_drive(store, drive_id, *, reason: str = "drive_revoked") -> dict:
     """Access-revocation purge (spec §A3): bitemporally invalidate local relations
     sourced from this drive's docs, then delete its chunks/vectors/FTS. org rows
     are untouched. Returns a summary dict."""
@@ -914,7 +914,8 @@ def purge_drive(store, drive_id) -> dict:
     fids = sorted({m.get("file_id") for _d, m in store.drive_chunk_metadata(drive_id)
                    if m.get("file_id")})
     invalidated = store.invalidate_sources_for_docs(
-        doc_ids, source_ids=[*fids, *doc_ids], reason="drive_revoked")["relations"]
+        doc_ids, source_ids=[*fids, *doc_ids], file_ids=fids,
+        reason=reason)["relations"]
     deleted = store.delete_chunks(doc_ids)
     # warning, not info: purging a drive's entire cached content because access
     # was revoked is exactly the kind of event an operator needs to see without
@@ -1117,15 +1118,15 @@ def purge_infrastructure(store, layout, drive_id, *, fleet_storage=None,
         else:
             store.delete_meta(INFRA_REFUSED_META + drive_id)
             if dedicated:
-                res = purge_drive(store, drive_id)
+                res = purge_drive(store, drive_id, reason="infra_purged")
                 out["chunks_deleted"] = res["chunks_deleted"]
                 out["relations_invalidated"] = res["relations_invalidated"]
             elif rows:
                 doc_ids = [d for d, _m in rows]
                 _fids = sorted({m.get("file_id") for _d, m in rows if m.get("file_id")})
                 out["relations_invalidated"] = store.invalidate_sources_for_docs(
-                    doc_ids, source_ids=[*_fids, *doc_ids],
-                    reason="drive_revoked")["relations"]
+                    doc_ids, source_ids=[*_fids, *doc_ids], file_ids=_fids,
+                    reason="infra_purged")["relations"]
                 out["chunks_deleted"] = store.delete_chunks(doc_ids)
                 for fid in sorted({m.get("file_id") for _d, m in rows if m.get("file_id")}):
                     store.clear_pending_publish(drive_id, fid)
