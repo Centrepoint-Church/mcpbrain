@@ -1620,3 +1620,17 @@ def test_stale_reextract_resolving_one_of_three_leaves_two_open(tmp_path):
              embedder=emb)
     status = {a["id"]: a["status"] for a in s.list_unified_actions()}
     assert status == {ids[0]: "open", ids[1]: "done", ids[2]: "open"}
+
+
+def test_topic_email_count_per_distinct_message(tmp_path):
+    """A topic's email_count counts distinct primary messages linked to it —
+    not upsert calls (re-applying the same message counts once)."""
+    s = _store(tmp_path)
+    gw.apply(s, _ext("t1", "Acme", "m1", ["budget"]), doc_ids=["d1"])
+    gw.apply(s, _ext("t2", "NCF", "m2", ["budget"]), doc_ids=["d2"])
+    gw.apply(s, _ext("t3", "Acme", "m3", ["budget"]), doc_ids=["d3"])
+    assert s.get_entity("topic-budget")["email_count"] == 1
+    gw.apply(s, _ext("t3", "Acme", "m3", ["budget"]), doc_ids=["d3"])
+    assert s.get_entity("topic-budget")["email_count"] == 1
+    gw.apply(s, _ext("t4", "NCF", "m4", ["budget"]), doc_ids=["d4"])
+    assert s.get_entity("topic-budget")["email_count"] == 2

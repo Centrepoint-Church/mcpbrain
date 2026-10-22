@@ -4802,21 +4802,28 @@ class Store:
 
     # --- enrichment graph writers (Task 4.2) ------------------------------
 
-    def upsert_entity(self, ent_id, name, entity_type, org="", seen="") -> bool:
+    def upsert_entity(self, ent_id, name, entity_type, org="", seen="", *,
+                      bump_mentions: bool = True) -> bool:
         """Insert or merge an entity. Returns True if a NEW row was created,
-        False if an existing entity was merged into."""
+        False if an existing entity was merged into.
+
+        bump_mentions=False (graph_write.apply): mentions is NOT counted per
+        call — apply bumps it only when a new primary-source link is written,
+        so a re-extracted thread or a derived note adds nothing (spec
+        2026-10-22 §3). A new row then starts at 0."""
         # Single-writer invariant: this SELECT + upsert is race-free only because
         # the daemon is the sole writer. Do not call concurrently.
+        start, step = (1, 1) if bump_mentions else (0, 0)
         with self._connect(write=True) as db:
             existed = db.execute(
                 "SELECT 1 FROM entities WHERE id=?", (ent_id,)).fetchone() is not None
             db.execute(
-                """INSERT INTO entities(id, name, type, org, first_seen, last_seen, mentions)
-                   VALUES(?,?,?,?,?,?,1)
+                f"""INSERT INTO entities(id, name, type, org, first_seen, last_seen, mentions)
+                   VALUES(?,?,?,?,?,?,{start})
                    ON CONFLICT(id) DO UPDATE SET
                        first_seen = CASE WHEN entities.first_seen = '' THEN excluded.first_seen ELSE entities.first_seen END,
                        last_seen  = MAX(last_seen, excluded.last_seen),
-                       mentions   = mentions + 1,
+                       mentions   = mentions + {step},
                        name       = CASE WHEN name = '' AND NOT EXISTS (SELECT 1 FROM entity_field_locks
                                         WHERE entity_id = entities.id AND field = 'name')
                                     THEN excluded.name ELSE name END,
@@ -4831,9 +4838,13 @@ class Store:
         """Insert or bump a topic entity (id 'topic-<slug>', type 'topic').
 
         Ported from memory_db.py:1720-1745. Tags under 2 chars (after collapse)
-        return None and write nothing. First insert sets email_count=1; each
-        subsequent call bumps email_count and refreshes last_seen. Returns the
-        entity id both times. Depends on the entities.email_count column (1.5).
+        return None and write nothing. A new topic starts at email_count=0;
+        a call on an existing one refreshes last_seen only. email_count is
+        driven by the caller's NEW primary-source link rows (graph_write.apply
+        bumps it when link_email_entity inserts), so it counts distinct
+        messages — it used to be bumped on every call while the link insert
+        was ignored, so a re-applied thread counted again (spec 2026-10-22
+        §3). Returns the entity id both times.
         """
         tag = re.sub(r"\s+", " ", (tag or "").strip().lower())
         if len(tag) < 2:
@@ -4845,13 +4856,11 @@ class Store:
         with self._connect(write=True) as db:
             existing = db.execute("SELECT 1 FROM entities WHERE id=?", (eid,)).fetchone()
             if existing:
-                db.execute(
-                    "UPDATE entities SET email_count = email_count + 1, last_seen = ? WHERE id = ?",
-                    (today, eid))
+                db.execute("UPDATE entities SET last_seen = ? WHERE id = ?", (today, eid))
             else:
                 db.execute(
                     "INSERT INTO entities(id, name, type, org, first_seen, last_seen, email_count) "
-                    "VALUES(?,?,'topic','',?,?,1)",
+                    "VALUES(?,?,'topic','',?,?,0)",
                     (eid, tag, today, today))
         return eid
 
@@ -4927,7 +4936,8 @@ class Store:
                  enriched_at or datetime.now(timezone.utc).strftime("%Y-%m-%d"),
                  labels, contextual_summary, 1 if reply_needed else 0, reply_reason))
 
-    def link_email_entity(self, message_id, entity_id, role="") -> bool:
+    def link_email_entity(self, message_id, entity_id, role="", *,
+                          derived: bool = False) -> bool:
         """Link an entity to a message. Ported from doc_db.py:447-453.
 
         Keyed (message_id, entity_id); INSERT OR IGNORE so re-linking the same
@@ -4935,12 +4945,16 @@ class Store:
         link row was created, False when the pair already existed — callers use
         this to drive email_count, so the link table is the single source of
         truth for how many distinct messages an entity appears in.
+
+        derived=True: the message is a non-evidence source (mcpbrain's own
+        note, a brief, a draft); the row is written derived=1 and callers do
+        NOT count it toward email_count/mentions.
         """
         with self._connect(write=True) as db:
             cur = db.execute(
-                "INSERT OR IGNORE INTO email_entities (message_id, entity_id, role) "
-                "VALUES (?, ?, ?)",
-                (message_id, entity_id, role))
+                "INSERT OR IGNORE INTO email_entities (message_id, entity_id, role, derived) "
+                "VALUES (?, ?, ?, ?)",
+                (message_id, entity_id, role, 1 if derived else 0))
             return cur.rowcount > 0
 
     def merge_entities(self, loser_id, winner_id, *, canonical_name=None,
@@ -5525,6 +5539,7 @@ class Store:
                     rows = db.execute(
                         f"SELECT {col} AS eid, COUNT(*) AS n FROM entity_relations "
                         f"WHERE {col} IN ({q}) AND invalidated_at IS NULL "
+                        f"AND COALESCE(derived, 0) = 0 "
                         f"GROUP BY {col}", batch).fetchall()
                     for r in rows:
                         deg[r["eid"]] += r["n"]
@@ -5555,8 +5570,10 @@ class Store:
                       include_invalidated: bool = False) -> list[dict]:
         """All relations touching ent_id (as entity_a or entity_b).
 
-        DEFAULT excludes invalidated rows (invalidated_at IS NOT NULL). Relations
-        written by add_relation leave invalidated_at NULL, so they still surface.
+        DEFAULT excludes invalidated rows (invalidated_at IS NOT NULL) and
+        derived rows (derived=1: written from mcpbrain's own notes/briefs/drafts,
+        no primary source — spec 2026-10-22 §3). Relations written by
+        add_relation leave invalidated_at NULL, so they still surface.
         include_invalidated=True returns every row regardless.
 
         at_time (ISO date string) returns the graph as it stood at that point:
@@ -5571,7 +5588,7 @@ class Store:
                "WHERE (entity_a=:eid OR entity_b=:eid)")
         params: dict = {"eid": ent_id}
         if not include_invalidated:
-            sql += " AND invalidated_at IS NULL"
+            sql += " AND invalidated_at IS NULL AND COALESCE(derived, 0) = 0"
         if at_time is not None:
             sql += (" AND (valid_from IS NULL OR valid_from <= :at) "
                     "AND (valid_to IS NULL OR valid_to > :at)")

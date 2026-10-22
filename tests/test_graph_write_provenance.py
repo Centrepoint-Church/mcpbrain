@@ -427,7 +427,8 @@ def test_identical_observation_from_many_sources_consolidates(tmp_path):
     _seed_entity(s, "sam")
     for i in range(20):
         graph_write.write_observation(s, "sam", "role", "Operations Manager",
-                                      f"source_{i}", f"2026-01-{i+1:02d}", "llm_extraction")
+                                      f"source_{i}", f"2026-01-{i+1:02d}", "llm_extraction",
+                                      source_key=f"thread-{i}", source_class="primary_mail")
     with s._connect() as db:
         rows = db.execute(
             "SELECT observed_count, last_seen FROM entity_observations "
@@ -474,9 +475,10 @@ def test_consolidate_observations_backfill(tmp_path):
     assert graph_write.consolidate_observations(s)["rows_removed"] == 0
 
 
-def test_relation_strength_grows_on_reobservation(tmp_path):
-    """Re-observing a relation bumps strength (a frequency signal), so the graph
-    can weight/rank by it. A one-off stays at 1; a repeated tie climbs."""
+def test_relation_strength_unchanged_on_unsourced_reobservation(tmp_path):
+    """A re-observation with no source (calendar without an id, curator
+    import, legacy callers) no longer bumps strength: strength counts
+    distinct primary sources, and an unknown source is none."""
     s = _store(tmp_path)
     _seed_entity(s, "a", name="A"); _seed_entity(s, "b", name="B")
     for d in ("2026-01-01", "2026-02-01", "2026-03-01"):
@@ -484,7 +486,7 @@ def test_relation_strength_grows_on_reobservation(tmp_path):
     with s._connect() as db:
         row = db.execute("SELECT strength FROM entity_relations "
                          "WHERE entity_a='a' AND relation='works_with' AND entity_b='b'").fetchone()
-    assert row["strength"] == 3   # 1 insert + 2 re-observations
+    assert row["strength"] == 1
 
 
 def test_decay_relations_culls_stale_weak_only(tmp_path):
@@ -694,3 +696,187 @@ def test_sender_entity_not_created_for_owner_by_identity(tmp_path, monkeypatch):
         "owner must be excluded from deterministic sender-entity creation by "
         "identity/email, not just alias matching"
     )
+
+
+# ---------------------------------------------------------------------------
+# Strength = independent primary sources (spec 2026-10-22 §3)
+# ---------------------------------------------------------------------------
+
+def _mail_chunk(store, doc_id, thread_id, **extra):
+    meta = {"source_type": "gmail", "thread_id": thread_id,
+            "message_id": f"msg-{doc_id}", "labels": "INBOX"}
+    meta.update(extra)
+    store.upsert_chunk(doc_id, f"text of {doc_id}", f"h-{doc_id}", meta)
+
+
+def _rel_extraction(thread_id, msg_id, *, role="Director"):
+    return {
+        "thread_id": thread_id, "org": "unknown", "content_type": "email",
+        "summary": "s",
+        "messages": [{"message_id": msg_id, "sender": "Sam <sam@x.org>",
+                      "date": "2026-02-01"}],
+        "entities": [{"name": "Sam", "type": "person", "role": role},
+                     {"name": "Pat", "type": "person"}],
+        "relations": [{"source_name": "Sam", "type": "reports_to", "target_name": "Pat"}],
+        "actions": [], "topics": [],
+    }
+
+
+def _strength(store, rel="reports_to"):
+    with store._connect() as db:
+        r = db.execute("SELECT id, strength, derived FROM entity_relations "
+                       "WHERE relation=?", (rel,)).fetchone()
+        n = db.execute("SELECT COUNT(*) FROM relation_sources WHERE relation_id=?",
+                       (r["id"],)).fetchone()[0]
+    return r["strength"], r["derived"], n
+
+
+def _role_count(store):
+    with store._connect() as db:
+        return db.execute(
+            "SELECT observed_count FROM entity_observations "
+            "WHERE attribute='role' AND value='Director' AND valid_to IS NULL").fetchone()[0]
+
+
+def test_reextraction_does_not_raise_strength(tmp_path):
+    """Re-extracting the same thread — or another chunk of it — is the same
+    evidence again: strength and observed_count stay at 1."""
+    s = _store(tmp_path)
+    _mail_chunk(s, "gm-1", "t1")
+    _mail_chunk(s, "gm-1b", "t1")
+    graph_write.apply(s, _rel_extraction("t1", "m1"), doc_ids=["gm-1"])
+    graph_write.apply(s, _rel_extraction("t1", "m1"), doc_ids=["gm-1"])
+    graph_write.apply(s, _rel_extraction("t1", "m1"), doc_ids=["gm-1b"])
+    assert _strength(s) == (1, 0, 1)
+    assert _role_count(s) == 1
+    with s._connect() as db:
+        src = db.execute("SELECT source_key, source_class FROM relation_sources").fetchall()
+    assert [tuple(r) for r in src] == [("t1", "primary_mail")]
+
+
+def test_second_independent_source_raises_strength(tmp_path):
+    s = _store(tmp_path)
+    _mail_chunk(s, "gm-1", "t1")
+    _mail_chunk(s, "gm-2", "t2")
+    graph_write.apply(s, _rel_extraction("t1", "m1"), doc_ids=["gm-1"])
+    graph_write.apply(s, _rel_extraction("t2", "m2"), doc_ids=["gm-2"])
+    assert _strength(s) == (2, 0, 2)
+    assert _role_count(s) == 2
+    with s._connect() as db:
+        rid = db.execute("SELECT id FROM entity_relations WHERE relation='reports_to'"
+                         ).fetchone()[0]
+        assert graph_write.relation_strength(db, rid) == 2
+
+
+def test_duplicate_carries_canonical_key(tmp_path):
+    """A content duplicate (chunks.dup_of) is the canonical's evidence: it
+    adds no new source."""
+    s = _store(tmp_path)
+    _mail_chunk(s, "gm-1", "t1")
+    _mail_chunk(s, "gm-9", "t9")
+    with s._connect() as db:
+        db.execute("UPDATE chunks SET dup_of='gm-1' WHERE doc_id='gm-9'")
+    graph_write.apply(s, _rel_extraction("t1", "m1"), doc_ids=["gm-1"])
+    graph_write.apply(s, _rel_extraction("t9", "m9"), doc_ids=["gm-9"])
+    assert _strength(s) == (1, 0, 1)
+
+
+def test_derived_source_adds_no_support(tmp_path):
+    s = _store(tmp_path)
+    _mail_chunk(s, "gm-1", "t1")
+    s.upsert_chunk("note-consolidated-abc", "consolidated", "h-c",
+                   {"source": "note", "note_id": "note-consolidated-abc"})
+    graph_write.apply(s, _rel_extraction("t1", "m1"), doc_ids=["gm-1"])
+    sam_before = s.get_entity("sam")["email_count"]
+
+    # The same relation and role restated by a consolidated note: nothing moves.
+    graph_write.apply(s, _rel_extraction("note-consolidated-abc", "note-consolidated-abc"),
+                      doc_ids=["note-consolidated-abc"])
+    assert _strength(s) == (1, 0, 1)
+    assert _role_count(s) == 1
+    assert s.get_entity("sam")["email_count"] == sam_before
+    with s._connect() as db:
+        link = db.execute("SELECT derived FROM email_entities "
+                          "WHERE message_id='note-consolidated-abc' AND entity_id='sam'"
+                          ).fetchone()
+    assert link is not None and link["derived"] == 1
+
+    # A relation ONLY a derived source states is written derived=1 / strength 0.
+    ext = _rel_extraction("note-consolidated-abc", "note-consolidated-abc")
+    ext["relations"] = [{"source_name": "Sam", "type": "manages", "target_name": "Pat"}]
+    graph_write.apply(s, ext, doc_ids=["note-consolidated-abc"])
+    assert _strength(s, "manages") == (0, 1, 0)
+
+    # A later primary source makes it a real edge with one source.
+    ext2 = _rel_extraction("t1", "m1")
+    ext2["relations"] = [{"source_name": "Sam", "type": "manages", "target_name": "Pat"}]
+    graph_write.apply(s, ext2, doc_ids=["gm-1"])
+    assert _strength(s, "manages") == (1, 0, 1)
+
+
+def test_digest_writes_no_relations(tmp_path):
+    s = _store(tmp_path)
+    graph_write.apply(s, _rel_extraction("t5", "m5"), doc_ids=["enriched-t5"])
+    with s._connect() as db:
+        assert db.execute("SELECT COUNT(*) FROM entity_relations "
+                          "WHERE relation='reports_to'").fetchone()[0] == 0
+        assert db.execute("SELECT COUNT(*) FROM email_entities "
+                          "WHERE message_id='m5'").fetchone()[0] == 0
+
+
+def test_decay_keeps_evidenced_relation(tmp_path):
+    """decay never zeroes a relation still supported by a primary source,
+    however stale; an unsourced weak+stale one still decays."""
+    s = _store(tmp_path)
+    for n in ("a", "b", "c"):
+        _seed_entity(s, n, name=n.upper())
+    with s._connect() as db:
+        db.execute("INSERT INTO entity_relations(entity_a,relation,entity_b,strength,last_seen) "
+                   "VALUES('a','involved_in','b',1,'2023-01-01')")
+        db.execute("INSERT INTO entity_relations(entity_a,relation,entity_b,strength,last_seen) "
+                   "VALUES('a','involved_in','c',1,'2023-01-01')")
+        rid = db.execute("SELECT id FROM entity_relations WHERE entity_b='b'").fetchone()[0]
+        graph_write.record_relation_source(db, rid, "t1", "primary_mail")
+    out = graph_write.decay_relations(s, stale_days=365, weak_max=1, as_of="2026-07-01")
+    assert out["relations_decayed"] == 1
+    with s._connect() as db:
+        kept = {r["entity_b"] for r in db.execute(
+            "SELECT entity_b FROM entity_relations WHERE COALESCE(strength,0) > 0")}
+    assert kept == {"b"}
+
+
+def test_derived_singleton_never_supersedes_evidence(tmp_path):
+    s = _store(tmp_path)
+    for n in ("p", "acme", "beta"):
+        _seed_entity(s, n, name=n)
+    graph_write.upsert_relation(s, "p", "works_at", "acme", valid_from="2026-01-01",
+                                source_key="t1", source_class="primary_mail")
+    graph_write.upsert_relation(s, "p", "works_at", "beta", valid_from="2026-05-01",
+                                source_key="note-x", source_class="consolidated")
+    with s._connect() as db:
+        rows = {r["entity_b"]: r for r in db.execute(
+            "SELECT entity_b, invalidated_at, derived, strength FROM entity_relations")}
+    assert rows["acme"]["invalidated_at"] is None and rows["acme"]["strength"] == 1
+    assert rows["beta"]["derived"] == 1 and rows["beta"]["strength"] == 0
+
+
+def test_user_asserted_relation_counts_at_least_one(tmp_path):
+    s = _store(tmp_path)
+    _seed_entity(s, "a", name="A"); _seed_entity(s, "b", name="B")
+    with s._connect() as db:
+        db.execute("INSERT INTO entity_relations(entity_a,relation,entity_b,strength,"
+                   "user_verdict) VALUES('a','manages','b',0,'asserted')")
+        rid = db.execute("SELECT id FROM entity_relations").fetchone()[0]
+        assert graph_write.relation_strength(db, rid) == 1
+
+
+def test_relations_for_excludes_derived(tmp_path):
+    s = _store(tmp_path)
+    for n in ("a", "b", "c"):
+        _seed_entity(s, n, name=n.upper())
+    graph_write.upsert_relation(s, "a", "manages", "b", valid_from="2026-01-01",
+                                source_key="t1", source_class="primary_mail")
+    graph_write.upsert_relation(s, "a", "manages", "c", valid_from="2026-01-01",
+                                source_key="note-x", source_class="session")
+    assert {r["entity_b"] for r in s.relations_for("a")} == {"b"}
+    assert s.entity_degrees(["c"]) == {"c": 0}

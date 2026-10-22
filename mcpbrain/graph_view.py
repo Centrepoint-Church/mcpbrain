@@ -120,11 +120,12 @@ def graph_canvas(store, *, min_conn: int = 7, org: str = "", community: str = ""
 
             link_cap = max(100, min(50000, int(max_links)))
             links = []
+            rel_where, rel_order = _rel_filters(db)
             for e in db.execute(
                 "SELECT entity_a AS source, entity_b AS target, "
                 "COALESCE(relation, '') AS relation, COALESCE(strength, 1) AS strength "
-                "FROM entity_relations WHERE COALESCE(strength, 0) > 0 "
-                "ORDER BY strength DESC"
+                f"FROM entity_relations WHERE COALESCE(strength, 0) > 0{rel_where} "
+                f"ORDER BY {rel_order}strength DESC"
             ):
                 if e["source"] in node_ids and e["target"] in node_ids:
                     links.append({"source": e["source"], "target": e["target"],
@@ -144,6 +145,21 @@ def graph_canvas(store, *, min_conn: int = 7, org: str = "", community: str = ""
     except sqlite3.Error as exc:
         log.warning("graph_canvas: read failed (%s) — returning empty", exc)
         return dict(_EMPTY)
+
+
+def _rel_filters(db, alias: str = "") -> tuple[str, str]:
+    """(extra WHERE, ORDER prefix) for strength reads of entity_relations.
+
+    Strength counts independent primary sources (spec 2026-10-22 §3): a
+    derived=1 row (written from mcpbrain's own notes/briefs/drafts) is no
+    evidence and is excluded; an origin='legacy' row (its strength predates
+    source counting) never outranks a counted one. Column-aware — stores
+    that predate either column read as before."""
+    cols = {r["name"] for r in db.execute("PRAGMA table_info(entity_relations)")}
+    p = f"{alias}." if alias else ""
+    where = f" AND COALESCE({p}derived, 0) = 0" if "derived" in cols else ""
+    order = f"(COALESCE({p}origin, '') = 'legacy'), " if "origin" in cols else ""
+    return where, order
 
 
 def _table_exists(db, name):
@@ -169,6 +185,7 @@ def graph_ego(store, entity_id: str, hops: int = 1) -> dict | None:
             if db.execute("SELECT 1 FROM entities WHERE id=?", (entity_id,)).fetchone() is None:
                 return None
 
+            rel_where, _ = _rel_filters(db)
             seen = {entity_id}
             frontier = {entity_id}
             for _ in range(hops):
@@ -177,7 +194,7 @@ def graph_ego(store, entity_id: str, hops: int = 1) -> dict | None:
                 qmarks = ",".join("?" * len(frontier))
                 rows = db.execute(
                     f"SELECT entity_a, entity_b FROM entity_relations "
-                    f"WHERE COALESCE(strength, 0) > 0 "
+                    f"WHERE COALESCE(strength, 0) > 0{rel_where} "
                     f"AND (entity_a IN ({qmarks}) OR entity_b IN ({qmarks}))",
                     (*frontier, *frontier)).fetchall()
                 nxt = {other for r in rows for other in (r["entity_a"], r["entity_b"])
@@ -230,7 +247,7 @@ def graph_ego(store, entity_id: str, hops: int = 1) -> dict | None:
             for r in db.execute(
                 "SELECT entity_a AS source, entity_b AS target, "
                 "COALESCE(relation, '') AS relation, COALESCE(strength, 1) AS strength "
-                "FROM entity_relations WHERE COALESCE(strength, 0) > 0"
+                f"FROM entity_relations WHERE COALESCE(strength, 0) > 0{rel_where}"
             ):
                 if r["source"] in found_ids and r["target"] in found_ids:
                     links.append({"source": r["source"], "target": r["target"],
@@ -264,14 +281,15 @@ def entity_detail(store, entity_id: str) -> dict | None:
             if e is None:
                 return None
             rels, backs = [], []
+            rel_where, rel_order = _rel_filters(db, "r")
             rows = db.execute(
                 "SELECT r.entity_a, r.relation, r.entity_b, COALESCE(r.strength,1) AS strength, "
                 "       ea.name AS a_name, eb.name AS b_name "
                 "FROM entity_relations r "
                 "LEFT JOIN entities ea ON ea.id=r.entity_a "
                 "LEFT JOIN entities eb ON eb.id=r.entity_b "
-                "WHERE (r.entity_a=:id OR r.entity_b=:id) AND r.invalidated_at IS NULL "
-                "ORDER BY r.strength DESC",
+                f"WHERE (r.entity_a=:id OR r.entity_b=:id) AND r.invalidated_at IS NULL{rel_where} "
+                f"ORDER BY {rel_order}r.strength DESC",
                 {"id": entity_id}).fetchall()
             for r in rows:
                 if r["entity_a"] == entity_id:
@@ -285,9 +303,10 @@ def entity_detail(store, entity_id: str) -> dict | None:
                 eo_cols = {r["name"] for r in db.execute("PRAGMA table_info(entity_observations)")}
                 count_col = "COALESCE(observed_count,1) AS observed_count" if "observed_count" in eo_cols else "1 AS observed_count"
                 last_col = "last_seen" if "last_seen" in eo_cols else "NULL AS last_seen"
+                obs_derived = " AND COALESCE(derived, 0) = 0" if "derived" in eo_cols else ""
                 obs = [dict(o) for o in db.execute(
                     f"SELECT attribute, value, valid_from, valid_to, source, {count_col}, {last_col} "
-                    "FROM entity_observations WHERE entity_id=? "
+                    f"FROM entity_observations WHERE entity_id=?{obs_derived} "
                     "ORDER BY COALESCE(valid_from,'') DESC, id DESC", (entity_id,)).fetchall()]
             return {
                 "id": e["id"], "name": e["name"], "type": e["type"],

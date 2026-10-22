@@ -184,6 +184,17 @@ def _apply_assert_relation(store, db, p) -> dict:
                                 evidence=f"stated by the user: {p.get('reason', '')}",
                                 source_doc_id="")
     db.execute("UPDATE entity_relations SET user_verdict='asserted' WHERE id=?", (rid,))
+    # Strength counts independent primary sources, and a user-asserted
+    # relation counts at least 1 (graph_write.relation_strength). A row that
+    # was derived (strength 0) or decayed becomes a visible, real edge; one
+    # already stronger keeps its count.
+    was_derived = db.execute("SELECT COALESCE(derived, 0) FROM entity_relations WHERE id=?",
+                             (rid,)).fetchone()[0]
+    db.execute("UPDATE entity_relations SET strength = MAX(COALESCE(strength, 0), ?), "
+               "derived = 0 WHERE id=?", (gw.relation_strength(db, rid), rid))
+    if was_derived:                     # a derived row's degree was never counted
+        db.execute("UPDATE entities SET degree = COALESCE(degree, 0) + 1 WHERE id IN (?, ?)",
+                   (a, b))
     # Only candidates the singleton recency rule ACTUALLY retired (their
     # invalidated_by_relation_id now points at this assert's own row) belong
     # in the snapshot as "rivals". A non-singleton relation (e.g.
@@ -370,6 +381,13 @@ def _undo_assert_relation(db, p, snap, cid):
             (prior["user_verdict"], prior["valid_from"], prior["valid_to"],
              prior["invalidated_at"], prior["superseded_reason"],
              prior["invalidated_by_relation_id"], prior["id"]))
+        if prior.get("derived"):
+            # The assert turned a derived row (strength 0, degree uncounted)
+            # into a real edge; put it back exactly.
+            db.execute("UPDATE entity_relations SET derived=1, strength=? WHERE id=?",
+                       (prior.get("strength") or 0, prior["id"]))
+            db.execute("UPDATE entities SET degree=MAX(COALESCE(degree,0)-1, 0) "
+                       "WHERE id IN (?,?)", (prior["entity_a"], prior["entity_b"]))
     for r in to_restore:
         db.execute(
             "UPDATE entity_relations SET valid_to=?, invalidated_at=?, "

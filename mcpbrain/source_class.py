@@ -158,3 +158,31 @@ def classify(doc_id: str, meta: dict, rules: Rules) -> SourceClass:
     if doc_id.startswith("cal-") or meta.get("event_id") or st == "calendar":
         return SourceClass.PRIMARY_EVENT
     return SourceClass.PRIMARY_DOC
+
+
+def source_key(doc_id: str, meta: dict) -> str:
+    """The LOGICAL source a chunk belongs to — the unit of independent support.
+
+    Strength counts distinct source keys, so every chunk of one email thread,
+    one Drive file, one captured note, one calendar event or one anarlog
+    meeting must map to the SAME key (re-extracting a part of it, or another
+    chunk of it, is the same evidence again, not new evidence). Namespaces
+    follow thread_enrich._chunk_key: Gmail thread id, Drive file id,
+    ``anarlog-<session_id>`` (before event_id, as there), ``cal-<event_id>``,
+    note id. A duplicate's key is its CANONICAL chunk's key — the caller
+    resolves ``dup_of`` before asking (see graph_write.extraction_sources).
+    """
+    meta = meta or {}
+    doc_id = doc_id or ""
+    st = meta.get("source_type")
+    if st == "gmail":
+        return str(meta.get("thread_id") or meta.get("message_id") or doc_id)
+    if meta.get("file_id"):
+        return str(meta["file_id"])
+    if meta.get("session_id"):
+        return f"anarlog-{meta['session_id']}"
+    if meta.get("event_id"):
+        return f"cal-{meta['event_id']}"
+    if meta.get("note_id"):
+        return str(meta["note_id"])
+    return str(meta.get("thread_id") or doc_id)

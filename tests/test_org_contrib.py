@@ -444,3 +444,13 @@ def test_drive_chunks_are_labelled_drive_and_contribute_exactly_as_before(tmp_pa
                                        "alice@x.org")
     assert n == 3
     assert {r["source_kind"] for r in _outbox(s)} == {"drive"}
+
+
+def test_derived_relation_never_contributed(tmp_path):
+    """A derived relation (written from mcpbrain's own notes/briefs/drafts)
+    has no primary source behind it and never leaves the machine."""
+    s = _store(tmp_path)
+    d = _delta()
+    d["relations"][0]["derived"] = 1
+    assert org_contrib.collect_from_drain(s, d, _pin(), "a@x.org") == 0
+    assert org_contrib.collect_from_drain(s, _delta(), _pin(), "a@x.org") > 0

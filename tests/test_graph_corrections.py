@@ -520,3 +520,25 @@ def test_merge_undo_refused_while_later_correction_touches_winner(tmp_path):
     assert gc.undo(s, later["correction_id"])["status"] == "reverted"
     assert gc.undo(s, merge_out["correction_id"])["status"] == "reverted"
     assert s.get_entity("d-okafor") is not None
+
+
+def test_assert_on_derived_relation_makes_it_real_and_undo_restores(tmp_path):
+    """Strength counts primary sources; a derived row has none (strength 0,
+    degree uncounted). The user asserting it makes it a real edge with
+    strength >= 1; undo puts the derived row back exactly."""
+    s = _store(tmp_path)
+    gw.upsert_relation(s, D, "mentioned_with", S, valid_from="2026-01-01",
+                       source_key="note-x", source_class="consolidated")
+    before = dict(_rel(s, D, "mentioned_with", S))
+    deg = (s.get_entity(D)["degree"], s.get_entity(S)["degree"])
+    assert before["derived"] == 1 and before["strength"] == 0
+    out = gc.submit(s, _stated(op="assert_relation", entity_a=D, relation="mentioned_with",
+                               entity_b=S))
+    assert out["status"] == "applied"
+    row = _rel(s, D, "mentioned_with", S)
+    assert row["derived"] == 0 and row["strength"] == 1
+    assert (s.get_entity(D)["degree"], s.get_entity(S)["degree"]) == (deg[0] + 1, deg[1] + 1)
+    gc.undo(s, out["correction_id"])
+    after = _rel(s, D, "mentioned_with", S)
+    assert after["derived"] == 1 and after["strength"] == 0 and after["user_verdict"] is None
+    assert (s.get_entity(D)["degree"], s.get_entity(S)["degree"]) == deg

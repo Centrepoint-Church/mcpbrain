@@ -415,12 +415,13 @@ def test_upsert_topic_entity(tmp_path):
     ent = s.get_entity(eid)
     assert ent["type"] == "topic"
     assert ent["name"] == "facilities"
-    assert ent["email_count"] == 1
-    # Second call bumps email_count and returns the same id.
+    # email_count counts distinct linked messages (graph_write.apply bumps it
+    # on a NEW link row), so the upsert itself never counts.
+    assert ent["email_count"] == 0
     eid2 = s.upsert_topic_entity("facilities")
     assert eid2 == eid
     ent2 = s.get_entity(eid)
-    assert ent2["email_count"] == 2
+    assert ent2["email_count"] == 0
 
     # Too-short tags return None and create nothing.
     assert s.upsert_topic_entity("x") is None

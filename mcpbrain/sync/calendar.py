@@ -28,6 +28,7 @@ from mcpbrain.graph_write import (
     upsert_entity,
     upsert_relation,
 )
+from mcpbrain.source_class import SourceClass
 from mcpbrain.sync.normalise import Chunk
 
 _NUM_RETRIES = 5  # see mcpbrain.backup._NUM_RETRIES for the full rationale
@@ -177,7 +178,11 @@ def _apply_attendees_to_graph(store, event: dict, owner) -> int:
                 store, owner_eid, "attended", entity_id,
                 valid_from=valid_from,
                 evidence=f"cal-{event_id}" if event_id else "",
-                source_doc_id=f"cal-{event_id}" if event_id else None)
+                source_doc_id=f"cal-{event_id}" if event_id else None,
+                # Each event is one independent source (spec 2026-10-22 §3):
+                # re-syncing it adds nothing; another meeting adds one.
+                source_key=f"cal-{event_id}" if event_id else None,
+                source_class=SourceClass.PRIMARY_EVENT if event_id else None)
         written += 1
     return written
 

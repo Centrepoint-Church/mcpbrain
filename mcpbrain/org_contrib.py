@@ -169,6 +169,14 @@ def collect_from_drain(store, drain_delta, pin: FleetPin, contributor_email: str
     for rel in drain_delta.get("relations") or []:
         if (rel.get("origin") or "local") != "local":
             continue                               # never re-contribute org rows (echo guard)
+        if rel.get("derived"):
+            continue                               # derived (mcpbrain's own notes/briefs/
+            # drafts, spec 2026-10-22 §3): no primary source stands behind it,
+            # so it is no claim to share. Corroboration stays the curator's
+            # count of distinct source_refs; source_ref stays anchored on the
+            # provenance DOC (not the new logical source_key) on purpose —
+            # re-anchoring would make every already-contributed relation look
+            # like a second, independent source to the curator.
         relation = rel.get("relation") or ""
         if relation not in allow:
             continue                               # allowlist — fail closed
@@ -287,7 +295,8 @@ def _delta_since_watermark(store) -> tuple[dict, dict]:
     with store._connect() as db:
         rel_rows = db.execute(
             "SELECT id, entity_a, relation, entity_b, valid_from, valid_to, "
-            "       confidence, origin, source_doc_id, contrib_doc_id "
+            "       confidence, origin, source_doc_id, contrib_doc_id, "
+            "       COALESCE(derived, 0) AS derived "
             "FROM entity_relations "
             "WHERE id > ? "
             "   OR (invalidated_at IS NOT NULL AND invalidated_at >= ?) "

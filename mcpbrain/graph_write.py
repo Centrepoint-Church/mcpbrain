@@ -23,6 +23,7 @@ from email.utils import parsedate_to_datetime
 from nameparser import HumanName
 
 from mcpbrain import config, orgs, topics
+from mcpbrain import source_class as _sc
 from mcpbrain.resolve import build_entity_index, write_time_dedup_check, add_to_index, is_role_address
 from mcpbrain.chunking import (  # dependency-free; no graph_write -> enrich coupling
     slugify,
@@ -270,7 +271,8 @@ def fetch_role(store, entity_id: str, *, current_only: bool = True) -> str:
 
 
 def write_observation(store, entity_id: str, attribute: str, value: str, source: str,
-                      valid_from: str, confidence: str) -> None:
+                      valid_from: str, confidence: str, *,
+                      source_key: str | None = None, source_class=None) -> None:
     """Write an `attribute` observation with provenance + supersession.
 
     Generalized from the original role-only `write_role_observation`
@@ -290,7 +292,21 @@ def write_observation(store, entity_id: str, attribute: str, value: str, source:
           role when an authoritative role source already exists) — role only.
     A value like an org-move description or a project name should not be
     filtered against a job-title junk-word list or rank-gated the same way.
+
+    source_key / source_class (spec 2026-10-22 §3): observed_count is the
+    number of distinct evidence-class sources (observation_sources), SET —
+    never +1. A non-evidence source adds no support: an identical current
+    observation is left alone, a new one is written derived=1 and retires
+    nothing. A digest writes nothing. With no class (profile_audit, legacy
+    callers) a re-observation refreshes last_seen only.
     """
+    cls_value = _class_value(source_class)
+    if not source_key and _is_evidence_class(cls_value):
+        cls_value = ""                  # evidence with no key: unknown source
+    evidence_write = bool(cls_value) and _is_evidence_class(cls_value)
+    derived_write = bool(cls_value) and not evidence_write
+    if cls_value == _sc.SourceClass.DIGEST.value:
+        return
     if len(value) > 80:
         return
     if attribute == "role" and value.strip().lower() in _JUNK_ROLE_VALUES:
@@ -320,13 +336,15 @@ def write_observation(store, entity_id: str, attribute: str, value: str, source:
             (entity_id, attribute, value),
         ).fetchone()
         if dup:
+            if derived_write:
+                return                  # derived content confirms nothing
             cur_last = dup["last_seen"] or dup["valid_from"] or ""
             new_last = valid_from if valid_from > cur_last else cur_last
-            conn.execute(
-                "UPDATE entity_observations "
-                "SET observed_count = COALESCE(observed_count, 1) + 1, last_seen = ? WHERE id = ?",
-                (new_last, dup["id"]),
-            )
+            conn.execute("UPDATE entity_observations SET last_seen = ? WHERE id = ?",
+                         (new_last, dup["id"]))
+            if evidence_write:
+                record_observation_source(conn, dup["id"], source_key, cls_value)
+                _promote_observation(conn, dup["id"])
             return
 
         existing = conn.execute(
@@ -335,6 +353,15 @@ def write_observation(store, entity_id: str, attribute: str, value: str, source:
             (entity_id, attribute, source),
         ).fetchone()
         if existing and existing[0] == value:
+            return
+        if derived_write:
+            # Recorded for audit, excluded everywhere; never retires a fact.
+            conn.execute(
+                "INSERT INTO entity_observations "
+                "(entity_id, attribute, value, source, valid_from, confidence_source, "
+                " last_seen, derived) VALUES (?, ?, ?, ?, ?, ?, ?, 1)",
+                (entity_id, attribute, value, source, valid_from, confidence, valid_from),
+            )
             return
         # Recency rule: retire prior same-source observations only if they are
         # older-or-equal (so an older observation arriving late doesn't unseat a
@@ -353,23 +380,36 @@ def write_observation(store, entity_id: str, attribute: str, value: str, source:
             "AND valid_to IS NULL AND valid_from > ?",
             (entity_id, attribute, source, valid_from),
         ).fetchone()[0]
-        conn.execute(
+        oid = conn.execute(
             "INSERT INTO entity_observations "
             "(entity_id, attribute, value, source, valid_from, valid_to, confidence_source, last_seen) "
             "VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
             (entity_id, attribute, value, source, valid_from, newer, confidence, valid_from),
-        )
+        ).lastrowid
+        if evidence_write:
+            record_observation_source(conn, oid, source_key, cls_value)
+            _promote_observation(conn, oid)
+
+
+def _promote_observation(conn, observation_id) -> None:
+    """SET observed_count to the distinct evidence-source count (min 1: the
+    row exists because something observed it) and clear derived."""
+    conn.execute(
+        "UPDATE entity_observations SET observed_count = ?, derived = 0 WHERE id = ?",
+        (max(1, observation_support(conn, observation_id)), observation_id))
 
 
 def write_role_observation(store, entity_id: str, title: str, source: str,
-                           valid_from: str, confidence: str) -> None:
+                           valid_from: str, confidence: str, *,
+                           source_key: str | None = None, source_class=None) -> None:
     """Write a 'role' observation with provenance + supersession.
 
     Thin wrapper over write_observation, kept so the two existing call sites
     in apply() (entities loop + write-time-dedup redirect branch) and any
     other callers keep working unchanged.
     """
-    write_observation(store, entity_id, "role", title, source, valid_from, confidence)
+    write_observation(store, entity_id, "role", title, source, valid_from, confidence,
+                      source_key=source_key, source_class=source_class)
 
 
 def consolidate_observations(store) -> dict:
@@ -434,7 +474,8 @@ def _now_iso() -> str:
 def _find_conflicting_relations(conn, entity_a, relation):
     """All currently-valid rows for (entity_a, relation), regardless of entity_b."""
     return conn.execute(
-        "SELECT id, entity_b, valid_from, valid_to, confidence, invalidated_at "
+        "SELECT id, entity_b, valid_from, valid_to, confidence, invalidated_at, "
+        "       COALESCE(derived, 0) AS derived "
         "FROM entity_relations "
         "WHERE entity_a = ? AND relation = ? AND invalidated_at IS NULL",
         (entity_a, relation),
@@ -453,18 +494,85 @@ def _mark_superseded(conn, relation_id, *, valid_to, invalidated_at, reason,
 
 
 def _bump_observation(conn, relation_id, *, last_seen, confidence_delta):
-    # strength counts how many times a relation has been observed — it grows by 1
-    # on every re-observation (confidence saturates at 1.0, so it can't serve as a
-    # frequency signal). This makes strength the weight the graph ranks/culls by:
-    # a relation seen 30× outranks a one-off, and the link cap keeps the strong ones.
+    """Refresh a re-observed relation's last_seen/confidence.
+
+    strength is NOT touched here any more: it is the count of distinct
+    evidence-class sources (relation_strength), SET after a source is
+    recorded — never "+1 per sighting", which counted re-extractions of the
+    same thread and mcpbrain's own derived notes as independent support."""
     conn.execute(
         "UPDATE entity_relations "
         "SET last_seen = ?, "
-        "    confidence = MIN(1.0, MAX(0.0, COALESCE(confidence, 1.0) + ?)), "
-        "    strength = COALESCE(strength, 1) + 1 "
+        "    confidence = MIN(1.0, MAX(0.0, COALESCE(confidence, 1.0) + ?)) "
         "WHERE id = ?",
         (last_seen, confidence_delta, relation_id),
     )
+
+
+# ---------------------------------------------------------------------------
+# Independent-source support (spec 2026-10-22 §3)
+# ---------------------------------------------------------------------------
+
+_EVIDENCE_VALUES = tuple(sorted(c.value for c in _sc.EVIDENCE))
+_EVIDENCE_SQL = "(" + ",".join(f"'{v}'" for v in _EVIDENCE_VALUES) + ")"
+
+
+def _class_value(cls) -> str:
+    return str(getattr(cls, "value", cls) or "")
+
+
+def _is_evidence_class(cls) -> bool:
+    return _class_value(cls) in _EVIDENCE_VALUES
+
+
+def record_relation_source(conn, relation_id, source_key, source_class) -> bool:
+    """Record that `source_key` (a logical source: thread / file / note /
+    event) supports this relation. INSERT OR IGNORE on (relation_id,
+    source_key), so the same source seen again adds nothing. Returns True
+    when the row is new."""
+    if relation_id is None or not source_key:
+        return False
+    cur = conn.execute(
+        "INSERT OR IGNORE INTO relation_sources "
+        "(relation_id, source_key, source_class, first_seen) VALUES (?, ?, ?, ?)",
+        (relation_id, str(source_key), _class_value(source_class), _now_iso()))
+    return cur.rowcount > 0
+
+
+def relation_strength(conn, relation_id) -> int:
+    """Distinct evidence-class sources supporting a relation. A relation the
+    user asserted (brain_graph_correct) counts at least 1 whatever its
+    sources."""
+    n = conn.execute(
+        "SELECT COUNT(*) FROM relation_sources "
+        f"WHERE relation_id = ? AND source_class IN {_EVIDENCE_SQL}",
+        (relation_id,)).fetchone()[0]
+    row = conn.execute(
+        "SELECT COALESCE(user_verdict, '') FROM entity_relations WHERE id = ?",
+        (relation_id,)).fetchone()
+    if row is not None and row[0] == "asserted":
+        n = max(n, 1)
+    return int(n)
+
+
+def record_observation_source(conn, observation_id, source_key, source_class) -> bool:
+    """observation_sources twin of record_relation_source."""
+    if observation_id is None or not source_key:
+        return False
+    cur = conn.execute(
+        "INSERT OR IGNORE INTO observation_sources "
+        "(observation_id, source_key, source_class, first_seen) VALUES (?, ?, ?, ?)",
+        (observation_id, str(source_key), _class_value(source_class), _now_iso()))
+    return cur.rowcount > 0
+
+
+def observation_support(conn, observation_id) -> int:
+    """Distinct evidence-class sources behind an observation (its
+    observed_count)."""
+    return int(conn.execute(
+        "SELECT COUNT(*) FROM observation_sources "
+        f"WHERE observation_id = ? AND source_class IN {_EVIDENCE_SQL}",
+        (observation_id,)).fetchone()[0])
 
 
 def decay_relations(store, *, stale_days: int = 365, weak_max: int = 1,
@@ -476,7 +584,13 @@ def decay_relations(store, *, stale_days: int = 365, weak_max: int = 1,
     longer earns a graph edge — its strength is zeroed (so graph_canvas, which
     keeps only strength > 0, drops it) and it's marked superseded_reason='decayed'.
     Frequently-seen or recent relations are never touched, however old. Returns a
-    count. Reversible from a DB backup; idempotent (zeroed rows won't re-match)."""
+    count. Reversible from a DB backup; idempotent (zeroed rows won't re-match).
+
+    A relation still supported by at least one evidence-class source
+    (relation_sources) is never decayed: strength now counts independent
+    primary sources, so most real relations sit at 1 — "weak" no longer means
+    "a one-off co-occurrence" for them, only for unsourced (legacy/structural)
+    rows."""
     from datetime import datetime, timedelta, timezone
     now = datetime.now(timezone.utc) if as_of is None else datetime.fromisoformat(as_of)
     cutoff = (now - timedelta(days=int(stale_days))).strftime("%Y-%m-%d")
@@ -487,7 +601,10 @@ def decay_relations(store, *, stale_days: int = 365, weak_max: int = 1,
             "SET strength = 0, valid_to = COALESCE(valid_to, ?), superseded_reason = 'decayed' "
             "WHERE COALESCE(strength, 1) > 0 AND COALESCE(strength, 1) <= ? "
             "AND COALESCE(last_seen, valid_from, '') <> '' "
-            "AND COALESCE(last_seen, valid_from) < ?",
+            "AND COALESCE(last_seen, valid_from) < ? "
+            "AND NOT EXISTS (SELECT 1 FROM relation_sources rs "
+            "                WHERE rs.relation_id = entity_relations.id "
+            f"                  AND rs.source_class IN {_EVIDENCE_SQL})",
             (stamp, int(weak_max), cutoff),
         )
         return {"relations_decayed": cur.rowcount}
@@ -528,9 +645,25 @@ def _increment_degree(conn, entity_a, entity_b):
     )
 
 
+def _promote_to_evidence(conn, relation_id) -> None:
+    """After an evidence source was recorded: SET strength to the distinct
+    evidence-source count, and turn a derived row (written earlier from a
+    non-evidence source, strength 0, degree never counted) into a real one."""
+    row = conn.execute(
+        "SELECT entity_a, entity_b, COALESCE(derived, 0) AS derived "
+        "FROM entity_relations WHERE id = ?", (relation_id,)).fetchone()
+    if row is None:
+        return
+    conn.execute("UPDATE entity_relations SET strength = ?, derived = 0 WHERE id = ?",
+                 (relation_strength(conn, relation_id), relation_id))
+    if row["derived"]:
+        _increment_degree(conn, row["entity_a"], row["entity_b"])
+
+
 def upsert_relation(store, entity_a, relation, entity_b, *, valid_from,
                     evidence="", confidence=1.0, strength=1,
-                    source_doc_id: str | None = None) -> int:
+                    source_doc_id: str | None = None,
+                    source_key: str | None = None, source_class=None) -> int:
     """Insert a bi-temporal relation with automatic supersession.
 
     Ported from bitemporal_writer.upsert_relation_bitemporal, repointed at
@@ -546,12 +679,14 @@ def upsert_relation(store, entity_a, relation, entity_b, *, valid_from,
         return upsert_relation_in(
             conn, entity_a, relation, entity_b, valid_from=valid_from,
             evidence=evidence, confidence=confidence, strength=strength,
-            source_doc_id=source_doc_id)
+            source_doc_id=source_doc_id, source_key=source_key,
+            source_class=source_class)
 
 
 def upsert_relation_in(conn, entity_a, relation, entity_b, *, valid_from,
                        evidence="", confidence=1.0, strength=1,
-                       source_doc_id: str | None = None) -> int:
+                       source_doc_id: str | None = None,
+                       source_key: str | None = None, source_class=None) -> int:
     """Insert a bi-temporal relation with automatic supersession, on a
     caller-held write connection. This is the body of upsert_relation, split
     out so a caller that already holds a write connection (e.g. a batch
@@ -573,6 +708,21 @@ def upsert_relation_in(conn, entity_a, relation, entity_b, *, valid_from,
 
     source_doc_id: the originating document id for provenance. Defaults to
     evidence for backward compatibility when not explicitly supplied.
+
+    source_key / source_class: the LOGICAL source of this sighting (spec
+    2026-10-22 §3). strength is the count of distinct evidence-class source
+    keys, SET from relation_strength after the source is recorded — never
+    incremented, so re-extracting the same thread adds nothing and a second,
+    independent thread adds one.
+      * evidence class: the source is recorded; strength recomputed; a row
+        that was derived=1 becomes evidence (derived=0, degree counted).
+      * non-evidence class (session/brief/draft/consolidated/duplicate): no
+        support row. A missing triple is written derived=1 with strength 0
+        (excluded everywhere, never supersedes a rival); an existing one is
+        left exactly as it is. A digest writes nothing at all.
+      * no class (legacy callers: calendar without a key, curator import,
+        brain_graph_correct): a new row takes `strength`; a re-observation
+        refreshes last_seen/confidence and leaves strength alone.
     """
     # Self-loops (an entity related to itself) are always noise — drop at the one
     # chokepoint every relation path flows through, regardless of relation type.
@@ -584,12 +734,48 @@ def upsert_relation_in(conn, entity_a, relation, entity_b, *, valid_from,
         raise ValueError("valid_from is required for bi-temporal writes")
     confidence = max(0.0, min(1.0, float(confidence)))
     now = _now_iso()
+    cls_value = _class_value(source_class)
+    if not source_key and _is_evidence_class(cls_value):
+        cls_value = ""                  # evidence with no key: unknown source
+    sourced = bool(cls_value)
+    evidence_write = sourced and _is_evidence_class(cls_value)
+    derived_write = sourced and not evidence_write
+    if cls_value == _sc.SourceClass.DIGEST.value:
+        return None                     # digests never write relations
     conflicts = _find_conflicting_relations(conn, entity_a, relation)
     same_target = [c for c in conflicts if c["entity_b"] == entity_b]
 
+    if derived_write:
+        # Derived content (mcpbrain's own notes, briefs, drafts, duplicates)
+        # never strengthens, revives or supersedes anything.
+        if same_target:
+            return same_target[0]["id"]
+        if conn.execute(
+                "SELECT 1 FROM entity_relations "
+                "WHERE entity_a = ? AND relation = ? AND entity_b = ?",
+                (entity_a, relation, entity_b)).fetchone():
+            return None
+        return conn.execute(
+            "INSERT INTO entity_relations "
+            "(entity_a, relation, entity_b, valid_from, confidence, evidence, strength, "
+            " last_seen, source_doc_id, derived) "
+            "VALUES (?, ?, ?, ?, ?, ?, 0, ?, ?, 1)",
+            (entity_a, relation, entity_b, valid_from, confidence, evidence, now,
+             source_doc_id),
+        ).lastrowid
+
     if same_target:
         rid = same_target[0]["id"]
-        _bump_observation(conn, rid, last_seen=now, confidence_delta=CONFIDENCE_BUMP)
+        if evidence_write:
+            if record_relation_source(conn, rid, source_key, cls_value):
+                _bump_observation(conn, rid, last_seen=now,
+                                  confidence_delta=CONFIDENCE_BUMP)
+            else:
+                conn.execute("UPDATE entity_relations SET last_seen = ? WHERE id = ?",
+                             (now, rid))
+            _promote_to_evidence(conn, rid)
+        else:
+            _bump_observation(conn, rid, last_seen=now, confidence_delta=CONFIDENCE_BUMP)
         _backfill_provenance_if_empty(
             conn, rid, source_doc_id=source_doc_id, valid_from=valid_from)
         return rid
@@ -600,7 +786,10 @@ def upsert_relation_in(conn, entity_a, relation, entity_b, *, valid_from,
     # valid_from rather than assuming the incoming write is the latest.
     singleton = is_singleton_relation(relation)
     others = [c for c in conflicts if c["entity_b"] != entity_b]
-    newest_other = max(others, key=lambda c: ((c["valid_from"] or ""), c["id"]),
+    # A derived rival is no fact to be "older than": only real rows compete
+    # for current (a derived one is still retired below when this is current).
+    newest_other = max((c for c in others if not c["derived"]),
+                       key=lambda c: ((c["valid_from"] or ""), c["id"]),
                        default=None) if singleton else None
     incoming_is_current = (newest_other is None
                            or (valid_from or "") >= (newest_other["valid_from"] or ""))
@@ -638,6 +827,10 @@ def upsert_relation_in(conn, entity_a, relation, entity_b, *, valid_from,
             (entity_a, relation, entity_b, valid_from, confidence, evidence, strength, now, source_doc_id),
         ).lastrowid
         _increment_degree(conn, entity_a, entity_b)
+
+    if evidence_write:
+        record_relation_source(conn, new_id, source_key, cls_value)
+        _promote_to_evidence(conn, new_id)
 
     if singleton and incoming_is_current:
         # Newest fact → it is current; retire the older rivals.
@@ -1121,6 +1314,79 @@ def _find_near_duplicate_action(conn, text, owner, *, thread_id="", embedder=Non
 # apply() — structural write pass (ported from enrich_gmail.py:1043-1600)
 # ---------------------------------------------------------------------------
 
+def extraction_sources(store, doc_ids, *, thread_id="", home=None,
+                       rules=None) -> tuple[str, str]:
+    """(source_key, source_class value) for one extraction's chunks.
+
+    An extraction is one thread (thread_enrich groups by logical source), so
+    every evidence chunk of it shares one source_key; the first evidence
+    chunk's key/class is returned. A duplicate (chunks.dup_of) carries its
+    CANONICAL chunk's key and class (followed once) — it adds no support the
+    canonical did not already give. With no evidence chunk the first chunk's
+    derived class is returned (session/brief/draft/consolidated/digest/
+    duplicate-of-nothing). A doc id with no chunk row is classified from the
+    id alone (``enriched-`` → digest, ``note-consolidated-`` → consolidated)
+    and keyed on the thread id. No doc ids at all → ("", ""): unknown, the
+    legacy path (no support row, no strength change).
+    """
+    ids = [d for d in dict.fromkeys(doc_ids or []) if d]
+    if not ids:
+        return "", ""
+    if rules is None:
+        try:
+            rules = _sc.Rules.from_config(
+                home if home is not None else str(config.app_dir()),
+                generated_label_ids=_sc.cached_generated_label_ids(store))
+        except Exception:  # noqa: BLE001 — classification must never block apply
+            rules = _sc.Rules()
+    import json as _json
+
+    def _rows(q_ids):
+        out = {}
+        with store._connect() as db:
+            for i in range(0, len(q_ids), 500):
+                batch = q_ids[i:i + 500]
+                qs = ",".join("?" * len(batch))
+                for r in db.execute(
+                        "SELECT doc_id, metadata, dup_of FROM chunks "
+                        f"WHERE doc_id IN ({qs})", batch):
+                    try:
+                        meta = _json.loads(r["metadata"] or "{}") or {}
+                    except (ValueError, TypeError):
+                        meta = {}
+                    out[r["doc_id"]] = (meta, r["dup_of"] or "")
+        return out
+
+    rows = _rows(ids)
+    canon_ids = [dup for (_m, dup) in rows.values() if dup and dup not in rows]
+    canon = _rows(canon_ids) if canon_ids else {}
+    canon.update(rows)
+
+    first_derived = None
+    for d in ids:
+        if d in rows:
+            meta, dup = rows[d]
+            if dup:
+                if dup not in canon:
+                    cls = _sc.SourceClass.DUPLICATE
+                    key = _sc.source_key(d, meta)
+                else:
+                    cmeta, _ = canon[dup]
+                    cls = _sc.classify(dup, cmeta, rules)
+                    key = _sc.source_key(dup, cmeta)
+            else:
+                cls = _sc.classify(d, meta, rules)
+                key = _sc.source_key(d, meta)
+        else:
+            cls = _sc.classify(d, {}, rules)
+            key = thread_id or d
+        if _sc.is_evidence(cls):
+            return key, cls.value
+        if first_derived is None:
+            first_derived = (key, cls.value)
+    return first_derived
+
+
 def apply(store, extraction, *, doc_ids, identity=None,
           clock=None, embedder=None, owner=None, home=None, entity_index=None,
           embed_cache=None) -> dict:
@@ -1215,6 +1481,17 @@ def apply(store, extraction, *, doc_ids, identity=None,
     # synthetic enriched-thread id when a thread has no concrete lead doc.
     prov_doc_id = (doc_ids[0] if doc_ids else "") or (f"enriched-{thread_id}" if thread_id else "")
 
+    # Independent-source support (spec 2026-10-22 §3): which LOGICAL source
+    # (thread / file / note / event) this extraction is, and whether it is
+    # evidence. Evidence adds a support row (strength / observed_count are SET
+    # to the distinct-source count); a derived source writes links/relations/
+    # observations derived=1 and adds no support; a digest writes none.
+    _src_key, _src_cls = extraction_sources(store, doc_ids, thread_id=thread_id,
+                                            home=_home)
+    _derived = bool(_src_cls) and not _is_evidence_class(_src_cls)
+    _digest = _src_cls == _sc.SourceClass.DIGEST.value
+    _src_kw = {"source_key": _src_key, "source_class": _src_cls}
+
     # Thread lead = earliest message by date. Falls back to first listed.
     lead = None
     if messages:
@@ -1282,7 +1559,7 @@ def apply(store, extraction, *, doc_ids, identity=None,
         # send from it and email-equality dedup would collapse them (C1).
         _sender_email = "" if is_role_address(sender_email) else sender_email
         sender_id = upsert_entity(
-            store, name=sender_name, entity_type="person", org=sender_org,
+            store, derived=_derived, name=sender_name, entity_type="person", org=sender_org,
             email_addr=_sender_email, taxonomy=taxonomy, valid_from=lead_date_iso) or ""
 
     # email_context row for the lead message.
@@ -1299,11 +1576,21 @@ def apply(store, extraction, *, doc_ids, identity=None,
     linked: set = set()
     name_to_id: dict = {}
 
+    def _link(entity_id, role, *, mentions=False):
+        """Link entity_id to the lead message; count it (email_count, and
+        mentions when asked) only for a NEW primary-source link row."""
+        if _digest:
+            return False
+        new = store.link_email_entity(lead_msg_id, entity_id, role=role,
+                                      derived=_derived)
+        if new and not _derived:
+            _bump_email_count(store, entity_id, mentions=mentions)
+        return new
+
     # Link + role for the sender. email_count is driven off the link insert so
     # it counts distinct messages, not apply invocations (idempotent on re-run).
     if sender_id:
-        if store.link_email_entity(lead_msg_id, sender_id, role="sender"):
-            _bump_email_count(store, sender_id)
+        _link(sender_id, "sender")
         linked.add(sender_id)
         if sender_name:
             name_to_id[sender_name] = sender_id
@@ -1370,11 +1657,11 @@ def apply(store, extraction, *, doc_ids, identity=None,
                 continue
             m_org = canonical_org(eorg or org, taxonomy)
             eid = _meeting_series_id(series, m_org)
-            store.upsert_entity(eid, series, "meeting", m_org, lead_date_iso)
+            store.upsert_entity(eid, series, "meeting", m_org, lead_date_iso,
+                                bump_mentions=False)
             name_to_id[ename] = eid
             if eid not in linked:
-                if store.link_email_entity(lead_msg_id, eid, role="about"):
-                    _bump_email_count(store, eid)
+                _link(eid, "about", mentions=True)
                 linked.add(eid)
                 entities_created += 1
             occ_date = _parse_date_iso(ent.get("occurrence_date") or "") or lead_date_iso or today
@@ -1411,15 +1698,15 @@ def apply(store, extraction, *, doc_ids, identity=None,
                     except Exception:  # noqa: BLE001
                         pass
                 if entity_id not in linked:
-                    if store.link_email_entity(lead_msg_id, entity_id, role="mentioned"):
-                        _bump_email_count(store, entity_id)
+                    _link(entity_id, "mentioned")
                     linked.add(entity_id)
                 if erole and etype == "person":
                     write_role_observation(store, entity_id, erole, "llm_extraction",
-                                           lead_date_iso or "2026-01-01", "medium")
+                                           lead_date_iso or "2026-01-01", "medium",
+                                           **_src_kw)
                 continue
 
-        entity_id = upsert_entity(store, name=ename, entity_type=etype, org=eorg,
+        entity_id = upsert_entity(store, derived=_derived, name=ename, entity_type=etype, org=eorg,
                                   email_addr=eemail, taxonomy=taxonomy, valid_from=lead_date_iso)
         if not entity_id:
             continue
@@ -1431,14 +1718,14 @@ def apply(store, extraction, *, doc_ids, identity=None,
         name_to_id[ename] = entity_id
 
         if entity_id not in linked:
-            if store.link_email_entity(lead_msg_id, entity_id, role="mentioned"):
-                _bump_email_count(store, entity_id)
+            _link(entity_id, "mentioned")
             linked.add(entity_id)
             entities_created += 1
 
         if erole and etype == "person":
             write_role_observation(store, entity_id, erole, "llm_extraction",
-                                   lead_date_iso or "2026-01-01", "medium")
+                                   lead_date_iso or "2026-01-01", "medium",
+                                   **_src_kw)
 
     # ── 1.5 Rich observations: dated, attributable facts (Task 4.2) ────────
     # observations[] items ({"entity_name", "attribute", "value", "date"})
@@ -1461,7 +1748,8 @@ def apply(store, extraction, *, doc_ids, identity=None,
             obs_valid_from = (_parse_date_iso(obs_date_raw) or obs_date_raw
                               or lead_date_iso or today)
             write_observation(store, obs_entity_id, obs_attribute, obs_value,
-                              "llm_extraction", obs_valid_from, "medium")
+                              "llm_extraction", obs_valid_from, "medium",
+                              **_src_kw)
 
     # ── 2. Topics with min-distinct-orgs gate (Task 2.6) ───────────────────
     # A topic entity is only created once it has appeared in email_context under
@@ -1478,7 +1766,7 @@ def apply(store, extraction, *, doc_ids, identity=None,
             continue
         topic_id = store.upsert_topic_entity(tag_clean)
         if topic_id:
-            store.link_email_entity(lead_msg_id, topic_id, role="about")
+            _link(topic_id, "about")
             topics_created += 1
 
     # ── 2.4 Deterministic sender entities (Task 1.1) ────────────────────────
@@ -1515,14 +1803,13 @@ def apply(store, extraction, *, doc_ids, identity=None,
             # collapse them (C1). A real human on a shared inbox is still captured, just
             # without the misleading shared address as their identity.
             entity_email = "" if is_role_address(s_email) else s_email
-            sid = upsert_entity(store, name=s_name, entity_type="person", org="",
+            sid = upsert_entity(store, derived=_derived, name=s_name, entity_type="person", org="",
                                 email_addr=entity_email, taxonomy=taxonomy, valid_from=lead_date_iso)
             if not sid:
                 continue
             name_to_id[s_name] = sid
             if sid not in linked:
-                if store.link_email_entity(lead_msg_id, sid, role="authored"):
-                    _bump_email_count(store, sid)
+                _link(sid, "authored")
                 linked.add(sid)
 
     # ── 2.5 Structural relations: deterministic works_at / mentioned_with ──
@@ -1563,13 +1850,13 @@ def apply(store, extraction, *, doc_ids, identity=None,
             if not msg_domain_org or msg_domain_org in ("external", "unknown", ""):
                 continue
             org_entity_id = upsert_entity(
-                store, name=msg_domain_org, entity_type="org", org=msg_domain_org,
+                store, derived=_derived, name=msg_domain_org, entity_type="org", org=msg_domain_org,
                 taxonomy=taxonomy, valid_from=lead_date_iso)
             if not org_entity_id:
                 continue
             upsert_relation(store, person_id, "works_at", org_entity_id,
                            valid_from=lead_date_iso or today, evidence=lead_msg_id,
-                           source_doc_id=prov_doc_id)
+                           source_doc_id=prov_doc_id, **_src_kw)
 
         # mentioned_with among every distinct pair of resolved senders, both
         # directions — symmetric co-participation fact, directional rows.
@@ -1577,10 +1864,10 @@ def apply(store, extraction, *, doc_ids, identity=None,
             for b_id in structural_person_ids[i + 1:]:
                 upsert_relation(store, a_id, "mentioned_with", b_id,
                                 valid_from=lead_date_iso or today, evidence=lead_msg_id,
-                                source_doc_id=prov_doc_id)
+                                source_doc_id=prov_doc_id, **_src_kw)
                 upsert_relation(store, b_id, "mentioned_with", a_id,
                                 valid_from=lead_date_iso or today, evidence=lead_msg_id,
-                                source_doc_id=prov_doc_id)
+                                source_doc_id=prov_doc_id, **_src_kw)
 
     # ── 3. Relations ────────────────────────────────────────────────────────
     relations_created = 0
@@ -1630,7 +1917,7 @@ def apply(store, extraction, *, doc_ids, identity=None,
             # original name so a real org like "Church at the Bay" is stored intact.
             if for_works_at_target:
                 create_name = name  # prefer original for brand-new org entities
-                eid = upsert_entity(store, name=create_name,
+                eid = upsert_entity(store, derived=_derived, name=create_name,
                                     entity_type="org", org=org, taxonomy=taxonomy)
                 if eid:
                     return eid, create_name
@@ -1663,7 +1950,7 @@ def apply(store, extraction, *, doc_ids, identity=None,
 
         if upsert_relation(store, source_id, rel_type, target_id,
                            valid_from=lead_date_iso or today, evidence=lead_msg_id,
-                           source_doc_id=prov_doc_id):
+                           source_doc_id=prov_doc_id, **_src_kw):
             relations_created += 1
 
     # ── 4. Action lifecycle (Task 3) ────────────────────────────────────────
@@ -2072,25 +2359,34 @@ def _meeting_series_id(series_name: str, org: str) -> str:
     return slugify(f"meeting-{org}-{series_name}")
 
 
-def _bump_email_count(store, entity_id: str) -> None:
-    """Increment an entity's email_count by one.
+def _bump_email_count(store, entity_id: str, *, mentions: bool = False) -> None:
+    """Increment an entity's email_count (and, with mentions=True, mentions)
+    by one.
 
-    Called from apply() only when a new (message_id, entity_id) link row was
-    created, so email_count tracks distinct message appearances and stays stable
-    when a thread is re-applied.
+    Called from apply() only when a NEW, non-derived (message_id, entity_id)
+    link row was created, so both count distinct primary messages and stay
+    stable when a thread is re-applied or a derived source mentions the
+    entity (spec 2026-10-22 §3).
     """
     with store._connect(write=True) as conn:
         conn.execute(
-            "UPDATE entities SET email_count = email_count + 1 WHERE id = ?",
-            (entity_id,))
+            "UPDATE entities SET email_count = email_count + 1, "
+            "mentions = COALESCE(mentions, 0) + ? WHERE id = ?",
+            (1 if mentions else 0, entity_id))
 
 
-def _ensure_works_at(conn, entity_id: str, org: str) -> None:
+def _ensure_works_at(conn, entity_id: str, org: str, *, derived: bool = False) -> None:
     """Auto-create the org entity and a works_at edge. No-op for external/unknown.
 
     Uses INSERT OR IGNORE on the legacy UNIQUE(entity_a,relation,entity_b)
     triple — the structural pass; bitemporal works_at supersession runs through
     upsert_relation in the relations loop.
+
+    The edge carries no source of its own (it restates the entity's org
+    field), so it is inserted at strength 1 with no relation_sources row and
+    never touches an existing row's strength. Reached from a derived source
+    (derived=True) it is written derived=1 / strength 0 instead, excluded
+    everywhere until a primary source asserts it.
     """
     if not org or org in ("external", "unknown", ""):
         return
@@ -2107,9 +2403,9 @@ def _ensure_works_at(conn, entity_id: str, org: str) -> None:
             (org_id, org, org, today, today))
     conn.execute(
         "INSERT OR IGNORE INTO entity_relations "
-        "(entity_a, relation, entity_b, strength, last_seen) "
-        "VALUES (?, 'works_at', ?, 1, ?)",
-        (entity_id, org_id, today))
+        "(entity_a, relation, entity_b, strength, last_seen, derived) "
+        "VALUES (?, 'works_at', ?, ?, ?, ?)",
+        (entity_id, org_id, 0 if derived else 1, today, 1 if derived else 0))
 
 
 def resolve_owner_entity_id(store, owner, owner_email: str = "") -> str:
@@ -2195,7 +2491,8 @@ def _set_org_recency(conn, entity_id: str, org: str, valid_from: str) -> None:
 
 
 def upsert_entity(store, *, name, entity_type, org="", email_addr="",
-                  aliases="", notes="", taxonomy=None, valid_from=""):
+                  aliases="", notes="", taxonomy=None, valid_from="",
+                  derived=False):
     """Insert or merge an entity. Returns the surviving entity id, or None.
 
     Ported from memory_db.py:1581-1717, repointed at store._connect(). Dedup
@@ -2245,7 +2542,7 @@ def upsert_entity(store, *, name, entity_type, org="", email_addr="",
                 if org:
                     _set_org_recency(conn, winner_id, org, valid_from)
                     if entity_type == "person":
-                        _ensure_works_at(conn, winner_id, org)
+                        _ensure_works_at(conn, winner_id, org, derived=derived)
                 # email_count is driven by message links in apply(), not by the
                 # upsert itself — re-upserting the same sender on a re-applied
                 # thread must not inflate the count.
@@ -2343,7 +2640,7 @@ def upsert_entity(store, *, name, entity_type, org="", email_addr="",
             # every re-observation should keep self-healing it, not only the
             # one call that happens to also change the org field.
             if org and entity_type == "person":
-                _ensure_works_at(conn, eid, org)
+                _ensure_works_at(conn, eid, org, derived=derived)
         else:
             all_aliases = "|".join(split_aliases(aliases) + ([title_alias] if title_alias else []))
             conn.execute(
@@ -2353,6 +2650,6 @@ def upsert_entity(store, *, name, entity_type, org="", email_addr="",
                 (eid, name, entity_type, org, (valid_from if org else ""),
                  email_addr, all_aliases, today, today, notes))
             if org and entity_type == "person":
-                _ensure_works_at(conn, eid, org)
+                _ensure_works_at(conn, eid, org, derived=derived)
 
     return eid

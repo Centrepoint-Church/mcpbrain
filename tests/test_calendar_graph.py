@@ -215,3 +215,21 @@ def test_handle_calendar_item_applies_attendees_to_graph(tmp_path, monkeypatch):
             "SELECT COUNT(*) c FROM entity_relations WHERE relation='attended'"
         ).fetchone()["c"]
     assert rel == 1
+
+
+def test_attended_strength_counts_distinct_events(tmp_path):
+    """Each event is one independent source: re-syncing the same event adds
+    nothing, a second event adds one (spec 2026-10-22 §3)."""
+    s = _store(tmp_path)
+    _seed_owner_node(s)
+    att = [{"displayName": "Sam Chen", "email": "sam@partner.org"}]
+    _apply_attendees_to_graph(s, _event("evt1", att), _OWNER)
+    _apply_attendees_to_graph(s, _event("evt1", att), _OWNER)
+
+    def strength():
+        with s._connect() as db:
+            return db.execute("SELECT strength FROM entity_relations "
+                              "WHERE relation='attended'").fetchone()[0]
+    assert strength() == 1
+    _apply_attendees_to_graph(s, _event("evt2", att), _OWNER)
+    assert strength() == 2

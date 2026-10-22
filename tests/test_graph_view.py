@@ -441,3 +441,29 @@ def test_ego_without_suppressions_table(tmp_path):
                    "VALUES(0,'e1','knows','e2',4)")
     out = graph_view.graph_ego(_Store(p), "e1", hops=1)
     assert {n["id"] for n in out["nodes"]} == {"e1", "e2"}
+
+
+def test_graph_view_ignores_derived_and_legacy(tmp_path):
+    """Derived rows (no primary source) are not graph edges; legacy rows
+    (pre-source-counting strength) never outrank a counted relation."""
+    p = tmp_path / "b.sqlite3"
+    _seed(p,
+          entities=[("e1", "Alice", "person", "Acme", 9, "2026-06-01"),
+                    ("e2", "Bob", "person", "Acme", 8, "2026-06-02"),
+                    ("e3", "Cat", "person", "Acme", 8, "2026-06-03")],
+          relations=[("e1", "e2", "knows", 2), ("e1", "e3", "involved_in", 40),
+                     ("e2", "e3", "manages", 1)])
+    with sqlite3.connect(str(p)) as db:
+        db.execute("ALTER TABLE entity_relations ADD COLUMN derived INTEGER NOT NULL DEFAULT 0")
+        db.execute("ALTER TABLE entity_relations ADD COLUMN origin TEXT DEFAULT 'local'")
+        db.execute("ALTER TABLE entity_relations ADD COLUMN invalidated_at TEXT")
+        db.execute("ALTER TABLE entities ADD COLUMN aliases TEXT DEFAULT ''")
+        db.execute("ALTER TABLE entities ADD COLUMN notes TEXT DEFAULT ''")
+        db.execute("UPDATE entity_relations SET origin='legacy' WHERE relation='involved_in'")
+        db.execute("UPDATE entity_relations SET derived=1 WHERE relation='manages'")
+    out = graph_view.graph_canvas(_Store(p), min_conn=7)
+    assert [link["relation"] for link in out["links"]] == ["knows", "involved_in"]
+    d = graph_view.entity_detail(_Store(p), "e2")
+    assert [r["relation"] for r in d["relations"] + d["backlinks"]] == ["knows"]
+    ego = graph_view.graph_ego(_Store(p), "e2", hops=1)
+    assert {link["relation"] for link in ego["links"]} == {"knows"}
