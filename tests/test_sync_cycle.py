@@ -1184,7 +1184,8 @@ def test_run_sync_cycle_flushes_skip_report_per_shared_drive(tmp_path, monkeypat
 
     def fake_handle_shared(service, store, item, *, fleet_storage=None, pin=None,
                            drive_id=None, contextual_retrieval=False,
-                           folder_cache=None, report=None, bulk_section=None):
+                           folder_cache=None, report=None, bulk_section=None,
+                           skip_folders=frozenset()):
         assert report is not None, "handle_shared_drive_item must receive a real report dict"
         report[("extraction_empty", "application/pdf")] = 2
 

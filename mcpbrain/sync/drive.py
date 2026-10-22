@@ -473,6 +473,37 @@ def folder_path(service, file_meta: dict, cache: dict) -> str:
     return "/".join(reversed(names))
 
 
+def under_folders(service, file_meta: dict, cache: dict, folder_ids) -> bool:
+    """True when any ancestor folder of the file is in `folder_ids`. Walks the
+    same parent chain as folder_path, through the same caller-owned `cache`
+    (folder_id -> (name, parents)), so it costs no extra lookups once
+    folder_path has seen a folder. A failed lookup ends the walk (False):
+    the caller's skip is for mcpbrain's own folders, which are resolved and
+    reachable."""
+    if not folder_ids:
+        return False
+    parents = file_meta.get("parents") or []
+    seen: set[str] = set()
+    while parents and len(seen) < 16:
+        fid = parents[0]
+        if fid in folder_ids:
+            return True
+        if fid in seen:
+            return False
+        seen.add(fid)
+        if fid not in cache:
+            try:
+                info = service.files().get(
+                    fileId=fid, fields="id,name,parents",
+                    supportsAllDrives=True).execute(num_retries=_NUM_RETRIES)
+                cache[fid] = (info.get("name", ""), info.get("parents") or [])
+            except Exception as exc:  # noqa: BLE001
+                log.debug("under_folders: lookup failed for %s: %s", fid, exc)
+                cache[fid] = ("", [])
+        parents = cache[fid][1]
+    return False
+
+
 def upsert_file_chunks(store, chunks: list[Chunk], *, file_id: str,
                        partial: bool = False) -> int:
     """Upsert one Drive file's chunks and delete the ones it no longer has.
@@ -618,6 +649,7 @@ def _cache_first_extract_one(
     service, store, fleet_storage, drive_id, fmeta, pin,
     *, contextual_retrieval: bool = False, bulk_section=None,
     folder_cache: dict | None = None, report: dict | None = None,
+    skip_folders=frozenset(),
 ) -> tuple[bool, tuple[str, str] | None]:
     """Cache-first extraction of ONE Shared-Drive file, shared by the delta-sync
     (handle_shared_drive_item) and backfill (backfill_shared_drive) loops.
@@ -677,6 +709,10 @@ def _cache_first_extract_one(
         folder_cache = {}
 
     fid = fmeta["id"]
+    # mcpbrain's own backup/fleet/escrow folders inside an ordinary team drive
+    # (infra_drives.Layout.folders): never extracted, imported or published.
+    if under_folders(service, fmeta, folder_cache, skip_folders):
+        return False, None
     content_h = _file_content_hash(fmeta)
     if ingest_cache.try_import(store, fleet_storage, drive_id, fid, content_h, pin,
                                contextual_retrieval=contextual_retrieval,
@@ -939,7 +975,7 @@ def handle_drive_item(service, store, item, *, folder_cache=None,
 def handle_shared_drive_item(service, store, item, *, fleet_storage, pin,
                              drive_id: str, contextual_retrieval: bool = False,
                              folder_cache: dict | None = None, report=None,
-                             bulk_section=None) -> None:
+                             bulk_section=None, skip_folders=frozenset()) -> None:
     """Work one queued Shared Drive item. Raises on failure so the loop
     backs it off.
 
@@ -989,7 +1025,7 @@ def handle_shared_drive_item(service, store, item, *, fleet_storage, pin,
         service, store, fleet_storage, drive_id, fmeta, pin,
         contextual_retrieval=contextual_retrieval, bulk_section=bulk_section,
         folder_cache=folder_cache if folder_cache is not None else {},
-        report=report)
+        report=report, skip_folders=skip_folders)
     if miss is not None:
         file_id, content_hash = miss
         store.record_pending_publish(drive_id, file_id, content_hash)
@@ -1063,7 +1099,7 @@ def backfill_drive(service, store, modified_after: str,
 def backfill_shared_drive(service, store, drive_id, modified_after, *,
                           fleet_storage, pin, modified_before=None,
                           max_files=None, contextual_retrieval: bool = False,
-                          bulk_section=None) -> dict:
+                          bulk_section=None, skip_folders=frozenset()) -> dict:
     """One-shot bounded backfill for ONE Shared Drive (files.list, driveId-scoped),
     cache-first. Mirrors backfill_drive but adds Shared-Drive query flags, cache
     import/publish parity, and drive_id stamping. Does NOT touch the delta cursor.
@@ -1118,7 +1154,8 @@ def backfill_shared_drive(service, store, drive_id, modified_after, *,
                 did_process, file_miss = _cache_first_extract_one(
                     service, store, fleet_storage, drive_id, f, pin,
                     contextual_retrieval=contextual_retrieval, bulk_section=bulk_section,
-                    folder_cache=folder_cache, report=skip_report)
+                    folder_cache=folder_cache, report=skip_report,
+                    skip_folders=skip_folders)
             except ReflowOrphanError as exc:
                 log.error("drive backfill %s: carry-over import of %s rolled back "
                           "(orphaned provenance); skipping it: %s",

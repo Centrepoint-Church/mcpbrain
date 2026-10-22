@@ -67,6 +67,18 @@ write to My Drive), then two folders inside it:
 Record both folder ids from their URLs. To run without fleet sync or backup upload,
 leave the corresponding profile fields blank.
 
+**The Shared Drive must be dedicated to mcpbrain.** Put nothing else in it.
+mcpbrain syncs every Shared Drive its users can see as a document source, apart
+from its own infrastructure. A drive whose root holds only mcpbrain's folders
+(the fleet folder, the escrow folder and per-person backup folders) is
+recognised as dedicated and never synced. If you put these folders inside a
+drive that also holds real documents, that drive stays synced. mcpbrain then has
+to skip its own folders file by file, and it will **refuse** to delete anything
+it already took from them if the drive looks like real content (`doctor` shows
+"mcpbrain did not remove N items … because they look like real documents"). A
+dedicated drive also keeps encryption keys and backups away from everyone who
+has access to your ordinary team drives.
+
 ## 3. GitHub
 
 - Fork or copy `mcpbrain` — your source repo.

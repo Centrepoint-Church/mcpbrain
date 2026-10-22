@@ -218,6 +218,23 @@ def connector_lines(*, mcpbrain_bin: str) -> list[str]:
     return lines
 
 
+def infra_refused_lines(store) -> list[str]:
+    """One ⚠️ per drive whose infrastructure purge was refused."""
+    import json as _json
+    from mcpbrain.ingest_cache import INFRA_REFUSED_META
+    out = []
+    for key, raw in sorted(store.meta_with_prefix(INFRA_REFUSED_META).items()):
+        try:
+            n = int(_json.loads(raw).get("count") or 0)
+        except (TypeError, ValueError, AttributeError):
+            n = 0
+        drive = key[len(INFRA_REFUSED_META):]
+        out.append(f"⚠️  {'Infra drives':<16} mcpbrain did not remove {n} item(s) "
+                   f"from {drive} because they look like real documents → keep "
+                   "mcpbrain's backup/fleet folders in a Shared Drive of their own")
+    return out
+
+
 def run_doctor(home, *, conns=None, repairs=None, reprobe=None, platform=None,
                mcpbrain_bin=None, agent_installed=None, model_present=None,
                daemon_status=None, offline: bool = False) -> tuple[int, str]:
@@ -509,6 +526,14 @@ def run_doctor(home, *, conns=None, repairs=None, reprobe=None, platform=None,
                          f"{len(q['failing'])} items retrying — {detail}")
     except Exception as exc:  # noqa: BLE001 — never fatal
         lines.append(f"➖ {'Sync queue':<16} skipped ({exc})")
+
+    # mcpbrain's own backup/fleet folders found inside a drive whose stored
+    # chunks look like real documents: the purge refused to delete them
+    # (ingest_cache.purge_infrastructure). Silent otherwise.
+    try:
+        lines.extend(infra_refused_lines(store))
+    except Exception as exc:  # noqa: BLE001 — never fatal
+        lines.append(f"➖ {'Infra drives':<16} skipped ({exc})")
 
     # Bi-temporal back-pointers whose target row is gone. Surfaced because
     # foreign_key_check is STRUCTURALLY BLIND to any of these columns that does

@@ -1,10 +1,18 @@
-"""mcpbrain must never ingest its OWN infrastructure drives (backups, fleet
-folder, escrow) as Shared Drive document sources."""
+"""mcpbrain must never ingest its OWN infrastructure (backups, fleet folder,
+escrow) -- and must never take an ordinary team drive down with it."""
+import json
+import re
+from datetime import datetime, timedelta, timezone
+
 import pytest
 
 from mcpbrain import config, infra_drives, ingest_cache
 from mcpbrain.store import Store
 from tests.helpers.org_fleet import LocalDirFleetStorage
+
+FOLDER = "application/vnd.google-apps.folder"
+PIN = {"embed_model": "bge-small", "dim": 4, "chunker_version": "v1",
+       "enrich_logic_floor": 1, "fleet_secret": "s3cret"}
 
 
 @pytest.fixture(autouse=True)
@@ -22,6 +30,8 @@ def _store(tmp_path):
     return s
 
 
+# -- a fake Drive tree -------------------------------------------------------
+
 class _Req:
     def __init__(self, result=None, exc=None):
         self._r, self._e = result, exc
@@ -32,31 +42,80 @@ class _Req:
         return self._r
 
 
-class _Files:
-    def __init__(self, drive_of, fail=()):
-        self.drive_of = drive_of        # file/folder id -> driveId (or None)
+class _Tree:
+    """id -> {name, mimeType, parents, driveId}. Drive roots are named
+    "Drive" with no parents, as Drive's files.get reports them."""
+
+    def __init__(self, drives, items, fail=()):
+        self.drives_ = drives                      # [{"id","name"}]
+        self.nodes = {d["id"]: {"name": "Drive", "mimeType": FOLDER,
+                                "parents": [], "driveId": d["id"]} for d in drives}
+        self.nodes.update(items)
         self.fail = set(fail)
         self.calls = []
 
+    # files()
+    def files(self):
+        return self
+
+    def drives(self):
+        return self
+
     def get(self, fileId, fields=None, supportsAllDrives=None):
-        self.calls.append(fileId)
+        self.calls.append(("get", fileId))
         if fileId in self.fail:
             return _Req(exc=OSError("network down"))
-        did = self.drive_of.get(fileId)
-        return _Req({"driveId": did} if did else {"id": fileId})
+        n = self.nodes.get(fileId)
+        if n is None:
+            return _Req({"id": fileId})
+        return _Req({"id": fileId, **n})
+
+    def list(self, q=None, pageToken=None, **_kw):
+        if q is None:                               # drives().list
+            return _Req({"drives": self.drives_})
+        parent = re.match(r"'([^']+)' in parents", q).group(1)
+        self.calls.append(("list", parent))
+        kids = [{"id": i, "name": n["name"], "mimeType": n["mimeType"]}
+                for i, n in self.nodes.items() if parent in n["parents"]]
+        return _Req({"files": kids})
 
 
-class _Svc:
-    def __init__(self, drive_of=None, fail=()):
-        self._files = _Files(drive_of or {}, fail)
-
-    def files(self):
-        return self._files
+def _folder(name, parent, drive):
+    return {"name": name, "mimeType": FOLDER, "parents": [parent], "driveId": drive}
 
 
-def _home(tmp_path, *, backup=None, fleet=None, escrow=None):
+def _file(name, parent, drive, mime="application/json"):
+    return {"name": name, "mimeType": mime, "parents": [parent], "driveId": drive}
+
+
+def _dedicated_tree(**kw):
+    """INFRA holds only mcpbrain: mcpbrain-fleet (with escrow inside) and this
+    person's backup folder. D1 is an ordinary team drive."""
+    return _Tree([{"id": "INFRA", "name": "Backups"}, {"id": "D1", "name": "Ops"}], {
+        "FLEET": _folder("mcpbrain-fleet", "INFRA", "INFRA"),
+        "ESC": _folder("escrow", "FLEET", "INFRA"),
+        "ME": _folder("me@x.org", "INFRA", "INFRA"),
+        "CH": _folder("chain-20261001-abc", "ME", "INFRA"),
+        "OTHER": _folder("someone@x.org", "INFRA", "INFRA"),
+        "OCH": _folder("chain-20261002-def", "OTHER", "INFRA"),
+        "DOC": _file("Plan.docx", "D1", "D1", "application/msword"),
+    }, **kw)
+
+
+def _team_tree():
+    """A fork that put its fleet folder inside its ordinary "Ops" drive."""
+    return _Tree([{"id": "TEAM", "name": "Ops"}], {
+        "FLEET": _folder("mcpbrain-fleet", "TEAM", "TEAM"),
+        "ESC": _folder("escrow", "FLEET", "TEAM"),
+        "BUD": _folder("Budgets", "TEAM", "TEAM"),
+        "PLAN": _file("Plan.docx", "BUD", "TEAM", "application/msword"),
+        "CFG": _file("org-config.json", "FLEET", "TEAM"),
+    })
+
+
+def _home(tmp_path, *, backup=None, fleet=None, escrow=None, extra=None):
     home = str(tmp_path / "home")
-    cfg = {"owner_email": "me@x.org"}
+    cfg = {"owner_email": "me@x.org", **(extra or {})}
     if backup:
         cfg["backup"] = {"shared_drive_id": backup}
     if fleet or escrow:
@@ -67,54 +126,91 @@ def _home(tmp_path, *, backup=None, fleet=None, escrow=None):
 
 # -- resolution --------------------------------------------------------------
 
-def test_listed_drive_id_is_excluded_without_a_drive_call(tmp_path):
-    home = _home(tmp_path, backup="INFRA")
-    svc = _Svc()
-    got = infra_drives.resolve(home, _store(tmp_path), svc,
+def test_a_drive_holding_only_mcpbrain_is_dedicated(tmp_path):
+    home = _home(tmp_path, backup="INFRA", fleet="FLEET", escrow="ESC")
+    svc = _dedicated_tree()
+    lay = infra_drives.resolve(home, _store(tmp_path), svc,
                                listed_drive_ids=["INFRA", "D1"])
-    assert got == {"INFRA"}
-    assert svc._files.calls == []
+    assert lay.dedicated == {"INFRA"}
+    assert lay.folders["INFRA"] == {"FLEET", "ESC", "ME", "OTHER"}
+    assert "D1" not in lay.folders
+    assert "Drive/mcpbrain-fleet" in lay.paths["INFRA"]
+    assert lay.in_infra("INFRA", "Drive/mcpbrain-fleet/org-graph")
+    assert not lay.in_infra("INFRA", "Drive/mcpbrain-fleet-notes")
 
 
-def test_folder_ids_resolve_to_their_drive_and_are_cached(tmp_path):
-    home = _home(tmp_path, backup="BFOLDER", fleet="FLEET", escrow="ESCROW")
+def test_a_team_drive_holding_the_fleet_folder_is_not_dedicated(tmp_path):
+    home = _home(tmp_path, fleet="FLEET", escrow="ESC")
+    lay = infra_drives.resolve(home, _store(tmp_path), _team_tree(),
+                               listed_drive_ids=["TEAM"])
+    assert lay.dedicated == frozenset()
+    assert lay.folders["TEAM"] == {"FLEET", "ESC"}
+    assert lay.paths["TEAM"] == ("Drive/mcpbrain-fleet", "Drive/mcpbrain-fleet/escrow")
+
+
+def test_an_email_folder_holding_documents_is_not_a_backup_folder(tmp_path):
+    home = _home(tmp_path, backup="INFRA", fleet="FLEET", escrow="ESC")
+    svc = _dedicated_tree()
+    svc.nodes["NOTES"] = _file("notes.txt", "OTHER", "INFRA", "text/plain")
+    lay = infra_drives.resolve(home, _store(tmp_path), svc,
+                               listed_drive_ids=["INFRA", "D1"])
+    assert lay.dedicated == frozenset()
+    assert "OTHER" not in lay.folders["INFRA"]
+
+
+def test_a_backup_folder_id_config_resolves_to_its_drive(tmp_path):
+    home = _home(tmp_path, backup="FLEET")       # wizard installs wrote a folder id
+    lay = infra_drives.resolve(home, _store(tmp_path), _dedicated_tree(),
+                               listed_drive_ids=["INFRA", "D1"])
+    assert "FLEET" in lay.folders["INFRA"]
+
+
+def test_the_layout_is_cached_and_reverified_after_seven_days(tmp_path):
+    home = _home(tmp_path, backup="INFRA", fleet="FLEET", escrow="ESC")
     s = _store(tmp_path)
-    svc = _Svc({"BFOLDER": "INFRA", "FLEET": "INFRA", "ESCROW": "KEYS"})
-    assert infra_drives.resolve(home, s, svc, listed_drive_ids=["INFRA", "KEYS", "D1"]) \
-        == {"INFRA", "KEYS"}
-    assert sorted(svc._files.calls) == ["BFOLDER", "ESCROW", "FLEET"]
-    svc._files.calls.clear()
-    assert infra_drives.resolve(home, s, svc, listed_drive_ids=["INFRA", "KEYS"]) \
-        == {"INFRA", "KEYS"}
-    assert svc._files.calls == []        # answered from the meta cache
+    svc = _dedicated_tree()
+    t0 = datetime(2026, 10, 22, tzinfo=timezone.utc)
+    infra_drives.resolve(home, s, svc, listed_drive_ids=["INFRA", "D1"], now=t0)
+    svc.calls.clear()
+    infra_drives.resolve(home, s, svc, listed_drive_ids=["INFRA", "D1"],
+                         now=t0 + timedelta(days=6))
+    assert svc.calls == []
+    lay = infra_drives.resolve(home, s, svc, listed_drive_ids=["INFRA", "D1"],
+                               now=t0 + timedelta(days=8))
+    assert svc.calls
+    assert lay.checked_at == (t0 + timedelta(days=8)).isoformat()
 
 
-def test_my_drive_folder_excludes_nothing_and_is_not_asked_again(tmp_path):
-    home = _home(tmp_path, fleet="MYDRIVEFOLDER")
+def test_a_cached_drive_missing_from_the_listing_is_reverified_at_once(tmp_path):
+    home = _home(tmp_path, fleet="FLEET", escrow="ESC")
     s = _store(tmp_path)
-    svc = _Svc({})
-    assert infra_drives.resolve(home, s, svc, listed_drive_ids=["D1"]) == set()
-    assert infra_drives.resolve(home, s, svc, listed_drive_ids=["D1"]) == set()
-    assert svc._files.calls == ["MYDRIVEFOLDER"]
+    svc = _dedicated_tree()
+    t0 = datetime(2026, 10, 22, tzinfo=timezone.utc)
+    infra_drives.resolve(home, s, svc, listed_drive_ids=["INFRA", "D1"], now=t0)
+    svc.calls.clear()
+    infra_drives.resolve(home, s, svc, listed_drive_ids=["D1"],
+                         now=t0 + timedelta(hours=1))
+    assert ("get", "FLEET") in svc.calls
 
 
 def test_failed_lookup_excludes_nothing_and_retries_next_cycle(tmp_path):
     home = _home(tmp_path, fleet="FLEET")
     s = _store(tmp_path)
-    svc = _Svc({"FLEET": "INFRA"}, fail={"FLEET"})
-    assert infra_drives.resolve(home, s, svc, listed_drive_ids=["INFRA"]) == set()
-    svc._files.fail.clear()
-    assert infra_drives.resolve(home, s, svc, listed_drive_ids=["INFRA"]) == {"INFRA"}
-    assert svc._files.calls == ["FLEET", "FLEET"]
+    svc = _dedicated_tree(fail={"FLEET"})
+    assert infra_drives.resolve(home, s, svc, listed_drive_ids=["INFRA"]).folders == {}
+    svc.fail.clear()
+    assert "FLEET" in infra_drives.resolve(home, s, svc,
+                                           listed_drive_ids=["INFRA"]).folders["INFRA"]
 
 
 def test_nothing_configured_excludes_nothing(tmp_path):
     home = _home(tmp_path)
-    assert infra_drives.resolve(home, _store(tmp_path), _Svc(),
-                                listed_drive_ids=["D1"]) == set()
+    lay = infra_drives.resolve(home, _store(tmp_path), _dedicated_tree(),
+                               listed_drive_ids=["INFRA"])
+    assert lay.dedicated == frozenset() and lay.folders == {}
 
 
-# -- discovery ----------------------------------------------------------------
+# -- discovery and ingest ------------------------------------------------------
 
 def test_discover_shared_drives_never_lists_an_excluded_drive():
     from mcpbrain.sync import drive as drive_mod
@@ -149,22 +245,67 @@ def test_discover_shared_drives_never_lists_an_excluded_drive():
     assert set(out) == {"D1"}
 
 
+def test_a_file_under_an_infra_folder_is_never_ingested(tmp_path, monkeypatch):
+    from mcpbrain.sync import drive as drive_mod
+
+    svc = _team_tree()
+    tried = []
+    monkeypatch.setattr(ingest_cache, "try_import",
+                        lambda *a, **k: tried.append(a[3]) or True)
+    item = {"ref_id": "CFG", "event": "upsert"}
+    drive_mod.handle_shared_drive_item(
+        svc, _store(tmp_path), item, fleet_storage=None, pin=None,
+        drive_id="TEAM", skip_folders=frozenset({"FLEET", "ESC"}))
+    assert tried == []
+    drive_mod.handle_shared_drive_item(
+        svc, _store(tmp_path), {"ref_id": "PLAN", "event": "upsert"},
+        fleet_storage=None, pin=None, drive_id="TEAM",
+        skip_folders=frozenset({"FLEET", "ESC"}))
+    assert tried == ["PLAN"]
+
+
 # -- purge -------------------------------------------------------------------
 
-def _seed_drive(s, drive_id, fid):
-    s.import_cached_chunk(f"gdrive-{fid}-0", "text", "c",
-                          {"file_id": fid, "drive_id": drive_id}, [0.1] * 4)
+def _seed(s, drive_id, fid, *, folder, mime="application/json", n=1):
+    for i in range(n):
+        s.import_cached_chunk(f"gdrive-{fid}-{i}", "text", "c",
+                              {"file_id": fid, "drive_id": drive_id,
+                               "folder_path": folder, "mime_type": mime},
+                              [0.1] * 4)
 
 
-def test_purge_infrastructure_drive_uses_the_revocation_path(tmp_path):
-    s = _store(tmp_path)
-    _seed_drive(s, "INFRA", "F1")
-    _seed_drive(s, "D1", "F2")
+def _relation(s, doc_id, relation="works_at"):
     with s._connect() as db:
-        db.execute("INSERT INTO entities(id,name,type,origin) VALUES('a','A','person','local')")
-        db.execute("INSERT INTO entities(id,name,type,origin) VALUES('b','B','org','local')")
-        db.execute("INSERT INTO entity_relations(entity_a,relation,entity_b,source_doc_id,origin) "
-                   "VALUES('a','works_at','b','gdrive-F1-0','local')")
+        db.execute("INSERT OR IGNORE INTO entities(id,name,type,origin) "
+                   "VALUES('a','A','person','local')")
+        db.execute("INSERT OR IGNORE INTO entities(id,name,type,origin) "
+                   "VALUES('b','B','org','local')")
+        db.execute("INSERT INTO entity_relations(entity_a,relation,entity_b,"
+                   "source_doc_id,origin) VALUES('a',?,'b',?,'local')",
+                   (relation, doc_id))
+
+
+def _invalidated(s, doc_id):
+    with s._connect() as db:
+        return db.execute("SELECT invalidated_at FROM entity_relations "
+                          "WHERE source_doc_id=?", (doc_id,)).fetchone()[0]
+
+
+def _layout(dedicated, folders, paths, checked="2026-10-22T00:00:00+00:00"):
+    return infra_drives.Layout(dedicated=frozenset(dedicated),
+                               folders={d: frozenset(v) for d, v in folders.items()},
+                               paths={d: tuple(v) for d, v in paths.items()},
+                               checked_at=checked)
+
+
+DED = _layout({"INFRA"}, {"INFRA": {"FLEET"}}, {"INFRA": ["Drive/mcpbrain-fleet"]})
+
+
+def test_dedicated_purge_uses_the_revocation_path(tmp_path):
+    s = _store(tmp_path)
+    _seed(s, "INFRA", "F1", folder="Drive/mcpbrain-fleet")
+    _seed(s, "D1", "F2", folder="Drive/Budgets")
+    _relation(s, "gdrive-F1-0")
     s.set_cursor("drive:INFRA", "9")
     s.set_cursor("drive:INFRA_backfill_until", "2026-01-01T00:00:00")
     s.enqueue_and_advance([{"ref_id": "F1", "version": "1", "event": "upsert",
@@ -174,13 +315,14 @@ def test_purge_infrastructure_drive_uses_the_revocation_path(tmp_path):
     s.set_meta(ingest_cache._KNOWN_DRIVES_META, '["D1", "INFRA"]')
     s.set_meta(ingest_cache._absence_key("INFRA"), "1")
     fs = LocalDirFleetStorage(tmp_path / "cache")
-    fs.put_bytes(f"{ingest_cache.CACHE_DIR}/F1__aaa__bbb.json.gz", b"x")
+    fs.put_bytes(f"{ingest_cache.CACHE_DIR}/F1.aaaaaaaaaaaa.bbbbbbbb.mbc.gz", b"x")
 
-    res = ingest_cache.purge_infrastructure_drive(s, "INFRA", fleet_storage=fs)
+    res = ingest_cache.purge_infrastructure(s, DED, "INFRA", fleet_storage=fs)
 
-    assert res["chunks_deleted"] == 1 and res["relations_invalidated"] == 1
+    assert res == {"chunks_deleted": 1, "relations_invalidated": 1, "refused": 0}
     assert s.doc_ids_for_drive("INFRA") == []
     assert s.doc_ids_for_drive("D1") == ["gdrive-F2-0"]
+    assert _invalidated(s, "gdrive-F1-0") is not None
     assert s.get_cursor("drive:INFRA") is None
     assert s.get_cursor("drive:INFRA_backfill_until") is None
     assert s.sync_queue_pending("drive:INFRA") == 0
@@ -188,80 +330,131 @@ def test_purge_infrastructure_drive_uses_the_revocation_path(tmp_path):
     assert s.get_meta(ingest_cache._KNOWN_DRIVES_META) == '["D1"]'
     assert s.get_meta(ingest_cache._absence_key("INFRA")) is None
     assert fs.list_paths(ingest_cache.CACHE_DIR + "/") == []
-    with s._connect() as db:
-        inv = db.execute("SELECT invalidated_at FROM entity_relations").fetchone()[0]
-    assert inv is not None
-
-    # Once purged it is not re-scanned every cycle.
-    assert ingest_cache.purge_infrastructure_drive(s, "INFRA", fleet_storage=fs) is None
+    # Not re-scanned until the layout is checked again.
+    _seed(s, "INFRA", "F3", folder="Drive/mcpbrain-fleet")
+    ingest_cache.purge_infrastructure(s, DED, "INFRA", fleet_storage=fs)
+    assert s.doc_ids_for_drive("INFRA") == ["gdrive-F3-0"]
 
 
-def test_purge_retries_cache_clear_after_a_transient_failure(tmp_path):
+@pytest.mark.parametrize("seed", [
+    dict(fid="P1", folder="Drive/mcpbrain-fleet", mime="application/pdf"),
+    dict(fid="P2", folder="Drive/Board papers"),
+    dict(fid="P3", folder="Drive/mcpbrain-fleet", n=51),
+])
+def test_dedicated_purge_refuses_what_looks_like_real_content(tmp_path, seed):
+    from mcpbrain import doctor
+
     s = _store(tmp_path)
+    _seed(s, "INFRA", seed.pop("fid"), **seed)
+    s.set_cursor("drive:INFRA", "9")
+    s.set_meta(ingest_cache._KNOWN_DRIVES_META, '["INFRA"]')
+    fs = LocalDirFleetStorage(tmp_path / "cache")
+    fs.put_bytes(f"{ingest_cache.CACHE_DIR}/F1.aaaaaaaaaaaa.bbbbbbbb.mbc.gz", b"x")
 
-    class _Flaky(LocalDirFleetStorage):
-        fail = True
+    before = len(s.doc_ids_for_drive("INFRA"))
+    res = ingest_cache.purge_infrastructure(s, DED, "INFRA", fleet_storage=fs)
 
-        def list_paths(self, prefix):
-            if self.fail:
-                raise OSError("transient")
-            return super().list_paths(prefix)
+    assert res["refused"] == before and res["chunks_deleted"] == 0
+    assert len(s.doc_ids_for_drive("INFRA")) == before
+    assert fs.list_paths(ingest_cache.CACHE_DIR + "/") != []
+    # Still excluded from sync and forgotten by the presence tracker, so the
+    # absence purge (which has no such guard) can never reach it.
+    assert s.get_cursor("drive:INFRA") is None
+    assert s.get_meta(ingest_cache._KNOWN_DRIVES_META) == "[]"
+    lines = doctor.infra_refused_lines(s)
+    assert len(lines) == 1 and f"did not remove {before} item(s) from INFRA" in lines[0]
+    assert "look like real documents" in lines[0]
 
-    fs = _Flaky(tmp_path / "cache")
-    fs.put_bytes(f"{ingest_cache.CACHE_DIR}/F1__aaa__bbb.json.gz", b"x")
-    ingest_cache.purge_infrastructure_drive(s, "INFRA", fleet_storage=fs)
-    assert fs.get_bytes(f"{ingest_cache.CACHE_DIR}/F1__aaa__bbb.json.gz") == b"x"
-    fs.fail = False
-    ingest_cache.purge_infrastructure_drive(s, "INFRA", fleet_storage=fs)
-    assert fs.list_paths(ingest_cache.CACHE_DIR + "/") == []
+
+def test_non_dedicated_purge_removes_only_the_infra_subtree(tmp_path):
+    s = _store(tmp_path)
+    lay = _layout((), {"TEAM": {"FLEET"}}, {"TEAM": ["Drive/mcpbrain-fleet"]})
+    _seed(s, "TEAM", "CFG", folder="Drive/mcpbrain-fleet")
+    _seed(s, "TEAM", "GR", folder="Drive/mcpbrain-fleet/org-graph")
+    _seed(s, "TEAM", "PLAN", folder="Drive/Budgets", mime="application/msword")
+    _relation(s, "gdrive-CFG-0")
+    _relation(s, "gdrive-PLAN-0", "member_of")
+    s.set_cursor("drive:TEAM", "9")
+    s.set_meta(ingest_cache._KNOWN_DRIVES_META, '["TEAM"]')
+    s.record_pending_publish("TEAM", "CFG", "h")
+    s.record_pending_publish("TEAM", "PLAN", "h2")
+    fs = LocalDirFleetStorage(tmp_path / "cache")
+    fs.put_bytes(f"{ingest_cache.CACHE_DIR}/CFG.aaaaaaaaaaaa.bbbbbbbb.mbc.gz", b"x")
+    fs.put_bytes(f"{ingest_cache.CACHE_DIR}/PLAN.aaaaaaaaaaaa.bbbbbbbb.mbc.gz", b"y")
+
+    res = ingest_cache.purge_infrastructure(s, lay, "TEAM", fleet_storage=fs)
+
+    assert res["chunks_deleted"] == 2 and res["refused"] == 0
+    assert s.doc_ids_for_drive("TEAM") == ["gdrive-PLAN-0"]
+    assert _invalidated(s, "gdrive-CFG-0") is not None
+    assert _invalidated(s, "gdrive-PLAN-0") is None
+    assert s.get_cursor("drive:TEAM") == "9"                 # still synced
+    assert s.get_meta(ingest_cache._KNOWN_DRIVES_META) == '["TEAM"]'
+    assert dict(s.pending_publishes("TEAM")) == {"PLAN": "h2"}
+    assert fs.list_paths(ingest_cache.CACHE_DIR + "/") == [
+        f"{ingest_cache.CACHE_DIR}/PLAN.aaaaaaaaaaaa.bbbbbbbb.mbc.gz"]
+
+
+def test_non_dedicated_purge_refuses_real_content_inside_the_subtree(tmp_path):
+    s = _store(tmp_path)
+    lay = _layout((), {"TEAM": {"FLEET"}}, {"TEAM": ["Drive/mcpbrain-fleet"]})
+    _seed(s, "TEAM", "X", folder="Drive/mcpbrain-fleet", mime="application/pdf")
+    res = ingest_cache.purge_infrastructure(s, lay, "TEAM")
+    assert res["refused"] == 1
+    assert s.doc_ids_for_drive("TEAM") == ["gdrive-X-0"]
 
 
 # -- the sync cycle -------------------------------------------------------------
 
-def test_run_sync_cycle_excludes_and_purges_the_backup_drive(tmp_path, monkeypatch):
-    from mcpbrain import sync as sync_mod
-    from mcpbrain.sync import run_sync_cycle
-    from tests.test_drive_sync import FakeDriveService
-
+def _cycle_home(tmp_path, **cfg):
     home = str(tmp_path / "home")
-    config.write_config(home, {"org_config": {"org_pin": {
-        "embed_model": "bge-small", "dim": 4, "chunker_version": "v1",
-        "enrich_logic_floor": 1, "fleet_secret": "s3cret"}},
-        "owner_email": "me@x.org",
-        # A wizard install: the escrow FOLDER id, not the drive id.
-        "backup": {"shared_drive_id": "BFOLDER"}})
+    config.write_config(home, {"org_config": {"org_pin": PIN},
+                               "owner_email": "me@x.org", **cfg})
+    return home
+
+
+def test_cycle_with_central_cache_excludes_dedicated_drive_and_deletes_only_its_cache(
+        tmp_path, monkeypatch):
+    from mcpbrain import sync as sync_mod
+    from mcpbrain import fleet_storage as fsmod
+    from mcpbrain.sync import run_sync_cycle
+
+    home = _cycle_home(tmp_path, backup={"shared_drive_id": "INFRA"},
+                       fleet={"folder_id": "FLEET", "escrow_folder_id": "ESC"})
     s = _store(tmp_path)
-    _seed_drive(s, "INFRA", "F1")
-    _seed_drive(s, "D1", "F2")
+    _seed(s, "INFRA", "F1", folder="Drive/mcpbrain-fleet")
+    _seed(s, "D1", "F2", folder="Drive/Budgets", mime="application/msword")
     s.set_cursor("drive:INFRA", "9")
     s.set_meta(ingest_cache._KNOWN_DRIVES_META, '["D1", "INFRA"]')
 
-    svc = FakeDriveService(
-        shared_drives=[{"id": "INFRA", "name": "Backups"}, {"id": "D1", "name": "Ops"}],
-        files_by_id={"BFOLDER": {"id": "BFOLDER", "driveId": "INFRA"}})
+    fleet_root = tmp_path / "fleet"
+    for rel in ("ingest-cache/INFRA/.mcpbrain-cache/F1.aaaaaaaaaaaa.bbbbbbbb.mbc.gz",
+                "ingest-cache/D1/.mcpbrain-cache/F2.aaaaaaaaaaaa.bbbbbbbb.mbc.gz",
+                "escrow/me.key"):
+        LocalDirFleetStorage(fleet_root).put_bytes(rel, b"x")
+    monkeypatch.setattr(config, "ingest_cache_central", lambda home: True)
+    monkeypatch.setattr(fsmod, "centralized_cache_storage",
+                        lambda svc, ffid, did: LocalDirFleetStorage(
+                            fleet_root / "ingest-cache" / did))
     seen = {}
 
     def _spy_discover(service, store, *, pin, budget=None, exclude=()):
         seen["exclude"] = set(exclude)
-        return {"D1": 0}
+        return {}
 
     def _spy_presence(store_, present, *, threshold):
         seen["present"] = sorted(present)
         return {"purged": [], "tracked": len(present)}
 
-    def _spy_backfill(store_, drive_service, pin, drives, **_kw):
+    def _spy_backfill(store_, drive_service, pin, drives, **kw):
         seen["backfill"] = sorted(drives)
         return {}
 
     monkeypatch.setattr(sync_mod, "discover_shared_drives", _spy_discover)
     monkeypatch.setattr(sync_mod, "_shared_drive_backfill_step", _spy_backfill)
     monkeypatch.setattr(ingest_cache, "note_drive_presence", _spy_presence)
-    monkeypatch.setattr(config, "ingest_cache_central", lambda home: False)
-    import mcpbrain.fleet_storage as fsmod
-    monkeypatch.setattr(fsmod, "drive_cache_storage",
-                        lambda svc_, did: LocalDirFleetStorage(tmp_path / "c" / did))
 
-    run_sync_cycle(s, embedder=None, drive_service=svc, home=home)
+    run_sync_cycle(s, embedder=None, drive_service=_dedicated_tree(), home=home)
 
     assert seen["exclude"] == {"INFRA"}
     assert seen["present"] == ["D1"]
@@ -269,21 +462,57 @@ def test_run_sync_cycle_excludes_and_purges_the_backup_drive(tmp_path, monkeypat
     assert s.doc_ids_for_drive("INFRA") == []
     assert s.doc_ids_for_drive("D1") == ["gdrive-F2-0"]
     assert s.get_cursor("drive:INFRA") is None
+    left = sorted(p.relative_to(fleet_root).as_posix()
+                  for p in fleet_root.rglob("*") if p.is_file())
+    assert left == ["escrow/me.key",
+                    "ingest-cache/D1/.mcpbrain-cache/F2.aaaaaaaaaaaa.bbbbbbbb.mbc.gz"]
 
 
-def test_run_sync_cycle_leaves_drives_alone_when_no_infra_configured(tmp_path, monkeypatch):
+def test_cycle_keeps_syncing_a_team_drive_that_holds_the_fleet_folder(
+        tmp_path, monkeypatch):
     from mcpbrain import sync as sync_mod
     from mcpbrain.sync import run_sync_cycle
-    from tests.test_drive_sync import FakeDriveService
 
-    home = str(tmp_path / "home")
-    config.write_config(home, {"org_config": {"org_pin": {
-        "embed_model": "bge-small", "dim": 4, "chunker_version": "v1",
-        "enrich_logic_floor": 1, "fleet_secret": "s3cret"}},
-        "owner_email": "me@x.org"})
+    home = _cycle_home(tmp_path, fleet={"folder_id": "FLEET", "escrow_folder_id": "ESC"})
     s = _store(tmp_path)
-    _seed_drive(s, "D1", "F2")
-    svc = FakeDriveService(shared_drives=[{"id": "D1", "name": "Ops"}])
+    _seed(s, "TEAM", "CFG", folder="Drive/mcpbrain-fleet")
+    _seed(s, "TEAM", "PLAN", folder="Drive/Budgets", mime="application/msword")
+    s.set_cursor("drive:TEAM", "9")
+    monkeypatch.setattr(config, "ingest_cache_central", lambda home: False)
+    import mcpbrain.fleet_storage as fsmod
+    monkeypatch.setattr(fsmod, "drive_cache_storage",
+                        lambda svc_, did: LocalDirFleetStorage(tmp_path / "c" / did))
+    seen = {}
+
+    def _spy_discover(service, store, *, pin, budget=None, exclude=()):
+        seen["exclude"] = set(exclude)
+        return {}
+
+    def _spy_backfill(store_, drive_service, pin, drives, *, skip_folders=None, **kw):
+        seen["backfill"] = sorted(drives)
+        seen["skip"] = skip_folders
+        return {}
+
+    monkeypatch.setattr(sync_mod, "discover_shared_drives", _spy_discover)
+    monkeypatch.setattr(sync_mod, "_shared_drive_backfill_step", _spy_backfill)
+
+    run_sync_cycle(s, embedder=None, drive_service=_team_tree(), home=home)
+
+    assert seen["exclude"] == set()
+    assert seen["backfill"] == ["TEAM"]
+    assert seen["skip"]["TEAM"] == {"FLEET", "ESC"}
+    assert s.doc_ids_for_drive("TEAM") == ["gdrive-PLAN-0"]
+    assert s.get_cursor("drive:TEAM") == "9"
+    assert json.loads(s.get_meta(ingest_cache._KNOWN_DRIVES_META)) == ["TEAM"]
+
+
+def test_cycle_leaves_drives_alone_when_no_infra_configured(tmp_path, monkeypatch):
+    from mcpbrain import sync as sync_mod
+    from mcpbrain.sync import run_sync_cycle
+
+    home = _cycle_home(tmp_path)
+    s = _store(tmp_path)
+    _seed(s, "D1", "F2", folder="Drive/Budgets")
     seen = {}
 
     def _spy_discover(*_a, exclude=(), **_k):
@@ -293,7 +522,7 @@ def test_run_sync_cycle_leaves_drives_alone_when_no_infra_configured(tmp_path, m
     monkeypatch.setattr(sync_mod, "discover_shared_drives", _spy_discover)
     monkeypatch.setattr(sync_mod, "_shared_drive_backfill_step", lambda *a, **k: {})
 
-    run_sync_cycle(s, embedder=None, drive_service=svc, home=home)
+    run_sync_cycle(s, embedder=None, drive_service=_dedicated_tree(), home=home)
 
     assert seen["exclude"] == set()
     assert s.doc_ids_for_drive("D1") == ["gdrive-F2-0"]
@@ -301,11 +530,11 @@ def test_run_sync_cycle_leaves_drives_alone_when_no_infra_configured(tmp_path, m
 
 # -- onboarding ---------------------------------------------------------------
 
-def test_onboarding_bootstrap_skips_infrastructure_drives(tmp_path):
+def test_onboarding_bootstrap_skips_dedicated_drives_only(tmp_path):
     from mcpbrain import onboarding
+    from mcpbrain.org_contracts import FleetPin
 
-    home = _home(tmp_path, backup="INFRA")
-    s = _store(tmp_path)
+    home = _home(tmp_path, backup="INFRA", fleet="FLEET", escrow="ESC")
     seen = []
 
     def _bootstrap_drive(store, fs, drive_id, pin):
@@ -313,11 +542,10 @@ def test_onboarding_bootstrap_skips_infrastructure_drives(tmp_path):
         return {"status": "ok"}
 
     onboarding.run_bootstrap(
-        home, s, fleet_storage=LocalDirFleetStorage(tmp_path / "fleet"),
-        pin=config.fleet_pin(home).__class__(
-            embed_model="bge-small", dim=4, chunker_version="v1",
-            enrich_logic_floor=1, fleet_secret="s"),
-        force=True, drives=["INFRA", "D1"],
+        home, _store(tmp_path), drive_service=_dedicated_tree(),
+        fleet_storage=LocalDirFleetStorage(tmp_path / "fleet"),
+        pin=FleetPin(**PIN), force=True, drives=["INFRA", "D1"],
+        make_drive_storage=lambda d: LocalDirFleetStorage(tmp_path / d),
         import_snapshot=lambda *a, **k: {"status": "imported"},
         bootstrap_drive=_bootstrap_drive)
     assert seen == ["D1"]

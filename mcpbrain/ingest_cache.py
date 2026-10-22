@@ -960,6 +960,11 @@ def note_drive_presence(store, present_ids, *, threshold: int = 3) -> dict:
 
 # -- mcpbrain's own infrastructure drives ------------------------------------
 
+INFRA_REFUSED_META = "ingest_cache.infra_refused:"
+_INFRA_MAX_CHUNKS = 50
+_INFRA_MIME = "application/json"
+
+
 def _infra_purged_key(drive_id: str) -> str:
     return f"ingest_cache.infra_purged:{drive_id}"
 
@@ -968,39 +973,93 @@ def _infra_cache_cleared_key(drive_id: str) -> str:
     return f"ingest_cache.infra_cache_cleared:{drive_id}"
 
 
-def purge_infrastructure_drive(store, drive_id, *, fleet_storage=None) -> dict | None:
-    """Remove everything ingested from a drive that holds mcpbrain's OWN
-    infrastructure (infra_drives.resolve), through the revocation path:
-    purge_drive (relations invalidated bitemporally, then chunks/vectors/FTS
-    deleted), store.purge_drive_sync_state (queue, cursors, pending publishes),
-    and the drive is forgotten by note_drive_presence's bookkeeping.
+def _looks_real(rows, in_infra) -> bool:
+    """mcpbrain's own files are a handful of JSON documents inside its own
+    folders. Anything else -- another MIME type, a file outside those
+    folders, or simply more than a handful -- may be someone's real work,
+    and deleting it is not this code's call."""
+    return (len(rows) > _INFRA_MAX_CHUNKS
+            or any((m.get("mime_type") or "") != _INFRA_MIME for _d, m in rows)
+            or any(not in_infra(m.get("folder_path") or "") for _d, m in rows))
 
-    Runs the local purge once per drive (a meta marker), not every cycle:
-    purge_drive's lookup is an unindexed metadata scan. It runs again if the
-    drive somehow reappears in the known-drive set. `fleet_storage` is that
-    drive's ingest-cache storage; its artifacts are deleted best-effort until
-    one pass succeeds (a transient Drive failure retries next cycle).
 
-    Returns the purge summary when the local purge ran this call, else None."""
-    out = None
-    try:
-        known = set(json.loads(store.get_meta(_KNOWN_DRIVES_META) or "[]"))
-    except (ValueError, TypeError):
-        known = set()
-    if drive_id in known or not store.get_meta(_infra_purged_key(drive_id)):
-        out = purge_drive(store, drive_id)
-        out["sync_state"] = store.purge_drive_sync_state(drive_id)
+def purge_infrastructure(store, layout, drive_id, *, fleet_storage=None) -> dict:
+    """Remove what was ingested from mcpbrain's own infrastructure in one drive.
+
+    `layout` is infra_drives.resolve's Layout. For a DEDICATED drive (excluded
+    from sync whole) its sync state is cleared and it is forgotten by
+    note_drive_presence's bookkeeping every call -- otherwise, once excluded
+    from the presence list, it would count as absent and be purged WITHOUT
+    the guard below. Its chunks go through purge_drive (relations invalidated
+    bitemporally, then chunks/vectors/FTS deleted) and its ingest-cache
+    artifacts are deleted. For a drive that also holds real documents, only
+    chunks whose folder_path is inside an infrastructure folder are removed,
+    with their pending publishes and cache artifacts.
+
+    Refuses -- logs, records INFRA_REFUSED_META for doctor, deletes nothing --
+    when the candidates look like real content (_looks_real). The chunk scan
+    is unindexed, so it runs once per layout check (weekly), not per cycle.
+    Returns {"chunks_deleted", "relations_invalidated", "refused"}."""
+    out = {"chunks_deleted": 0, "relations_invalidated": 0, "refused": 0}
+    dedicated = drive_id in layout.dedicated
+    if dedicated:
+        store.purge_drive_sync_state(drive_id)
+        try:
+            known = set(json.loads(store.get_meta(_KNOWN_DRIVES_META) or "[]"))
+        except (ValueError, TypeError):
+            known = set()
         if drive_id in known:
             known.discard(drive_id)
             store.set_meta(_KNOWN_DRIVES_META, json.dumps(sorted(known)))
         store.delete_meta(_absence_key(drive_id))
-        store.set_meta(_infra_purged_key(drive_id),
-                       datetime.now(timezone.utc).isoformat())
-        log.warning("ingest_cache: drive %s holds mcpbrain's own backups/fleet "
-                    "data and is never ingested; removed %d chunk(s) already "
-                    "taken from it", drive_id, out["chunks_deleted"])
-    if fleet_storage is not None and not store.get_meta(
-            _infra_cache_cleared_key(drive_id)):
+
+    if store.get_meta(_infra_purged_key(drive_id)) == layout.checked_at:
+        refused = bool(store.get_meta(INFRA_REFUSED_META + drive_id))
+    else:
+        rows = store.drive_chunk_metadata(drive_id)
+
+        def in_infra(fp):
+            return layout.in_infra(drive_id, fp)
+
+        if not dedicated:
+            rows = [(d, m) for d, m in rows if in_infra(m.get("folder_path") or "")]
+        refused = bool(rows) and _looks_real(rows, in_infra)
+        if refused:
+            out["refused"] = len(rows)
+            store.set_meta(INFRA_REFUSED_META + drive_id,
+                           json.dumps({"count": len(rows), "drive_id": drive_id}))
+            log.warning("ingest_cache: did not remove %d item(s) from drive %s, "
+                        "which holds mcpbrain's backup/fleet folders: they look "
+                        "like real documents. Move mcpbrain's folders to a "
+                        "Shared Drive of their own.", len(rows), drive_id)
+        else:
+            store.delete_meta(INFRA_REFUSED_META + drive_id)
+            if dedicated:
+                res = purge_drive(store, drive_id)
+                out["chunks_deleted"] = res["chunks_deleted"]
+                out["relations_invalidated"] = res["relations_invalidated"]
+            elif rows:
+                doc_ids = [d for d, _m in rows]
+                out["relations_invalidated"] = store.invalidate_local_relations_for_docs(doc_ids)
+                out["chunks_deleted"] = store.delete_chunks(doc_ids)
+                for fid in sorted({m.get("file_id") for _d, m in rows if m.get("file_id")}):
+                    store.clear_pending_publish(drive_id, fid)
+                    if fleet_storage is not None:
+                        try:
+                            remove_file_artifacts(fleet_storage, fid)
+                        except Exception as exc:  # noqa: BLE001 — best-effort
+                            log.info("ingest_cache: artifact cleanup skipped "
+                                     "for %s: %s", fid, exc)
+            if out["chunks_deleted"]:
+                log.warning("ingest_cache: removed %d chunk(s) taken from "
+                            "mcpbrain's own backup/fleet folders in drive %s",
+                            out["chunks_deleted"], drive_id)
+        store.set_meta(_infra_purged_key(drive_id), layout.checked_at)
+
+    # A dedicated drive's whole cache folder goes, once, unless its content
+    # was judged real (then nothing of it is touched).
+    if (dedicated and not refused and fleet_storage is not None
+            and not store.get_meta(_infra_cache_cleared_key(drive_id))):
         try:
             paths = fleet_storage.list_paths(CACHE_DIR + "/")
             for path in paths:

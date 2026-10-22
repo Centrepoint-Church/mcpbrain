@@ -219,6 +219,7 @@ def run_sync_cycle(store, embedder, *, gmail_service=None,
     pin = None
     cr = False
     drives_fs: dict[str, object] = {}
+    infra_layout = None
     if drive_service is not None and home is not None:
         try:
             # Cheapest check first: ingest_cache_enabled is a single config-dict
@@ -247,18 +248,22 @@ def run_sync_cycle(store, embedder, *, gmail_service=None,
                 # identically to how it already fails inside that call.
                 all_drive_ids = [d.get("id") for d in list_shared_drives(drive_service)
                                 if d.get("id")]
-                # mcpbrain's OWN drives (backups, fleet folder, escrow) are
-                # never a document source -- see mcpbrain/infra_drives.py. Taken
-                # out of the enumeration itself, so discovery, the work handler
-                # (drives_fs), publish, backfill AND note_drive_presence all see
-                # the same set; their content is removed below.
+                # mcpbrain's OWN backup/fleet/escrow folders are never a
+                # document source -- see mcpbrain/infra_drives.py. A drive
+                # proven DEDICATED to them is taken out of the enumeration
+                # itself, so discovery, the work handler (drives_fs),
+                # publish, backfill AND note_drive_presence all see the same
+                # set. A drive that also holds real documents stays synced and
+                # only skips those folders' files (infra_layout.skip_folders).
+                # What was already taken from either is removed below.
                 from mcpbrain import infra_drives
-                infra_ids = infra_drives.resolve(
+                infra_layout = infra_drives.resolve(
                     home, store, drive_service, listed_drive_ids=all_drive_ids)
-                all_drive_ids = [d for d in all_drive_ids if d not in infra_ids]
+                all_drive_ids = [d for d in all_drive_ids
+                                 if d not in infra_layout.dedicated]
                 discovered_sd = discover_shared_drives(
                     drive_service, store, pin=pin, budget=disc_budget,
-                    exclude=infra_ids)
+                    exclude=infra_layout.dedicated)
                 discovered.update(
                     {f"drive:{did}": n for did, n in discovered_sd.items()})
                 from mcpbrain.fleet_storage import cache_storage_factory
@@ -300,15 +305,16 @@ def run_sync_cycle(store, embedder, *, gmail_service=None,
                 # exact call ran unlocked and was flagged in adversarial
                 # review; mirrored here deliberately).
                 from mcpbrain import ingest_cache
-                # Remove anything already taken from an infrastructure drive,
-                # through the revocation path (purge_drive + sync state), BEFORE
-                # note_drive_presence: the purge also forgets the drive, so it
-                # is never counted as an absent drive afterwards.
-                for did in sorted(infra_ids):
+                # Remove anything already taken from mcpbrain's own folders
+                # BEFORE note_drive_presence: for a dedicated drive the purge
+                # also forgets it, so it is never counted as an absent drive
+                # (whose purge would skip the real-content guard).
+                for did in sorted(infra_layout.folders):
                     try:
                         with (bulk_section or nullcontext)():
-                            ingest_cache.purge_infrastructure_drive(
-                                store, did, fleet_storage=storage_factory(did))
+                            ingest_cache.purge_infrastructure(
+                                store, infra_layout, did,
+                                fleet_storage=storage_factory(did))
                     except Exception as exc:  # noqa: BLE001 — retried next cycle
                         log.warning("sync: could not purge infrastructure drive "
                                     "%s (will retry): %s", did, exc)
@@ -401,7 +407,9 @@ def run_sync_cycle(store, embedder, *, gmail_service=None,
                     drive_service, store, it, fleet_storage=fs,
                     pin=pin, drive_id=drive_id, contextual_retrieval=cr,
                     folder_cache=folder_cache, bulk_section=bulk_section,
-                    report=skip_reports.setdefault(src, {}))
+                    report=skip_reports.setdefault(src, {}),
+                    skip_folders=(infra_layout.skip_folders(drive_id)
+                                  if infra_layout is not None else frozenset()))
             return handle_drive_item(
                 drive_service, store, it, folder_cache=folder_cache,
                 bulk_section=bulk_section,
@@ -534,9 +542,10 @@ def run_sync_cycle(store, embedder, *, gmail_service=None,
             # the pin (which the live delta discovery+work above already
             # covers). Reuses this cycle's storage instances — no second
             # storage_factory call.
-            bf_sd = _shared_drive_backfill_step(store, drive_service, pin, drives_fs,
-                                                contextual_retrieval=cr, budget=budget,
-                                                bulk_section=bulk_section)
+            bf_sd = _shared_drive_backfill_step(
+                store, drive_service, pin, drives_fs,
+                contextual_retrieval=cr, budget=budget, bulk_section=bulk_section,
+                skip_folders=infra_layout.folders if infra_layout is not None else None)
             backfill_counts: dict[str, int] = {}
             any_backfill_processed = False
             any_backfill_miss = False
@@ -852,8 +861,12 @@ def _shared_drive_backfill_step(
     contextual_retrieval: bool = False,
     budget=None,
     bulk_section=None,
+    skip_folders: dict | None = None,
 ) -> dict:
     """One backfill window per pinned Shared Drive, walking newest -> oldest.
+
+    `skip_folders` maps drive id -> mcpbrain infrastructure folder ids whose
+    files are never ingested (infra_drives.Layout.folders).
 
     Mirrors `progressive_backfill_step`'s per-source floor-cursor mechanism (see
     its docstring for the full rationale) but keyed PER-DRIVE —
@@ -914,6 +927,7 @@ def _shared_drive_backfill_step(
                 max_files=max_per_source,
                 contextual_retrieval=contextual_retrieval,
                 bulk_section=bulk_section,
+                skip_folders=(skip_folders or {}).get(drive_id, frozenset()),
             )
         except Exception:  # noqa: BLE001 — one drive's failure must not stall others
             out[drive_id] = {"processed": 0, "miss": []}

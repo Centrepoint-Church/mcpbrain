@@ -2450,6 +2450,29 @@ class Store:
                 f"SELECT doc_id FROM chunks WHERE {_meta_extract('$.drive_id')}=?",
                 (drive_id,)).fetchall()]
 
+    def drive_chunk_metadata(self, drive_id: str) -> list[tuple[str, dict]]:
+        """(doc_id, metadata dict) for every chunk whose metadata drive_id
+        matches. Unindexed scan: for rare maintenance only."""
+        with self._connect() as db:
+            rows = db.execute(
+                f"SELECT doc_id, metadata FROM chunks WHERE {_meta_extract('$.drive_id')}=?",
+                (drive_id,)).fetchall()
+        out = []
+        for r in rows:
+            try:
+                meta = json.loads(r["metadata"] or "{}")
+            except (TypeError, ValueError):
+                meta = {}
+            out.append((r["doc_id"], meta if isinstance(meta, dict) else {}))
+        return out
+
+    def meta_with_prefix(self, prefix: str) -> dict[str, str]:
+        """Every meta row whose key starts with `prefix` (exact, case-sensitive)."""
+        with self._connect() as db:
+            rows = db.execute("SELECT k, v FROM meta WHERE substr(k, 1, ?) = ?",
+                              (len(prefix), prefix)).fetchall()
+        return {r["k"]: r["v"] for r in rows}
+
     def doc_ids_for_file(self, file_id: str) -> list[str]:
         """Chunk doc_ids for one Drive file. Filters on metadata.file_id
         (index-backed by idx_chunks_fileid; see _chunks_for_file_query), NOT a
