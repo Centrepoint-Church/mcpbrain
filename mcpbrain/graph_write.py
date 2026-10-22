@@ -679,15 +679,20 @@ def _preserve_legacy_strength(conn, relation_id) -> None:
         (relation_id, relation_id))
 
 
-def legacy_relation_sql(alias: str = "") -> str:
-    """SQL truth value: this relation's strength is NOT a distinct-source count
-    — it has no EVIDENCE-class relation_sources row (none at all, or only
-    derived-class ones). Such rows never outrank a source-counted one.
+def legacy_relation_sql(alias: str = "", *, has_origin: bool = True) -> str:
+    """SQL truth value: this LOCAL relation's strength is NOT a distinct-source
+    count — it has no EVIDENCE-class relation_sources row (none at all, or
+    only derived-class ones). Such rows never outrank a source-counted one.
     legacy_strength is only the saved prior value, not part of the marker: a
     legacy row that gains a real source is source-counted and its strength is
-    honest (ruling I8). Not origin — origin is local/org."""
+    honest (ruling I8). An origin='org' row is never legacy (M9): it carries
+    no relation_sources by design, and its strength is the curator's
+    corroboration count. has_origin=False for a store without the column
+    (graph_view reads partial schemas): every row is then local."""
     p = f"{alias}." if alias else "entity_relations."
-    return ("(NOT EXISTS (SELECT 1 FROM relation_sources rs_l "
+    local = f"COALESCE({p}origin,'local') = 'local' AND " if has_origin else ""
+    return (f"({local}"
+            "NOT EXISTS (SELECT 1 FROM relation_sources rs_l "
             f"WHERE rs_l.relation_id = {p}id AND rs_l.source_class IN {_EVIDENCE_SQL}))")
 
 

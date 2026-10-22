@@ -156,14 +156,14 @@ def _rel_filters(db, alias: str = "") -> tuple[str, str]:
     row, i.e. its strength predates source counting (+1 per sighting) — never
     outranks a source-counted one. legacy_strength is only the saved prior
     value (ruling I8): a legacy row that gains a real source is source-counted.
-    Column/table aware: a store that predates them reads as before."""
+    An origin='org' row is never legacy (M9). Column/table aware: a store that predates them reads as before."""
     from mcpbrain.graph_write import legacy_relation_sql
     cols = {r["name"] for r in db.execute("PRAGMA table_info(entity_relations)")}
     where = (f" AND COALESCE({alias + '.' if alias else 'entity_relations.'}derived, 0) = 0"
              if "derived" in cols else "")
     order = ""
     if "id" in cols and _table_exists(db, "relation_sources"):
-        order = f"{legacy_relation_sql(alias)}, "
+        order = f"{legacy_relation_sql(alias, has_origin='origin' in cols)}, "
     return where, order
 
 

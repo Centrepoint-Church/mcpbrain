@@ -36,9 +36,11 @@ def build_graph(store) -> nx.Graph:
     weights are summed on the single undirected edge.
 
     Weight is the distinct-primary-source count (strength, spec 2026-10-22
-    §3). A LEGACY row — legacy_strength recorded or no relation_sources rows,
-    whose strength still counts every re-sighting — weighs 1, so an inflated
-    pre-source-counting number cannot pull a cluster together. Derived rows
+    §3). A LEGACY row — a local relation with no EVIDENCE relation_sources row
+    (graph_write.legacy_relation_sql; legacy_strength is only a saved prior,
+    not the marker), whose strength still counts every re-sighting — weighs 1,
+    so an inflated pre-source-counting number cannot pull a cluster together.
+    An origin='org' row is not legacy and weighs its strength. Derived rows
     have strength 0 and are never loaded.
     """
     from mcpbrain.graph_write import legacy_relation_sql

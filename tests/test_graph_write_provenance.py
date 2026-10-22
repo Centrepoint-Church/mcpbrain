@@ -1042,3 +1042,24 @@ def test_decay_keeps_user_asserted_relation(tmp_path):
                    "user_verdict) VALUES('a','manages','b',1,'2023-01-01','asserted')")
     out = graph_write.decay_relations(s, stale_days=365, weak_max=1, as_of="2026-07-01")
     assert out["relations_decayed"] == 0
+
+
+def test_org_relation_is_not_legacy(tmp_path):
+    """M9: an origin='org' row is the curator's corroboration count, never a
+    bump-counted local row: it is not legacy (weight = strength in
+    communities, ranked by strength in the graph view)."""
+    s = _store(tmp_path)
+    for e in ("a", "b", "c"):
+        _seed_entity(s, e, name=e.upper())
+    with s._connect(write=True) as db:
+        db.execute("INSERT INTO entity_relations(entity_a,relation,entity_b,origin,strength) "
+                   "VALUES('a','knows','b','org',5)")
+        db.execute("INSERT INTO entity_relations(entity_a,relation,entity_b,strength) "
+                   "VALUES('a','knows','c',5)")
+        legacy = {r["entity_b"]: r["l"] for r in db.execute(
+            f"SELECT entity_b, {graph_write.legacy_relation_sql()} AS l "
+            "FROM entity_relations")}
+        aliased = {r["entity_b"]: r["l"] for r in db.execute(
+            f"SELECT er.entity_b, {graph_write.legacy_relation_sql('er')} AS l "
+            "FROM entity_relations er")}
+    assert legacy == aliased == {"b": 0, "c": 1}

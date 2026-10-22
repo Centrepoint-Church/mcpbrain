@@ -47,12 +47,27 @@ dedupe could keep a derived copy and archive the real one.
                       their endpoints' degree -1, matching graph_write's derived
                       rows). A relation re-observed since (strength > 1) stays
                       live: later sightings may be evidence. Nothing is deleted.
+  derived_observations
+                      role/rich observations written as source='llm_extraction'
+                      (no source id to resolve) of an entity that is DERIVED-
+                      ONLY -> derived=1. Derived-only (entity_derivation): at
+                      least one class-derived link (derived=1, no removal
+                      reason) or derived relation, and NO other link or live
+                      relation at all — an entity with no evidence behind it,
+                      whose observations can only have come from derived
+                      text. Observations with an evidence observation_sources
+                      row are kept. Counted as observations:derived_entity;
+                      the llm_extraction rows left live are counted as
+                      observations:llm_extraction_kept (their source stays
+                      unknowable — ruling I15).
   dedup_embed         open email actions, single-link clusters at cosine >= 0.88
                       within one logical source (thread_id after rekey_notes),
                       owner-compatible (equal, or either blank/'unclear'); keeps
                       deadline > owner > earliest, archives the rest.
-  legacy_strength     relations with no EVIDENCE source row: legacy_strength :=
-                      strength where unset (the saved prior; origin untouched).
+  legacy_strength     LOCAL relations with no EVIDENCE source row:
+                      legacy_strength := strength where unset (the saved prior;
+                      origin untouched). origin='org' rows are the curator's
+                      corroboration counts, never legacy (M9).
   sources_backfill    relation_sources / observation_sources from existing
                       provenance (relation source_doc_id, else contrib_doc_id;
                       observation `source` when it names a chunk/message), then
@@ -101,8 +116,9 @@ from mcpbrain.store import _IN_BATCH, Store
 SC = sc.SourceClass
 
 STEPS = ("source_session", "rekey_notes", "source_brief", "source_draft",
-         "source_consolidated", "source_digest", "derived_links", "dedup_embed",
-         "legacy_strength", "sources_backfill", "source_gone", "owner_aliases")
+         "source_consolidated", "source_digest", "derived_links",
+         "derived_observations", "dedup_embed", "legacy_strength",
+         "sources_backfill", "source_gone", "owner_aliases")
 
 _CLASS_STEPS = {"source_brief": SC.BRIEF, "source_draft": SC.DRAFT,
                 "source_consolidated": SC.CONSOLIDATED, "source_digest": SC.DIGEST}
@@ -334,6 +350,8 @@ class Tx:
             self.ctx.actions[key["id"]].update(changed)
         if table == "entity_relations" and changed.get("derived"):
             self.ctx.derived_rels.add(key["id"])
+        if table == "email_entities" and changed.get("derived"):
+            self.ctx.derived_links.add((key["message_id"], key["entity_id"]))
         old.update(changed)
         return set(changed)
 
@@ -392,6 +410,7 @@ class Ctx:
         self.owner_aliases = frozenset(a for a in config.owner_aliases(home) if a)
         self._embedder = embedder
         self.derived_rels: set[int] = set()     # marked derived by this run
+        self.derived_links: set[tuple] = set()  # (message_id, entity_id), ditto
         self.actions = {r["id"]: dict(r) for r in db.execute(
             "SELECT id, text, owner, owner_entity_id, status, deadline, source, "
             "source_doc_id, thread_id, created_at, resolved_by, resolved_at, "
@@ -589,6 +608,57 @@ def step_derived_links(ctx, tx):
             tx.counts[f"observations:{c}"] += 1
 
 
+def entity_derivation(db, *, derived_links=(), derived_rels=()) -> dict:
+    """entity_id -> (derived, other): how many of the entity's links and live
+    relations come from a derived class, and how many from anything else.
+
+    derived: an email_entities row with derived=1 and NO derived_reason (a
+    class-derived link — a removal reason means the source was evidence that
+    went away), or a live entity_relations row with derived=1. `derived_links`
+    / `derived_rels` add rows a dry run would have marked (they still read
+    derived=0 in the store).
+    other: every other link, and every other live relation — evidence, legacy
+    (unknown provenance), user-asserted or org. Unknown counts as evidence:
+    the rule only ever acts on an entity with nothing but derived support.
+    Invalidated relations are history and count as neither."""
+    out: dict = defaultdict(lambda: [0, 0])
+    dl, dr = set(derived_links), set(derived_rels)
+    for r in db.execute("SELECT message_id, entity_id, COALESCE(derived,0) AS d, "
+                        "COALESCE(derived_reason,'') AS why FROM email_entities"):
+        derived = (r["d"] and not r["why"]) or (r["message_id"], r["entity_id"]) in dl
+        out[r["entity_id"]][0 if derived else 1] += 1
+    for r in db.execute("SELECT id, entity_a, entity_b, COALESCE(derived,0) AS d "
+                        "FROM entity_relations WHERE invalidated_at IS NULL"):
+        derived = bool(r["d"]) or r["id"] in dr
+        for e in (r["entity_a"], r["entity_b"]):
+            out[e][0 if derived else 1] += 1
+    return {e: (d, o) for e, (d, o) in out.items()}
+
+
+def derived_only(counts) -> bool:
+    """The I15 rule: some derived support, and nothing else at all."""
+    d, o = counts
+    return d > 0 and o == 0
+
+
+def step_derived_observations(ctx, tx):
+    db = tx.db
+    deriv = entity_derivation(db, derived_links=ctx.derived_links,
+                              derived_rels=ctx.derived_rels)
+    ev = ",".join(f"'{v}'" for v in sorted(_EVIDENCE))
+    for r in db.execute(
+            "SELECT id, entity_id, derived FROM entity_observations o "
+            "WHERE COALESCE(derived,0)=0 AND source='llm_extraction' "
+            "AND NOT EXISTS (SELECT 1 FROM observation_sources os "
+            f"WHERE os.observation_id=o.id AND os.source_class IN ({ev}))").fetchall():
+        if derived_only(deriv.get(r["entity_id"], (0, 0))):
+            tx.update("entity_observations", {"id": r["id"]},
+                      {"derived": r["derived"]}, {"derived": 1})
+            tx.counts["observations:derived_entity"] += 1
+        else:
+            tx.counts["observations:llm_extraction_kept"] += 1
+
+
 def _relations_with_evidence(db) -> set:
     ev = ",".join(f"'{v}'" for v in sorted(_EVIDENCE))
     return {r[0] for r in db.execute(
@@ -684,7 +754,8 @@ def step_legacy_strength(ctx, tx):
     for r in tx.db.execute(
             "SELECT id, strength, legacy_strength FROM entity_relations "
             "WHERE legacy_strength IS NULL AND strength IS NOT NULL "
-            "AND COALESCE(derived,0)=0").fetchall():
+            "AND COALESCE(derived,0)=0 "
+            "AND COALESCE(origin,'local')='local'").fetchall():   # org is not legacy (M9)
         if r["id"] in with_evidence or r["id"] in ctx.derived_rels:
             continue
         tx.update("entity_relations", {"id": r["id"]},
@@ -844,6 +915,7 @@ _STEP_FNS = {
     "source_consolidated": _step_class(SC.CONSOLIDATED),
     "source_digest": _step_class(SC.DIGEST),
     "derived_links": step_derived_links,
+    "derived_observations": step_derived_observations,
     "dedup_embed": step_dedup_embed,
     "legacy_strength": step_legacy_strength,
     "sources_backfill": step_sources_backfill,
@@ -1000,7 +1072,7 @@ def main(argv=None, *, embedder=None, dim=None) -> int:
     with ro._connect() as db:
         has_schema = db.execute(
             "SELECT 1 FROM sqlite_master WHERE name='cleanup_log'").fetchone() is not None
-        label_ids = _cached_label_ids(db) if has_schema else frozenset()
+        label_ids = _cached_label_ids(db)
     rules = sc.Rules.from_config(str(home), generated_label_ids=label_ids)
     no_brief_rules = not (rules.subject_prefixes or rules.drive_folders
                           or rules.generated_label_ids)

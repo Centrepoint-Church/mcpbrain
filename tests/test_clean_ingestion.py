@@ -132,11 +132,12 @@ def env(tmp_path):
                                created="2026-08-01")
 
         for eid, typ, n in (("p1", "person", 10), ("t-topic", "topic", 5),
-                            ("p2", "person", 0)):
+                            ("p2", "person", 0), ("p3", "person", 1),
+                            ("p4", "person", 0)):
             db.execute("INSERT INTO entities(id, name, type, email_count, degree) "
                        "VALUES (?, ?, ?, ?, 4)", (eid, eid, typ, n))
         for mid, eid in ((M1, "p1"), (M2, "p1"), (f"enriched-{T1}", "t-topic"),
-                         (GONE_MSG, "p1")):
+                         (GONE_MSG, "p1"), (M2, "p3")):
             db.execute("INSERT INTO email_entities(message_id, entity_id, role) "
                        "VALUES (?, ?, 'x')", (mid, eid))
         ids["r_legacy"] = _rel(db, "p1", "t-topic", "involved_in", strength=30)
@@ -157,6 +158,13 @@ def env(tmp_path):
         ids["o_label"] = db.execute(
             "INSERT INTO entity_observations(entity_id, attribute, value, source) "
             "VALUES ('p1', 'role', 'Treasurer', 'llm_extraction')").lastrowid
+        # p3 is known ONLY from a draft; p4 has no links at all (unknown).
+        ids["o_draft_only"] = db.execute(
+            "INSERT INTO entity_observations(entity_id, attribute, value, source) "
+            "VALUES ('p3', 'role', 'Venue Manager', 'llm_extraction')").lastrowid
+        ids["o_unlinked"] = db.execute(
+            "INSERT INTO entity_observations(entity_id, attribute, value, source) "
+            "VALUES ('p4', 'role', 'Coach', 'llm_extraction')").lastrowid
         ids["o_cal"] = db.execute(
             "INSERT INTO entity_observations(entity_id, attribute, value, source) "
             "VALUES ('p2', 'occurrence', 'x', 'cal-EV1')").lastrowid
@@ -441,3 +449,49 @@ def test_snapshot_taken_before_init(env, monkeypatch):
     monkeypatch.setattr(ci.Store, "init", init)
     assert _main(env, "--yes", "--steps", "owner_aliases") == 0
     assert calls[:2] == ["snapshot", "init"]
+
+
+def test_derived_observations_marks_only_derived_only_entities(env, capsys):
+    """Ruling I15: an llm_extraction observation is marked derived only when
+    its entity's every link/relation is derived (p3: one draft link). An
+    entity with ANY other support (p1) or none at all (p4) keeps it."""
+    assert _main(env) == 0
+    out = capsys.readouterr().out
+    assert "observations:derived_entity=1" in out           # dry run counts it
+    assert "observations:llm_extraction_kept=2" in out
+    assert _main(env, "--yes", "--skip-snapshot-for-tests") == 0
+    obs = lambda n: _row(env, "entity_observations", "id", env["ids"][n])  # noqa: E731
+    assert obs("o_draft_only")["derived"] == 1
+    assert obs("o_label")["derived"] == 0
+    assert obs("o_unlinked")["derived"] == 0
+
+
+def test_entity_derivation_rule():
+    from mcpbrain import ingestion_cleanup as ic
+    assert ic.derived_only((1, 0)) is True
+    assert ic.derived_only((3, 1)) is False      # any other support keeps it
+    assert ic.derived_only((0, 0)) is False      # nothing known: not derived
+
+
+def test_entity_derivation_counts(env):
+    from mcpbrain import ingestion_cleanup as ic
+    with env["store"]._connect(write=True) as db:
+        db.execute("UPDATE email_entities SET derived=1 WHERE message_id=?", (M2,))
+        # A link derived by a REMOVAL is not class-derived: counts as other.
+        db.execute("INSERT INTO email_entities(message_id, entity_id, role, derived, "
+                   "derived_reason) VALUES ('gone-m', 'p4', 'x', 1, 'source_gone')")
+        d = ic.entity_derivation(db)
+    assert d["p3"] == (1, 0)
+    assert d["p4"] == (0, 1)
+    assert d["p1"][1] > 0
+
+
+def test_legacy_strength_skips_org_relations(env):
+    with env["store"]._connect(write=True) as db:
+        rid = db.execute(
+            "INSERT INTO entity_relations(entity_a, relation, entity_b, strength, "
+            "origin) VALUES ('p1', 'partners_with', 'p2', 6, 'org')").lastrowid
+    assert _main(env, "--yes", "--skip-snapshot-for-tests",
+                 "--steps", "legacy_strength") == 0
+    r = _row(env, "entity_relations", "id", rid)
+    assert (r["strength"], r["legacy_strength"]) == (6, None)
