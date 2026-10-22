@@ -850,7 +850,7 @@ def test_thread_sorted_by_time_not_weekday_string(tmp_path):
     _seed(store, "g3", thread_id="T", message_id="m3",
           date="2026-09-24T10:00:00+00:00")
     batches = thread_enrich.group_unenriched_threads(store, thread_cap=10)
-    msgs = thread_enrich.reassemble_thread(store, batches[0])
+    msgs = thread_enrich.reassemble_thread(batches[0].chunks)
     assert [m["message_id"] for m in msgs] == ["m1", "m3", "m2"]
 
 
