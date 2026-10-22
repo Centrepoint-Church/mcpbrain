@@ -957,8 +957,9 @@ def handle_drive_item(service, store, item, *, folder_cache=None,
     if item["event"] == "remove":
         with bulk_section():
             doc_ids = store.doc_ids_for_file(fid)
-            # Runs even with no chunks left: the file's actions/links may
-            # outlive its chunks (an earlier removal, a sweep).
+            # My Drive has no per-drive scoping: runs even with no chunks left,
+            # since the file's actions/links may outlive its chunks (an earlier
+            # removal, a sweep). Only the shared-drive path skips when none remain.
             store.invalidate_sources_for_docs(
                 doc_ids, source_ids=[fid, *doc_ids], file_ids=[fid],
                 reason="source_gone")

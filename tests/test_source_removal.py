@@ -110,3 +110,23 @@ def test_purge_drive_infra_reason(tmp_path):
     a = _seed(s, "F1")
     ingest_cache.purge_drive(s, "I", reason="infra_purged")
     assert _act(s, a)["resolved_by"] == "infra_purged"
+
+
+def test_stale_probes_are_index_backed(tmp_path):
+    s = _s(tmp_path)
+    with s._connect() as db:
+        for q in s._STALE_PROBES:
+            plan = " ".join(r[3] for r in db.execute("EXPLAIN QUERY PLAN " + q, ("a-", "a.")))
+            assert "SCAN" not in plan and "SEARCH" in plan, plan
+
+
+def test_my_drive_remove_with_no_chunks_left_still_archives(tmp_path):
+    """My Drive remove has no drive scoping: a file whose chunks are already gone
+    still has its actions archived and links marked (via the stale-id path)."""
+    s = _s(tmp_path)
+    a = _seed(s, "gdrive-F5-2")
+    b = _seed(s, "F5", ent="priya-anand")
+    assert s.doc_ids_for_file("F5") == []
+    handle_drive_item(FakeDriveService(pages=[]), s, {"ref_id": "F5", "version": "", "event": "remove"})
+    assert _act(s, a)["status"] == "auto_archived"
+    assert _act(s, b)["status"] == "auto_archived"

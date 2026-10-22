@@ -1418,6 +1418,7 @@ class Store:
             db.execute("CREATE INDEX IF NOT EXISTS idx_actions_owner  ON actions(owner)")
             db.execute("CREATE INDEX IF NOT EXISTS idx_actions_status ON actions(status, deadline)")
             db.execute("CREATE INDEX IF NOT EXISTS idx_actions_thread ON actions(thread_id)")
+            db.execute("CREATE INDEX IF NOT EXISTS idx_actions_source_doc ON actions(source_doc_id)")
 
             # One-time migration: copy graph_actions/graph_decisions into actions,
             # then rename the originals to *_legacy. Guarded by a meta flag so
@@ -3058,7 +3059,7 @@ class Store:
         with self._connect(write=True) as db:
             ids = set(source_ids)
             if fid_set:
-                ids |= self._stale_drive_ids(db, fid_set | set(source_ids))
+                ids |= self._stale_drive_ids(db, fid_set)
             ids = list(ids)
             for i in range(0, len(ids), _IN_BATCH):
                 part = ids[i:i + _IN_BATCH]
@@ -3089,23 +3090,29 @@ class Store:
                 out["links"] += len(live)
         return out
 
+    # One range probe per (table, column): prefix 'gdrive-<fid>-' up to the same
+    # prefix with its last char bumped ('-' -> '.'), served by an index.
+    _STALE_PROBES = (
+        "SELECT message_id FROM email_entities WHERE message_id >= ? AND message_id < ?",
+        "SELECT thread_id FROM actions WHERE thread_id >= ? AND thread_id < ?",
+        "SELECT source_doc_id FROM actions WHERE source_doc_id >= ? AND source_doc_id < ?",
+    )
+
     @staticmethod
     def _stale_drive_ids(db, file_ids) -> set:
-        """Ids `gdrive-<fid>-<digits>` held by email_entities / open actions
-        whose <fid> is in file_ids (chunk ids that no longer exist)."""
-        pat = re.compile(r"^gdrive-(.+)-\d+$")
+        """Ids `gdrive-<fid>-<digits>` held by email_entities / actions whose
+        <fid> is in file_ids (chunk ids that no longer exist). Per file, an
+        index range scan on the exact prefix, then a strict owner parse
+        (base64url ids contain '-', so a bare prefix over-matches)."""
         found: set = set()
-        rows = [r[0] for r in db.execute(
-            "SELECT DISTINCT message_id FROM email_entities "
-            "WHERE message_id LIKE 'gdrive-%'")]
-        rows += [r[0] for r in db.execute(
-            "SELECT thread_id FROM actions WHERE status='open' AND thread_id LIKE 'gdrive-%' "
-            "UNION SELECT source_doc_id FROM actions WHERE status='open' "
-            "AND source_doc_id LIKE 'gdrive-%'")]
-        for v in rows:
-            m = pat.match(v or "")
-            if m and m.group(1) in file_ids:
-                found.add(v)
+        for fid in file_ids:
+            lo = f"gdrive-{fid}-"
+            hi = lo[:-1] + "."
+            pat = re.compile(r"^gdrive-" + re.escape(fid) + r"-\d+$")
+            for q in Store._STALE_PROBES:
+                for r in db.execute(q, (lo, hi)):
+                    if pat.match(r[0] or ""):
+                        found.add(r[0])
         return found
 
     def chunk_count(self) -> int:
