@@ -86,6 +86,13 @@ Brief rules are configuration, not code literals (tenant-neutral):
 (list of folder paths), plus a generic marker any producer can stamp — Gmail
 label `mcpbrain/generated` or Drive `appProperties.mcpbrain_generated = "1"`.
 The owner's local config gets `["Brief — "]` and `["My Drive/Daily Briefs"]`.
+Implementation notes (from the code map): Gmail labels arrive as label IDs, so
+the marker label's id is resolved by name via `labels().list` and cached; Drive
+`appProperties` must be added to the fetched file fields; the Claude session id
+is stored as `claude_session_id` (`session_id` already belongs to anarlog); a
+session note is also recognisable by its `session` tag and `Session xxxxxxxx
+YYYY-MM-DD` title for rows captured before this change; the actions deadline
+column is `deadline`.
 
 ### 2. Prevent at ingest and enrichment
 
