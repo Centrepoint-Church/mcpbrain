@@ -311,6 +311,26 @@ def _note(report: dict | None, reason: str) -> None:
         report[reason] = report.get(reason, 0) + 1
 
 
+_SYSTEM_LABELS = ("DRAFT", "SENT", "INBOX", "TRASH", "SPAM", "UNREAD", "STARRED",
+                  "IMPORTANT")
+
+
+def join_label_ids(label_ids, limit: int = 200) -> str:
+    """Comma-join label ids for metadata, system labels first, so a clip at
+    `limit` drops custom ids rather than DRAFT/SENT (source classification
+    reads them). Custom ids that do not fit are dropped whole, never cut."""
+    ids = [str(x) for x in (label_ids or [])]
+    ordered = [x for x in _SYSTEM_LABELS if x in ids]
+    ordered += [x for x in ids if x not in _SYSTEM_LABELS]
+    out = ""
+    for x in ordered:
+        nxt = x if not out else out + "," + x
+        if len(nxt) > limit:
+            continue
+        out = nxt
+    return out
+
+
 def normalise_gmail(raw: dict, *, report: dict | None = None) -> list[Chunk]:
     """Raw Gmail message (messages.get format=full) -> list[Chunk].
     doc_id = gmail-<id>-body-<i>. Empty body -> [].
@@ -350,7 +370,7 @@ def normalise_gmail(raw: dict, *, report: dict | None = None) -> list[Chunk]:
         "to_count": to.count("@"),
         "cc_count": cc.count("@"),
         "date": get_header(headers, "date")[:80],
-        "labels": ",".join(raw.get("labelIds", []))[:200],
+        "labels": join_label_ids(raw.get("labelIds", [])),
         "signature_block": signature_block[:500],
     }
     if bulk:

@@ -76,3 +76,38 @@ def test_from_config(tmp_path):
     assert r.generated_label_ids == {"L"}
     assert "me@example.org" in r.owner_emails
     assert r.subject_prefixes == ("X",) and r.drive_folders == ("F",)
+
+
+def att(**kw):
+    return gm(content_type="email_attachment", **kw)
+
+
+def test_attachment_inherits_parent_class():
+    assert classify("g", att(labels="DRAFT"), R) is C.DRAFT
+    assert classify("g", att(subject="Daily Brief", sender=ME, to=ME), R) is C.BRIEF
+    assert classify("g", att(), R) is C.PRIMARY_DOC
+
+
+def test_cc_to_colleague_is_not_brief():
+    m = gm(subject="Daily Brief", sender=ME, to=ME, cc="b@x.org")
+    assert classify("g", m, R) is C.PRIMARY_MAIL
+    assert classify("g", {**m, "cc": ""}, R) is C.BRIEF
+
+
+def test_case_and_empty_to():
+    m = gm(subject="Daily Brief", sender="ME@Example.ORG", to="Me <ME@EXAMPLE.org>")
+    assert classify("g", m, R) is C.BRIEF
+    assert classify("g", {**m, "to": ""}, R) is C.PRIMARY_MAIL
+
+
+def test_session_only_for_notes():
+    assert classify("g", gm(subject="Session abcdef12 2026-10-01", claude_session_id="s"), R) is C.PRIMARY_MAIL
+    assert classify("a", {"source_type": "anarlog", "title": "Session abcdef12 2026-10-01",
+                          "event_id": "e"}, R) is C.PRIMARY_DOC
+    assert classify("note-a", {"tags": ["session"]}, R) is C.SESSION
+
+
+def test_join_label_ids_keeps_system_first():
+    from mcpbrain.sync.normalise import join_label_ids
+    out = join_label_ids([f"Label_{i}" * 3 for i in range(40)] + ["DRAFT", "INBOX"])
+    assert out.startswith("DRAFT,INBOX") and len(out) <= 200

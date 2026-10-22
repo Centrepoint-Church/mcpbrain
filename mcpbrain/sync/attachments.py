@@ -44,7 +44,7 @@ from mcpbrain.sync.extractors import (
     extract_text_from_eml,
     is_partial,
 )
-from mcpbrain.sync.normalise import Chunk, _is_bulk_or_auto, get_header
+from mcpbrain.sync.normalise import Chunk, _is_bulk_or_auto, get_header, join_label_ids
 
 log = logging.getLogger(__name__)
 
@@ -204,6 +204,9 @@ def normalise_attachment(raw_message: dict, part: dict, data: bytes) -> list[Chu
         "thread_id": raw_message.get("threadId", ""),
         "subject": subject[:200],
         "sender": get_header(headers, "from")[:200],
+        "to": get_header(headers, "to")[:2000],
+        "cc": get_header(headers, "cc")[:2000],
+        "labels": join_label_ids(raw_message.get("labelIds", [])),
         "date": get_header(headers, "date")[:80],
         "attachment_name": part["filename"][:200],
         "attachment_mime": mime[:100],

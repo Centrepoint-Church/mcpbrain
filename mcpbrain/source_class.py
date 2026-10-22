@@ -49,7 +49,7 @@ class Rules:
             emails.add(own)
         try:
             side = (Path(home) / "google_account").read_text().strip().lower()
-        except OSError:
+        except (OSError, ValueError):
             side = ""
         if side:
             emails.add(side)
@@ -69,8 +69,8 @@ def _addrs(header) -> list[str]:
     return [a.strip().lower() for _, a in getaddresses([str(header or "")]) if a.strip()]
 
 
-def _label_ids(meta: dict) -> set:
-    raw = meta.get("labels") or ""
+def _label_ids(meta: dict, key: str = "labels") -> set:
+    raw = meta.get(key) or ""
     if isinstance(raw, (list, tuple)):
         return {str(x).strip() for x in raw if str(x).strip()}
     return {x.strip() for x in str(raw).split(",") if x.strip()}
@@ -86,9 +86,11 @@ def _in_folder(path: str, folders) -> bool:
 
 
 def _is_session(doc_id: str, meta: dict) -> bool:
+    if not (meta.get("source") == "note" or doc_id.startswith("note-")):
+        return False
     if meta.get("claude_session_id"):
         return True
-    tags = {t.strip().lower() for t in str(meta.get("tags") or "").split(",")}
+    tags = {t.lower() for t in _label_ids(meta, "tags")}
     if "session" in tags:
         return True
     return bool(_SESSION_TITLE.match(str(meta.get("title") or "")))
@@ -106,10 +108,9 @@ def classify(doc_id: str, meta: dict, rules: Rules) -> SourceClass:
     if _is_session(doc_id, meta):
         return SourceClass.SESSION
     st = meta.get("source_type")
-    if meta.get("content_type") == "email_attachment":
-        return SourceClass.PRIMARY_DOC
     if st == "gmail":
         labels = _label_ids(meta)
+        attach = meta.get("content_type") == "email_attachment"
         if "DRAFT" in labels:
             return SourceClass.DRAFT
         if labels & rules.generated_label_ids:
@@ -118,14 +119,17 @@ def classify(doc_id: str, meta: dict, rules: Rules) -> SourceClass:
         if rules.subject_prefixes and subject.startswith(tuple(rules.subject_prefixes)):
             senders = _addrs(meta.get("sender"))
             to = _addrs(meta.get("to"))
-            if (senders and to and all(a in rules.owner_emails for a in senders)
-                    and all(a in rules.owner_emails for a in to)):
+            cc = _addrs(meta.get("cc"))
+            if (senders and to
+                    and all(a in rules.owner_emails for a in senders + to + cc)):
                 return SourceClass.BRIEF
-        return SourceClass.PRIMARY_MAIL
+        return SourceClass.PRIMARY_DOC if attach else SourceClass.PRIMARY_MAIL
     if st == "gdrive":
         if str(meta.get("app_generated")) == "1" or _in_folder(
                 meta.get("folder_path"), rules.drive_folders):
             return SourceClass.BRIEF
+        return SourceClass.PRIMARY_DOC
+    if st == "anarlog":
         return SourceClass.PRIMARY_DOC
     if doc_id.startswith("cal-") or meta.get("event_id") or st == "calendar":
         return SourceClass.PRIMARY_EVENT
