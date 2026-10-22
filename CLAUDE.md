@@ -102,6 +102,20 @@ the cursor is a watermark and every write is checkpointed by id+hash.
 4. **Keep the snapshots.** Three snapshots at different times are what made the cause
    datable and the fix targeted rather than a wholesale restore.
 
+## HISTORY REWRITTEN — 2026-10-22, the owner's email in two backup docs
+
+The incremental-backup spec and plan (pushed 2026-10-19) named the owner's
+work email and per-user backup folder. Owner approved a rewrite: `git
+filter-branch --tree-filter` scoped to exactly those two files over the 39
+commits from the spec commit onward, then `push --force-with-lease`.
+Verified: final tree byte-identical, no rewritten commit adds the literals,
+0 forks/stars/watchers, `gh-pages` untouched. No SHA this file cites was in
+the range, so none needed remapping. As before, **GitHub still serves the old
+SHAs (e.g. `c1e0baef`, `b3b2986c`) until it GCs them — ask GitHub Support to
+purge the cached views.** Do NOT use `git filter-repo` here without first
+moving `.git/filter-repo/` aside: its leftover state makes it wait forever on
+a hidden Y/N prompt.
+
 ## HISTORY REWRITTEN AGAIN — 2026-09-22, two real people's names
 
 **Two real people's names were in this PUBLIC repo's `tests/` and docs, and are
