@@ -2499,6 +2499,8 @@ class Store:
         from mcpbrain import source_class as sc
         if not content_hash or len(text or "") < cls.DUP_MIN_CHARS:
             return False
+        if not cls._carry_eligible(doc_id, metadata or {}):
+            return False
         label_ids = cls._generated_label_ids(db)
         rules = sc.Rules(generated_label_ids=label_ids)
         if not sc.is_evidence(sc.classify(doc_id, metadata or {}, rules)):
@@ -2523,6 +2525,25 @@ class Store:
                 (r["doc_id"], r["enriched_version"] or 0, doc_id))
             return True
         return False
+
+    @staticmethod
+    def _carry_eligible(doc_id: str, meta: dict) -> bool:
+        """Only My Drive files and notes may be carried as duplicates.
+
+        Gmail (bodies AND attachments) never: a fully-carried message never
+        enters a unit, so its sender/recipient links and thread actions would
+        be lost -- and signature blocks / Fwd: bodies duplicate constantly.
+        Shared-drive chunks (any drive_id) never: the file's enrich payload
+        publishes only when it covers every non-cold chunk
+        (enrich_payload_covers_file), and a carried chunk is in no unit, so
+        it would withhold the payload forever."""
+        from mcpbrain.org_contracts import DRIVE_ID_META_KEY
+        st = meta.get("source_type")
+        if st == "gdrive":
+            return not meta.get(DRIVE_ID_META_KEY)
+        if st:
+            return False
+        return meta.get("source") == "note" or (doc_id or "").startswith("note-")
 
     @staticmethod
     def _generated_label_ids(db) -> frozenset:
@@ -4226,6 +4247,19 @@ class Store:
             tables = {r[0] for r in db.execute(
                 "SELECT name FROM sqlite_master WHERE type='table'")}
             payload_covers = self._reflowed_payload_covers(db, tables, rows, old_ids)
+            # A content duplicate keeps dup_of across the remap only when its
+            # text is unchanged: content_hash -> canonical, read from
+            # the old rows before they are overwritten. Keyed on the hash
+            # alone (within this owner): a re-chunk may move the identical
+            # text to a different positional id.
+            old_dups: dict[str, str] = {}
+            for i in range(0, len(old_ids), 500):
+                batch = old_ids[i:i + 500]
+                for r in db.execute(
+                        "SELECT doc_id, content_hash, dup_of FROM chunks "
+                        f"WHERE doc_id IN ({','.join('?' * len(batch))}) "
+                        "AND dup_of IS NOT NULL", batch):
+                    old_dups.setdefault(r["content_hash"], r["dup_of"])
             for row, vec in zip(rows, vectors):
                 c = row.chunk
                 self._write_cached_chunk_row(
@@ -4246,6 +4280,15 @@ class Store:
                             row.memory_type if row.covered and row.memory_type is not None
                             else "episodic",
                             c.doc_id))
+                dup = old_dups.get(c.content_hash)
+                if dup and dup != c.doc_id:
+                    db.execute("UPDATE chunks SET dup_of=? WHERE doc_id=?",
+                               (dup, c.doc_id))
+                else:
+                    db.execute(
+                        "UPDATE chunks SET dup_of=NULL, enrich_state=CASE WHEN "
+                        "enrich_state='duplicate' THEN '' ELSE enrich_state END "
+                        "WHERE doc_id=?", (c.doc_id,))
             db.execute("CREATE TEMP TABLE IF NOT EXISTS reflow_tmp("
                        "old TEXT PRIMARY KEY, new TEXT NOT NULL)")
             db.execute("DELETE FROM reflow_tmp")
