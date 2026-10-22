@@ -1406,10 +1406,10 @@ def test_paraphrase_dedupes_within_thread_at_088(tmp_path):
     # cos([1,0,0,0], [0.9,0.43589,0,0]) = 0.9 >= 0.88 -- same meaning, no
     # shared wording the lexical rules would catch. Same source: any age.
     emb = _StubEmbedder({
-        "Return the signed SOM form": [1.0, 0.0, 0.0, 0.0],
+        "Return the signed venue form": [1.0, 0.0, 0.0, 0.0],
         "Send back the completed school paperwork": [0.9, 0.43589, 0.0, 0.0],
     })
-    old = s.add_unified_action(text="Return the signed SOM form", owner="Sam",
+    old = s.add_unified_action(text="Return the signed venue form", owner="Sam",
                                status="open", source="email", thread_id="t-act",
                                created_at="2025-01-01T00:00:00Z")
     ext = _thread(actions=[_action("Send back the completed school paperwork",
@@ -1425,10 +1425,10 @@ def test_paraphrase_below_threshold_is_kept(tmp_path):
     s = _store(tmp_path)
     # cos = 0.87 < 0.88: a distinct action.
     emb = _StubEmbedder({
-        "Return the signed SOM form": [1.0, 0.0, 0.0, 0.0],
+        "Return the signed venue form": [1.0, 0.0, 0.0, 0.0],
         "Send back the completed school paperwork": [0.87, 0.49305, 0.0, 0.0],
     })
-    s.add_unified_action(text="Return the signed SOM form", owner="Sam",
+    s.add_unified_action(text="Return the signed venue form", owner="Sam",
                          status="open", source="email", thread_id="t-act")
     ext = _thread(actions=[_action("Send back the completed school paperwork",
                                    owner_name="Sam")])
@@ -1612,7 +1612,7 @@ def test_stale_reextract_resolving_one_of_three_leaves_two_open(tmp_path):
     ids = [s.add_unified_action(text=t, owner="Sam", status="open", source="email",
                                 thread_id="t-act", created_at="2026-05-01T00:00:00Z")
            for t in ("Chase the caterer about Sunday", "Pay the venue deposit",
-                     "Return the signed SOM form")]
+                     "Return the signed venue form")]
     s.set_stale_reextract("t-act", "sig", "2026-05-20T00:00:00+00:00")
     # The model stays silent about still-valid open actions, resolving one.
     ext = _thread(actions=[], resolved_action_ids=[ids[1]])

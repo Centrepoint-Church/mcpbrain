@@ -22,15 +22,15 @@ The brain reads its own output back as evidence, and counts repeats as support.
   routine as a Gmail draft to self and as a Drive doc, both synced and enriched:
   197 open actions; 59% of Sep–Oct dated actions trace to self-generated sources.
 - **Drafts count as commitments.** 451 draft versions (298 superseded) give 322
-  open actions and get the owner-authored salience boost. The SOM Form thread's
-  23 rows come from one draft, extracted three times, ≈7 real commitments.
+  open actions and get the owner-authored salience boost. One thread's
+  23 open actions come from one draft, extracted three times, ≈7 real commitments.
 - **Machine summaries are re-extracted.** Consolidated notes (430 open actions;
   11 of 12 always-injected core items) and digest residue (407 actions, 30,076
   links) are treated as evidence.
 - **Action dedupe is lexical** (`graph_write._find_near_duplicate_action`:
   subset / Jaccard 0.85 / SequenceMatcher 0.82, latest 200 rows store-wide) and
   sees a unit-write-time snapshot of open actions. ≈3,400 open actions collapse
-  at 0.88 cosine within one logical source (calibrated on the SOM Form thread:
+  at 0.88 cosine within one logical source (calibrated on that 23-row draft thread:
   0.85 → 7 groups, all correct; 0.88 → 11).
 - **Thread order is a date STRING sort** (`thread_enrich.py:424`,
   `graph_write.py:1118`): 38% of multi-message threads are shown out of order,
@@ -187,7 +187,7 @@ Archives use `status='auto_archived'` with the step's `resolved_by`; reversible.
 - Dry run on a `VACUUM INTO` copy: counts per step; gold gate before/after on the
   copy (recall@10 must not drop; MRR no worse than one rank step).
 - Live run attended (bootout → snapshot → run → integrity_check → bootstrap),
-  then doctor, gold gate, and the SOM Form thread's open actions reviewed by the
+  then doctor, gold gate, and that 23-row draft thread's open actions reviewed by the
   owner (expect ≈6–7).
 
 ## Not done
