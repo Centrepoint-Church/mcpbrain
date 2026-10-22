@@ -24,11 +24,9 @@ It upserts entities, relations, role observations, topics and the email_context
 row for one clean contract envelope. Idempotency rests on its upsert/dedup, so
 re-applying the same extraction is safe.
 
-drain keeps an embedder= parameter because the daemon passes one, but it does
-NOT forward it to apply: the structural apply does not consume an embedder
-(action/topic embedding is a later Phase 1 task). The parameter is reserved for
-when that work lands and drain needs to hand an embedder to a writer that takes
-one.
+drain forwards its embedder= to apply (only when one is given, so an injected
+apply that does not take the kwarg is unaffected): apply dedupes actions by
+meaning with it and embeds the thread's semantic doc inline.
 """
 
 import json
@@ -282,6 +280,11 @@ def _regroup_parts(extractions: list) -> list:
                 "parts are independently applicable (part_doc_ids present)"
                 if independent else "applying incomplete thread")
         merged = dict(ordered[0])
+        if of and len(ordered) != of:
+            # Only some of the thread's parts are here: apply must not treat this
+            # as the whole re-extraction (it would supersede actions the missing
+            # parts re-match). See graph_write._supersede_after_reextract.
+            merged["_incomplete_parts"] = True
         messages = []
         for p in ordered:
             messages.extend(p.get("messages", []))
@@ -662,6 +665,8 @@ def drain(store, *, home=None, apply=None, embedder=None, budget=None,
                     # Pass the run-scoped dedup index only when built (flag on) so an
                     # injected/legacy apply that doesn't accept the kwarg is unaffected.
                     _apply_kw = {"entity_index": _entity_index} if _entity_index is not None else {}
+                    if embedder is not None:
+                        _apply_kw["embedder"] = embedder
                     res = apply(store, extraction, doc_ids=doc_ids, **_apply_kw)
                 except Exception as exc:
                     log.error("drain: apply failed for thread %s in %s: %s",

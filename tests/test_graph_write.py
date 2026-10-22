@@ -841,13 +841,13 @@ def test_action_routed_with_owner_and_status(tmp_path):
 
 def test_unclear_owner_routed(tmp_path):
     s = _store(tmp_path)
-    # Non-imperative description, no owner, no sender fallback → 'unclear', 0.5.
+    # Non-imperative description, no owner, no sender fallback → '', 0.5.
     ext = _thread(actions=[_action("The venue situation needs resolution",
                                    owner_name="", owner_fallback="")])
     gw.apply(s, ext, doc_ids=["d1"], clock=_clock)
     rows = s.list_unified_actions()
     assert len(rows) == 1
-    assert rows[0]["owner"] == "unclear"
+    assert rows[0]["owner"] == ""  # nobody named: blank, never "unclear"
     assert rows[0]["confidence"] == 0.5
 
 
@@ -1379,3 +1379,187 @@ def test_meeting_series_disabled_falls_back(tmp_path):
     with store._connect() as db:
         ids = [r["id"] for r in db.execute("SELECT id FROM entities WHERE type='meeting'").fetchall()]
     assert ids == ["college-meeting-12-may"]  # legacy bare slugify(name)
+
+
+# --- Task 6 (ingestion integrity): dedupe by meaning, canonical owner,
+# re-extraction supersedes --------------------------------------------------
+
+class _StubEmbedder:
+    """Maps known texts to fixed vectors; anything else gets an orthogonal
+    default, so only the pairs a test sets up can be similar."""
+    dim = 4
+
+    def __init__(self, vectors):
+        self.vectors = vectors
+        self.calls = []
+
+    def embed_passages(self, texts):
+        self.calls.append(list(texts))
+        return [self.vectors.get(t, [0.0, 0.0, 0.0, 1.0]) for t in texts]
+
+    def embed_query(self, text):
+        return self.vectors.get(text, [0.0, 0.0, 0.0, 1.0])
+
+
+def test_paraphrase_dedupes_within_thread_at_088(tmp_path):
+    s = _store(tmp_path)
+    # cos([1,0,0,0], [0.9,0.43589,0,0]) = 0.9 >= 0.88 -- same meaning, no
+    # shared wording the lexical rules would catch. Different owners: the
+    # same-source scope ignores owner and age.
+    emb = _StubEmbedder({
+        "Return the signed SOM form": [1.0, 0.0, 0.0, 0.0],
+        "Send back the completed school paperwork": [0.9, 0.43589, 0.0, 0.0],
+    })
+    old = s.add_unified_action(text="Return the signed SOM form", owner="Dana Okafor",
+                               status="open", source="email", thread_id="t-act",
+                               created_at="2025-01-01T00:00:00Z")
+    ext = _thread(actions=[_action("Send back the completed school paperwork",
+                                   owner_name="Sam")])
+    out = gw.apply(s, ext, doc_ids=["d1"], clock=_clock, owner=_OWNER_IDENTITY,
+                   embedder=emb)
+    assert out["actions"] == 0
+    assert [a["id"] for a in s.list_unified_actions()] == [old]
+    assert gw.ACTION_SIM_THRESHOLD == 0.88
+
+
+def test_paraphrase_below_threshold_is_kept(tmp_path):
+    s = _store(tmp_path)
+    # cos = 0.87 < 0.88: a distinct action.
+    emb = _StubEmbedder({
+        "Return the signed SOM form": [1.0, 0.0, 0.0, 0.0],
+        "Send back the completed school paperwork": [0.87, 0.49305, 0.0, 0.0],
+    })
+    s.add_unified_action(text="Return the signed SOM form", owner="Sam",
+                         status="open", source="email", thread_id="t-act")
+    ext = _thread(actions=[_action("Send back the completed school paperwork",
+                                   owner_name="Sam")])
+    gw.apply(s, ext, doc_ids=["d1"], clock=_clock, owner=_OWNER_IDENTITY,
+             embedder=emb)
+    assert len(s.list_unified_actions()) == 2
+
+
+def test_unrelated_action_not_merged(tmp_path):
+    s = _store(tmp_path)
+    emb = _StubEmbedder({
+        "Book the hall for the youth night": [1.0, 0.0, 0.0, 0.0],
+        "Pay the plumber's invoice": [0.0, 1.0, 0.0, 0.0],
+    })
+    s.add_unified_action(text="Book the hall for the youth night", owner="Sam",
+                         status="open", source="email", thread_id="t-act",
+                         created_at="2026-05-30T00:00:00Z")
+    ext = _thread(actions=[_action("Pay the plumber's invoice", owner_name="Sam")])
+    out = gw.apply(s, ext, doc_ids=["d1"], clock=_clock, owner=_OWNER_IDENTITY,
+                   embedder=emb)
+    assert out["actions"] == 1
+    assert len(s.list_unified_actions()) == 2
+
+
+def test_fast_path_match_never_embeds(tmp_path):
+    s = _store(tmp_path)
+    emb = _StubEmbedder({})
+    s.add_unified_action(text="Pay the plumber's invoice", owner="Sam",
+                         status="open", source="email", thread_id="t-act",
+                         text_fingerprint=gw._compute_fingerprint("Pay the plumber's invoice"))
+    with s._connect() as conn:
+        hit = gw._find_near_duplicate_action(
+            conn, "Pay the plumber's invoice", "Sam", thread_id="t-act",
+            embedder=emb, today="2026-06-01")
+    assert hit is not None
+    assert emb.calls == []
+
+
+def test_owner_alias_canonical_and_claude_owner_blank(tmp_path):
+    s = _store(tmp_path)
+    ext = _thread(actions=[
+        _action("Confirm the booking", owner_name="SAM CHEN"),
+        _action("The minutes need tidying", owner_name="Claude", owner_fallback=""),
+        _action("The roster is outstanding", owner_name="assistant", owner_fallback=""),
+        _action("Some decision is pending", owner_name="unclear", owner_fallback=""),
+    ])
+    gw.apply(s, ext, doc_ids=["d1"], clock=_clock, owner=_OWNER_IDENTITY)
+    owners = {a["text"]: a["owner"] for a in s.list_unified_actions()}
+    assert owners["Confirm the booking"] == "Sam"
+    assert owners["The minutes need tidying"] == ""
+    assert owners["The roster is outstanding"] == ""
+    assert owners["Some decision is pending"] == ""
+
+
+def _seed_stale_marker(s, thread_id, triggered_at):
+    s.set_stale_reextract(thread_id, "sig", triggered_at)
+
+
+def test_reextract_supersedes_unmatched_open_actions(tmp_path):
+    s = _store(tmp_path)
+    emb = _StubEmbedder({
+        "Return the signed SOM form": [1.0, 0.0, 0.0, 0.0],
+        "Send back the completed SOM paperwork": [0.95, 0.31225, 0.0, 0.0],
+        "Chase the caterer about Sunday": [0.0, 1.0, 0.0, 0.0],
+        "Pay the venue deposit": [0.0, 0.0, 1.0, 0.0],
+    })
+    kept = s.add_unified_action(text="Return the signed SOM form", owner="Sam",
+                                status="open", source="email", thread_id="t-act",
+                                created_at="2026-05-01T00:00:00Z")
+    gone = s.add_unified_action(text="Chase the caterer about Sunday", owner="Sam",
+                                status="open", source="email", thread_id="t-act",
+                                created_at="2026-05-01T00:00:00Z")
+    resolved = s.add_unified_action(text="Pay the venue deposit", owner="Sam",
+                                    status="open", source="email", thread_id="t-act",
+                                    created_at="2026-05-01T00:00:00Z")
+    manual = s.add_unified_action(text="Something the user typed", owner="Sam",
+                                  status="open", source="manual", thread_id="t-act",
+                                  created_at="2026-05-01T00:00:00Z")
+    other = s.add_unified_action(text="Other thread's work", owner="Sam",
+                                 status="open", source="email", thread_id="t-other",
+                                 created_at="2026-05-01T00:00:00Z")
+    _seed_stale_marker(s, "t-act", "2026-05-20T00:00:00+00:00")
+
+    ext = _thread(actions=[_action("Send back the completed SOM paperwork",
+                                   owner_name="Sam")],
+                  resolved_action_ids=[resolved])
+    out = gw.apply(s, ext, doc_ids=["d1"], clock=_clock, owner=_OWNER_IDENTITY,
+                   embedder=emb)
+    rows = {a["id"]: a for a in s.list_unified_actions()}
+    assert out["superseded"] == 1
+    assert rows[kept]["status"] == "open"          # re-matched by meaning
+    assert rows[gone]["status"] == "auto_archived"
+    assert rows[gone]["resolved_by"] == "superseded_reextract"
+    assert rows[resolved]["status"] == "done"      # resolved, not superseded
+    assert rows[manual]["status"] == "open"        # not extraction-sourced
+    assert rows[other]["status"] == "open"         # another thread
+
+    # Once per trigger: a later ordinary extraction of the thread that does
+    # not mention `kept` leaves it alone.
+    ext2 = _thread(actions=[_action("Pay the plumber's invoice", owner_name="Sam")])
+    out2 = gw.apply(s, ext2, doc_ids=["d1"], clock=_clock, owner=_OWNER_IDENTITY,
+                    embedder=emb)
+    assert out2["superseded"] == 0
+    assert {a["id"]: a for a in s.list_unified_actions()}[kept]["status"] == "open"
+
+
+def test_reextract_never_supersedes_newer_actions_or_without_marker(tmp_path):
+    s = _store(tmp_path)
+    newer = s.add_unified_action(text="Chase the caterer about Sunday", owner="Sam",
+                                 status="open", source="email", thread_id="t-act",
+                                 created_at="2026-05-25 00:00:00")
+    ext = _thread(actions=[_action("Pay the plumber's invoice", owner_name="Sam")])
+    # No marker at all: ordinary extraction, nothing archived.
+    assert gw.apply(s, ext, doc_ids=["d1"], clock=_clock,
+                    owner=_OWNER_IDENTITY)["superseded"] == 0
+    # Marker older than the action: the action came after the trigger.
+    _seed_stale_marker(s, "t-act", "2026-05-20T00:00:00+00:00")
+    assert gw.apply(s, ext, doc_ids=["d1"], clock=_clock,
+                    owner=_OWNER_IDENTITY)["superseded"] == 0
+    assert {a["id"]: a for a in s.list_unified_actions()}[newer]["status"] == "open"
+
+
+def test_reextract_partial_parts_never_supersede(tmp_path):
+    s = _store(tmp_path)
+    old = s.add_unified_action(text="Chase the caterer about Sunday", owner="Sam",
+                               status="open", source="email", thread_id="t-act",
+                               created_at="2026-05-01T00:00:00Z")
+    _seed_stale_marker(s, "t-act", "2026-05-20T00:00:00+00:00")
+    ext = _thread(actions=[])
+    ext["_incomplete_parts"] = True
+    assert gw.apply(s, ext, doc_ids=["d1"], clock=_clock,
+                    owner=_OWNER_IDENTITY)["superseded"] == 0
+    assert {a["id"]: a for a in s.list_unified_actions()}[old]["status"] == "open"

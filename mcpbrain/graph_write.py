@@ -951,20 +951,60 @@ def _is_self_message(msg: dict, identity: str) -> bool:
     return all(a == identity.lower() for a in recipient_addrs)
 
 
-def _find_near_duplicate_action(conn, text, owner, *, window_days=30,
-                                threshold=0.85, today=None) -> int | None:
-    """Return the id of an existing OPEN actions row that's a near-duplicate of
-    (text, owner) within the last window_days, or None.
+# Cosine floor for "same action, different words" (bge-small, normalised
+# vectors). Global constraint of the 2026-10-22 ingestion-integrity spec §2.
+ACTION_SIM_THRESHOLD = 0.88
 
-    Ported from memory_db.find_near_duplicate_decision (memory_db.py:1780-1856),
-    reading the unified `actions` table instead of `decisions`. Fast path: exact
-    text_fingerprint match within the window. Slow path: normalised equality,
-    token-subset (length-gated), Jaccard, or fuzzy ratio. The Nexus `type` filter
-    is dropped (actions has no type column); source is constrained to 'email' to
-    mirror the decision-type scope. `today` (an ISO YYYY-MM-DD string) is the
-    window baseline; apply() passes the injected clock so the cutoff and the
-    actions' created_at are stamped from the same clock (a backfill run with a
-    clock far from wall-time then windows correctly). Defaults to UTC today.
+# Candidate cap per near-duplicate check: same-source rows first, then the
+# same-owner window, never more than this many embedded per check.
+_ACTION_SIM_CANDIDATES = 300
+
+# Owner strings that name no person: the model sometimes credits itself, or
+# writes the placeholder the prompt uses for "nobody named". Never written.
+_NON_PERSON_OWNERS = frozenset({"claude", "claude code", "assistant",
+                                "the assistant", "unclear"})
+
+
+def _unit(vec) -> list[float]:
+    """L2-normalise a vector (cosine = dot product of unit vectors)."""
+    v = [float(x) for x in vec]
+    n = sum(x * x for x in v) ** 0.5
+    return [x / n for x in v] if n else v
+
+
+def _embed_texts(embedder, texts, cache) -> dict:
+    """Unit vectors for `texts`, embedding only those not already in `cache`
+    (one embed_passages call). `cache` is per apply() call and maps text ->
+    unit vector, so a thread's open actions are embedded once, not per action."""
+    missing = [t for t in dict.fromkeys(texts) if t not in cache]
+    if missing:
+        for t, v in zip(missing, embedder.embed_passages(missing)):
+            cache[t] = _unit(v)
+    return cache
+
+
+def _find_near_duplicate_action(conn, text, owner, *, thread_id="", embedder=None,
+                                window_days=30, threshold=0.85, today=None,
+                                cache=None, same_source_only=False) -> int | None:
+    """Return the id of an existing OPEN email action that means the same as
+    (text, owner), or None.
+
+    Candidates are open `source='email'` rows of the SAME logical source
+    (`thread_id` -- a Gmail thread, base note id, file id or `cal-` event id),
+    at any age and under any owner, plus same-owner rows in the last
+    `window_days`. The caller opens `conn` per action, so the check always runs
+    against the live open list at apply time.
+
+    Fast path (no embedding): text_fingerprint or normalised-title equality.
+    Slow path: with an `embedder`, cosine >= ACTION_SIM_THRESHOLD between the
+    unit-normalised embeddings, best candidate wins, at most
+    _ACTION_SIM_CANDIDATES embedded (cached in `cache` across one apply call).
+    Without one (back-compat), the lexical rules: token subset (length-gated),
+    Jaccard >= threshold, SequenceMatcher >= 0.82.
+
+    `today` (ISO YYYY-MM-DD) is the window baseline; apply() passes its injected
+    clock so the cutoff and the rows' created_at come from the same clock.
+    `same_source_only` drops the owner window (only `thread_id` rows count).
     """
     import difflib
 
@@ -976,38 +1016,66 @@ def _find_near_duplicate_action(conn, text, owner, *, window_days=30,
     baseline = (today or _today())[:10]
     cutoff = (_date.fromisoformat(baseline) - _timedelta(days=window_days)).isoformat()
 
+    if owner:
+        owner_sql, owner_params = "(owner = ? OR owner = '')", [owner]
+    else:
+        owner_sql, owner_params = "(owner = '' OR owner IS NULL)", []
+    # same-source (any age, any owner) OR same-owner in the window
+    if same_source_only:
+        if not thread_id:
+            return None
+        scope_sql, scope_params = "(thread_id = ?)", [thread_id]
+    else:
+        scope_sql = f"((substr(created_at,1,10) >= ? AND {owner_sql})"
+        scope_params = [cutoff, *owner_params]
+        if thread_id:
+            scope_sql += " OR thread_id = ?"
+            scope_params.append(thread_id)
+        scope_sql += ")"
+
     fp = _compute_fingerprint(text)
     if fp:
-        fp_where = ["status='open'", "source='email'", "text_fingerprint=?",
-                    "substr(created_at,1,10) >= ?"]
-        fp_params: list = [fp, cutoff]
-        if owner:
-            fp_where.append("(owner = ? OR owner = '')")
-            fp_params.append(owner)
-        else:
-            fp_where.append("(owner = '' OR owner IS NULL)")
         fp_row = conn.execute(
-            f"SELECT id FROM actions WHERE {' AND '.join(fp_where)} LIMIT 1",
-            fp_params,
+            "SELECT id FROM actions WHERE status='open' AND source='email' "
+            f"AND text_fingerprint=? AND {scope_sql} LIMIT 1",
+            [fp, *scope_params],
         ).fetchone()
         if fp_row:
             return fp_row[0]
 
-    where = ["status='open'", "source='email'", "substr(created_at,1,10) >= ?"]
-    params: list = [cutoff]
-    if owner:
-        where.append("(owner = ? OR owner = '')")
-        params.append(owner)
-    else:
-        where.append("(owner = '' OR owner IS NULL)")
-    sql = (f"SELECT id, text FROM actions WHERE {' AND '.join(where)} "
-           "ORDER BY id DESC LIMIT 200")
-    for row_id, row_text in conn.execute(sql, params).fetchall():
+    # Same-source rows first, then the newest of the window, capped.
+    order = "(thread_id = ?) DESC, id DESC" if thread_id else "id DESC"
+    order_params = [thread_id] if thread_id else []
+    limit = _ACTION_SIM_CANDIDATES if embedder is not None else 200
+    rows = conn.execute(
+        "SELECT id, text FROM actions WHERE status='open' AND source='email' "
+        f"AND {scope_sql} ORDER BY {order} LIMIT ?",
+        [*scope_params, *order_params, limit],
+    ).fetchall()
+
+    cands = []
+    for row_id, row_text in rows:
         cand = _normalise_title_for_dedup(row_text or "")
         if not cand:
             continue
         if cand == norm:
             return row_id
+        cands.append((row_id, row_text, cand))
+    if not cands:
+        return None
+
+    if embedder is not None:
+        cache = {} if cache is None else cache
+        _embed_texts(embedder, [text] + [c[1] for c in cands], cache)
+        q = cache[text]
+        best_id, best = None, ACTION_SIM_THRESHOLD
+        for row_id, row_text, _cand in cands:
+            sim = sum(a * b for a, b in zip(q, cache[row_text]))
+            if sim >= best:
+                best_id, best = row_id, sim
+        return best_id
+
+    for row_id, _row_text, cand in cands:
         len_a, len_b = len(norm), len(cand)
         length_ratio = min(len_a, len_b) / max(len_a, len_b) if max(len_a, len_b) else 0.0
         if length_ratio < 0.6:
@@ -1575,7 +1643,8 @@ def apply(store, extraction, *, doc_ids, identity=None,
         lead=lead, lead_msg_id=lead_msg_id, lead_date_iso=lead_date_iso,
         content_type=content_type, org=org, sender_id=sender_id,
         sender_name=sender_name, is_self=is_self, in_inbox=in_inbox,
-        name_to_id=name_to_id, now=now, thread_id=thread_id, owner=owner)
+        name_to_id=name_to_id, now=now, thread_id=thread_id, owner=owner,
+        embedder=embedder)
 
     # ── 5. Semantic layer (Task 5) ──────────────────────────────────────────
     # One synthesised vector doc per thread, keyed enriched-{thread_id}. Written
@@ -1627,13 +1696,14 @@ def apply(store, extraction, *, doc_ids, identity=None,
         "actions": action_counts["actions"],
         "resolved": action_counts["resolved"],
         "updated": action_counts["updated"],
+        "superseded": action_counts.get("superseded", 0),
         "semantic_doc": semantic_doc_id,
     }
 
 
 def _write_actions(store, extraction, *, lead, lead_msg_id, lead_date_iso,
                    content_type, org, sender_id, sender_name, is_self, in_inbox,
-                   name_to_id, now, thread_id, owner) -> dict:
+                   name_to_id, now, thread_id, owner, embedder=None) -> dict:
     """Action lifecycle: gates, self-synthesis, dedup, owner/deadline inference,
     routing into the unified actions table, then resolve/update.
 
@@ -1645,8 +1715,22 @@ def _write_actions(store, extraction, *, lead, lead_msg_id, lead_date_iso,
 
     Gmail label writes (_apply_self_task_label) are intentionally omitted: there
     is no Gmail surface in Phase 1.
+
+    Near-duplicates are matched by meaning when an `embedder` is given (see
+    _find_near_duplicate_action). Owner strings are canonicalised: an owner
+    alias becomes the configured owner name, and a non-person owner ("Claude",
+    "assistant", "unclear") is written as ''.
+
+    Re-extraction supersedes: when this thread was re-queued by stale_reextract
+    and that re-run has not yet been applied, the thread's open email actions
+    created before the trigger that this extraction neither re-matched, resolved
+    nor updated are archived (`auto_archived` / `superseded_reextract`).
     """
-    actions_list = extraction.get("actions", []) or []
+    raw_actions = list(extraction.get("actions", []) or [])
+    actions_list = list(raw_actions)
+    emb_cache: dict = {}
+    matched_ids: set = set()
+    created_ids: set = set()
     body = lead.get("body", "") or ""
 
     # Stamp actions from the injected clock so the near-duplicate window and the
@@ -1708,6 +1792,8 @@ def _write_actions(store, extraction, *, lead, lead_msg_id, lead_date_iso,
             continue
 
         owner_name = (action.get("owner_name") or "").strip() or None
+        if owner_name and owner_name.lower() in _NON_PERSON_OWNERS:
+            owner_name = None  # names no person: infer, else write ''
         owner_fallback = (action.get("owner_fallback") or "").strip() or None
         due_date = (action.get("due_date") or "").strip()
 
@@ -1715,12 +1801,9 @@ def _write_actions(store, extraction, *, lead, lead_msg_id, lead_date_iso,
         resolved_owner_eid = ""
 
         if owner_name:
-            if owner_name.lower() in owner.aliases:
+            if _is_owner_alias(owner_name, owner):
                 resolved_owner_eid = owner.entity_id
                 resolved_owner_name = owner.name
-            elif owner_name.lower() == "unclear":
-                resolved_owner_name = None
-                owner_name = None
             else:
                 hit = store.find_entity(owner_name)
                 if hit and hit["type"] == "person":
@@ -1768,9 +1851,11 @@ def _write_actions(store, extraction, *, lead, lead_msg_id, lead_date_iso,
                 due_date = inferred_d
                 deadline_confidence = 0.6
 
+        if resolved_owner_name and resolved_owner_name.lower() in _NON_PERSON_OWNERS:
+            resolved_owner_name, resolved_owner_eid = None, ""
         is_not_owner = bool(
             resolved_owner_name
-            and resolved_owner_name.lower() not in owner.aliases)
+            and not _is_owner_alias(resolved_owner_name, owner))
 
         cluster_id = f"msg-{lead_msg_id[:16]}" if lead_msg_id else ""
 
@@ -1781,7 +1866,7 @@ def _write_actions(store, extraction, *, lead, lead_msg_id, lead_date_iso,
             owner_eid_out = resolved_owner_eid
             confidence_out = action_confidence
         elif not resolved_owner_name:
-            owner_out = "unclear"
+            owner_out = ""  # nobody named: blank, never a placeholder string
             owner_eid_out = ""
             confidence_out = 0.5
         else:
@@ -1795,12 +1880,17 @@ def _write_actions(store, extraction, *, lead, lead_msg_id, lead_date_iso,
             owner_eid_out = owner.entity_id
             confidence_out = deadline_confidence
 
-        # Near-duplicate guard: skip insert when an open near-identical row
-        # already exists within the 30-day window (windowed on the injected clock).
+        # Near-duplicate guard: skip insert when an open row already means the
+        # same thing -- same source at any age, or same owner within the 30-day
+        # window (windowed on the injected clock). A fresh read connection per
+        # action, so rows written earlier in this apply are seen.
         with store._connect() as conn:
-            if _find_near_duplicate_action(
-                    conn, description, owner_out, today=today_iso) is not None:
-                continue
+            dup_id = _find_near_duplicate_action(
+                conn, description, owner_out, thread_id=thread_id,
+                embedder=embedder, today=today_iso, cache=emb_cache)
+        if dup_id is not None:
+            matched_ids.add(dup_id)
+            continue
 
         # waiting_on: an action awaiting a reply from a named person. Resolve the
         # awaited entity so the reconciler can match by id, and stamp when the
@@ -1816,7 +1906,7 @@ def _write_actions(store, extraction, *, lead, lead_msg_id, lead_date_iso,
                 waiting_on_eid = name_to_id[waiting_on_name]
             waiting_on_set_at = lead_date_iso or now_iso
 
-        store.add_unified_action(
+        new_id = store.add_unified_action(
             text=description, owner=owner_out, owner_entity_id=owner_eid_out,
             status="open", deadline=due_date, org=org,
             project_id=action.get("project_id") or "",
@@ -1829,6 +1919,7 @@ def _write_actions(store, extraction, *, lead, lead_msg_id, lead_date_iso,
             waiting_on_entity_id=waiting_on_eid,
             waiting_on_set_at=waiting_on_set_at,
             created_at=now_iso)
+        created_ids.add(new_id)
         actions_created += 1
 
     # ── Close actions resolved by this email. Scoped to this thread's OPEN
@@ -1839,6 +1930,7 @@ def _write_actions(store, extraction, *, lead, lead_msg_id, lead_date_iso,
     for action_id in (extraction.get("resolved_action_ids") or []):
         if not isinstance(action_id, int) or isinstance(action_id, bool):
             continue
+        matched_ids.add(action_id)
         changed = store.set_action_status(
             action_id, "done", resolved_by=lead_msg_id,
             thread_id=thread_id, only_if_open=True)
@@ -1857,6 +1949,7 @@ def _write_actions(store, extraction, *, lead, lead_msg_id, lead_date_iso,
         new_text = (item.get("new_text") or "").strip()
         if not isinstance(action_id, int) or isinstance(action_id, bool) or not new_text:
             continue
+        matched_ids.add(action_id)
         changed = store.set_action_text(
             action_id, new_text, thread_id=thread_id, only_if_open=True)
         if changed:
@@ -1865,8 +1958,85 @@ def _write_actions(store, extraction, *, lead, lead_msg_id, lead_date_iso,
             log.info("apply: updated_action id %s matched no open action in "
                      "thread %s; skipping", action_id, thread_id)
 
+    superseded = _supersede_after_reextract(
+        store, extraction, raw_actions=raw_actions, thread_id=thread_id,
+        keep=matched_ids | created_ids, owner=owner, embedder=embedder,
+        today_iso=today_iso, now_iso=now_iso, cache=emb_cache)
+
     return {"actions": actions_created, "resolved": resolved_count,
-            "updated": updated_count}
+            "updated": updated_count, "superseded": superseded}
+
+
+def _is_owner_alias(name: str, owner) -> bool:
+    """True when `name` is (case-insensitively) the owner's name or an alias."""
+    low = (name or "").strip().lower()
+    return bool(low) and (low in owner.aliases
+                          or (bool(owner.name) and low == owner.name.lower()))
+
+
+def _ts19(ts: str) -> str:
+    """Normalise an ISO-ish timestamp to 'YYYY-MM-DDTHH:MM:SS' so SQLite's
+    CURRENT_TIMESTAMP ('... HH:MM:SS') and ISO forms compare as strings."""
+    return (ts or "").replace(" ", "T")[:19]
+
+
+def _supersede_after_reextract(store, extraction, *, raw_actions, thread_id,
+                               keep, owner, embedder, today_iso, now_iso,
+                               cache) -> int:
+    """Archive what a stale re-extraction no longer finds. Returns the count.
+
+    Runs only for a thread stale_reextract re-queued whose re-run has not been
+    applied yet (`triggered_at` newer than `superseded_at`), and once per
+    trigger: the marker is stamped afterwards, so a later ordinary extraction of
+    the same thread (which only sees new messages' actions) never archives.
+    Archived: open `source='email'` actions of this thread created BEFORE the
+    trigger that this extraction did not re-match, resolve, update or create.
+    Actions the gates dropped (age, notification) still count as re-matched --
+    a gate is not evidence the work is gone. A part of a long thread arriving
+    alone (`_incomplete_parts`) never supersedes: the other parts may hold the
+    re-match. Reversible: status `auto_archived`, resolved_by
+    `superseded_reextract`.
+    """
+    if not thread_id or extraction.get("_incomplete_parts"):
+        return 0
+    marker = store.get_stale_reextract(thread_id)
+    if not marker:
+        return 0
+    triggered = _ts19(marker.get("triggered_at") or "")
+    if not triggered or _ts19(marker.get("superseded_at") or "") >= triggered:
+        return 0
+
+    with store._connect() as conn:
+        rows = conn.execute(
+            "SELECT id, created_at FROM actions WHERE status='open' "
+            "AND source='email' AND thread_id=?", (thread_id,)).fetchall()
+    older = [r[0] for r in rows
+             if r[0] not in keep and _ts19(r[1] or "") < triggered]
+    if older:
+        kept = set(keep)
+        # Re-match every extracted action (gated ones included) so only rows
+        # the re-run genuinely did not find are archived.
+        for action in raw_actions:
+            desc = (action.get("description") or "").strip()
+            if not desc:
+                continue
+            with store._connect() as conn:
+                hit = _find_near_duplicate_action(
+                    conn, desc, "", thread_id=thread_id, embedder=embedder,
+                    today=today_iso, cache=cache, same_source_only=True)
+            if hit is not None:
+                kept.add(hit)
+        older = [i for i in older if i not in kept]
+    n = 0
+    for action_id in older:
+        n += store.set_action_status(
+            action_id, "auto_archived", resolved_by="superseded_reextract",
+            thread_id=thread_id, only_if_open=True)
+    store.mark_stale_reextract_superseded(thread_id, now_iso)
+    if n:
+        log.info("apply: re-extraction of %s superseded %d open action(s)",
+                 thread_id, n)
+    return n
 
 
 # ---------------------------------------------------------------------------
