@@ -108,6 +108,7 @@ from collections import Counter, defaultdict
 from datetime import datetime, timezone
 from pathlib import Path
 
+from mcpbrain import action_owner
 from mcpbrain import config
 from mcpbrain import graph_write as gw
 from mcpbrain import restore
@@ -409,7 +410,12 @@ class Ctx:
             home, generated_label_ids=_cached_label_ids(db))
         self.res = Resolver.build(db, self.rules)
         self.owner_name = config.owner_name(home) or ""
-        self.owner_aliases = frozenset(a for a in config.owner_aliases(home) if a)
+        # Rule 1 (one owner identity, shared with graph_write and the daily
+        # action_owner repair): config aliases plus the real owner node's own
+        # name and aliases; owner rows get the class's id.
+        self.owner_class = gw._owner_class_db(
+            db, gw.owner_identity_from_config(home), config.owner_email(home))
+        self.owner_aliases = self.owner_class.names
         self._embedder = embedder
         self.derived_rels: set[int] = set()     # marked derived by this run
         self.derived_links: set[tuple] = set()  # (message_id, entity_id), ditto
@@ -669,11 +675,11 @@ def _relations_with_evidence(db) -> set:
         f"SELECT DISTINCT relation_id FROM relation_sources WHERE source_class IN ({ev})")}
 
 
-def _owner_key(ctx, owner) -> str:
+def _owner_key(ctx, owner, owner_entity_id="") -> str:
     lo = (owner or "").strip().lower()
     if lo in ("", gw._UNCLEAR_OWNER) or lo in _NON_PERSON:
         return ""
-    if lo in ctx.owner_aliases and ctx.owner_name:
+    if ctx.owner_name and ctx.owner_class.is_owner(owner, owner_entity_id):
         return ctx.owner_name.strip().lower()
     return lo
 
@@ -691,72 +697,16 @@ def _unit_vectors(ctx, texts) -> dict:
     return vecs
 
 
-def _lexical_same(a: str, b: str) -> bool:
-    """graph_write's lexical action-dedupe rules (its fallback when the
-    embedder fails): normalised-title equality, then — length-gated — token
-    subset, Jaccard >= 0.85, SequenceMatcher >= 0.82."""
-    import difflib
-    na, nb = gw._normalise_title_for_dedup(a), gw._normalise_title_for_dedup(b)
-    if not na or not nb:
-        return False
-    if na == nb:
-        return True
-    if min(len(na), len(nb)) / max(len(na), len(nb)) < 0.6:
-        return False
-    ta, tb = set(na.split()), set(nb.split())
-    if ta and tb and (ta <= tb or tb <= ta):
-        return True
-    return (gw._token_jaccard(na, nb) >= 0.85
-            or difflib.SequenceMatcher(None, na, nb).ratio() >= 0.82)
+_lexical_same = action_owner.lexical_same
 
 
 def _clusters(ctx, rows, vecs) -> list[list[dict]]:
     """Single-link clusters at SIM_THRESHOLD, strongest pairs first, never
     joining two different named owners (ruling I6: blank/'unclear' joins any).
-    vecs=None: lexical pairs (_lexical_same) instead of cosine."""
-    n = len(rows)
-    if vecs is None:
-        pairs = [(1.0, i, j) for i in range(n) for j in range(i + 1, n)
-                 if _lexical_same(rows[i]["text"], rows[j]["text"])]
-        return _union(ctx, rows, pairs)
-    try:
-        import numpy as np
-        m = np.array([vecs[r["text"]] for r in rows], dtype="float32")
-        sims = m @ m.T
-        hits = np.argwhere(np.triu(sims >= SIM_THRESHOLD, 1))
-        pairs = [(float(sims[i, j]), int(i), int(j)) for i, j in hits]
-    except ImportError:  # numpy ships with fastembed; this is only a fallback
-        pairs = []
-        for i in range(n):
-            vi = vecs[rows[i]["text"]]
-            for j in range(i + 1, n):
-                s = sum(a * b for a, b in zip(vi, vecs[rows[j]["text"]]))
-                if s >= SIM_THRESHOLD:
-                    pairs.append((s, i, j))
-    return _union(ctx, rows, pairs)
-
-
-def _union(ctx, rows, pairs) -> list[list[dict]]:
-    n = len(rows)
-    parent = list(range(n))
-    owners = [{_owner_key(ctx, r["owner"])} - {""} for r in rows]
-
-    def find(x):
-        while parent[x] != x:
-            parent[x] = parent[parent[x]]
-            x = parent[x]
-        return x
-
-    for _s, i, j in sorted(pairs, key=lambda p: (-p[0], p[1], p[2])):
-        a, b = find(i), find(j)
-        if a == b or len(owners[a] | owners[b]) > 1:
-            continue
-        parent[b] = a
-        owners[a] |= owners[b]
-    groups: dict[int, list[dict]] = defaultdict(list)
-    for i, r in enumerate(rows):
-        groups[find(i)].append(r)
-    return [g for g in groups.values() if len(g) > 1]
+    vecs=None: lexical pairs instead of cosine. The rule lives in
+    action_owner.cluster, shared with the daily owner repair."""
+    return action_owner.cluster(
+        rows, vecs, lambda r: _owner_key(ctx, r["owner"], r.get("owner_entity_id")))
 
 
 def step_dedup_embed(ctx, tx):
@@ -776,7 +726,8 @@ def step_dedup_embed(ctx, tx):
     for g in groups:
         for cluster in _clusters(ctx, g, vecs):
             keep = min(cluster, key=lambda a: (
-                not (a["deadline"] or "").strip(), _owner_key(ctx, a["owner"]) == "",
+                not (a["deadline"] or "").strip(),
+                _owner_key(ctx, a["owner"], a["owner_entity_id"]) == "",
                 a["created_at"] or "", a["id"]))
             for a in cluster:
                 if a is keep:
@@ -935,8 +886,12 @@ def step_owner_aliases(ctx, tx):
         if lo in _NON_PERSON:
             new = {"owner": gw._UNCLEAR_OWNER, "owner_entity_id": ""}
             label = "actions:non_person"
-        elif canon and lo in ctx.owner_aliases and raw != canon:
-            new = {"owner": canon}
+        elif canon and ctx.owner_class.is_owner(raw, a["owner_entity_id"]):
+            want = ctx.owner_class.entity_id or ""
+            if raw != canon:
+                new["owner"] = canon
+            if (a["owner_entity_id"] or "") != want:
+                new["owner_entity_id"] = want
             label = "actions:owner_alias"
         if not new:
             continue

@@ -4024,7 +4024,41 @@ class Daemon:
         if summary["actions_archived"] or summary["actions_deduped"]:
             log.info("action_hygiene: archived=%d deduped=%d",
                      summary["actions_archived"], summary["actions_deduped"])
+        summary.update(self._run_owner_action_repair())
         return summary
+
+    def _run_owner_action_repair(self) -> dict:
+        """The owner-split repair (action_owner.repair_owner_actions): one
+        owner identity on every open action, then owner-split duplicates within
+        a source collapsed. Daily, idempotent and incremental, so every install
+        heals with no attended run. Its own try: a failure here never loses the
+        sweeps' result. The embedder is taken bounded (never parks the tick); a
+        model still loading waits for the next run rather than comparing with
+        the weaker lexical rules and moving the watermark past those threads.
+        No model configured at all (or a build that fails) means lexical."""
+        from mcpbrain import action_owner
+        from mcpbrain import config as _config
+        from mcpbrain import graph_write as gw
+        emb = None
+        if getattr(self, "_embedder_factory", None) is not None:
+            try:
+                emb = self._embedder_bounded()
+            except Exception as exc:  # noqa: BLE001 — lexical, never a failure
+                log.warning("action_owner_repair: embedder failed (%s); lexical", exc)
+                emb = None
+            else:
+                if emb is None:
+                    return {"owner_repair": "embedder_loading"}
+        try:
+            home = str(app_dir())
+            got = action_owner.repair_owner_actions(
+                self._store, gw.owner_identity_from_config(home), embedder=emb,
+                owner_email=_config.owner_email(home))
+        except Exception as exc:  # noqa: BLE001 — a sweep must never kill the cycle
+            log.warning("action_owner_repair failed: %s", exc, exc_info=True)
+            return {"owner_repair_error": str(exc)}
+        return {"owner_canonicalised": got.get("canonicalised", 0),
+                "owner_deduped": got.get("deduped", 0)}
 
     def _run_ingestion_cleanup(self) -> dict | None:
         """The one-shot ingestion clean-up (ruling I13). The embedder is built

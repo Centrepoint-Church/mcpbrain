@@ -58,9 +58,10 @@ class OwnerIdentity:
     aliases: frozenset = field(default_factory=frozenset)
 
 
-def owner_identity_from_config() -> OwnerIdentity:
-    """Build the owner identity from config.json under MCPBRAIN_HOME."""
-    home = str(config.app_dir())
+def owner_identity_from_config(home=None) -> OwnerIdentity:
+    """Build the owner identity from config.json under `home` (default
+    MCPBRAIN_HOME)."""
+    home = str(home) if home is not None else str(config.app_dir())
     return OwnerIdentity(
         name=config.owner_name(home),
         entity_id=slugify(config.owner_full_name(home)),
@@ -1253,7 +1254,8 @@ def _owner_blank(owner) -> bool:
 
 def _find_near_duplicate_action(conn, text, owner, *, thread_id="", embedder=None,
                                 window_days=30, threshold=0.85, today=None,
-                                cache=None, status=None) -> int | None:
+                                cache=None, status=None,
+                                owner_class=None) -> int | None:
     """Return the id of an existing OPEN email action that means the same as
     (text, owner), or None.
 
@@ -1274,6 +1276,11 @@ def _find_near_duplicate_action(conn, text, owner, *, thread_id="", embedder=Non
 
     `today` (ISO YYYY-MM-DD) is the window baseline; apply() passes its injected
     clock so the cutoff and the rows' created_at come from the same clock.
+
+    `owner_class` (an OwnerClass): when `owner` is the install owner, every row
+    whose owner is in the same class -- any name the class carries, or an owner
+    id in it -- is the same owner, so a row stored under a variant spelling is
+    still a candidate.
     """
     import difflib
 
@@ -1288,6 +1295,14 @@ def _find_near_duplicate_action(conn, text, owner, *, thread_id="", embedder=Non
     # Owner compatibility: equal, or either side blank / "unclear".
     if _owner_blank(owner):
         owner_sql, owner_params = "1=1", []
+    elif owner_class is not None and owner_class.is_owner(owner):
+        names = sorted(owner_class.names | {owner.strip().lower()})
+        ids = sorted(owner_class.ids)
+        owner_sql = (f"(lower(trim(owner)) IN ({','.join('?' * len(names))}) "
+                     + (f"OR owner_entity_id IN ({','.join('?' * len(ids))}) "
+                        if ids else "")
+                     + f"OR owner = '' OR owner IS NULL OR owner = '{_UNCLEAR_OWNER}')")
+        owner_params = [*names, *ids]
     else:
         owner_sql = ("(owner = ? OR owner = '' OR owner IS NULL "
                      f"OR owner = '{_UNCLEAR_OWNER}')")
@@ -2180,6 +2195,14 @@ def _write_actions(store, extraction, *, lead, lead_msg_id, lead_date_iso,
 
     is_sender_owner = bool(sender_name and _is_owner(sender_name, owner))
 
+    # One owner identity for this apply (resolved once, not per action): the
+    # config aliases, the derived id, and the REAL owner node's id, name and
+    # aliases. Without the real node, a variant the owner's own node carries
+    # ("Dana Okafor" when config says "Dana") was written as a different,
+    # "not owner" person and the owner's actions split across name strings.
+    oc = (resolve_owner_class(store, owner)
+          if actions_list else OwnerClass())
+
     actions_created = 0
     for action in actions_list:
         description = (action.get("description") or "").strip()
@@ -2196,25 +2219,22 @@ def _write_actions(store, extraction, *, lead, lead_msg_id, lead_date_iso,
         resolved_owner_eid = ""
 
         if owner_name:
-            if _is_owner_alias(owner_name, owner):
-                resolved_owner_eid = owner.entity_id
+            if _is_owner_alias(owner_name, owner) or oc.is_owner_name(owner_name):
+                resolved_owner_eid = oc.entity_id
                 resolved_owner_name = owner.name
             else:
                 hit = store.find_entity(owner_name)
-                if hit and hit["type"] == "person":
+                if hit and (hit["type"] == "person" or hit["id"] in oc.ids):
                     resolved_owner_eid = hit["id"]
                 elif owner_name in name_to_id:
                     resolved_owner_eid = name_to_id[owner_name]
                 # find_entity/name_to_id resolve by the graph's own entity
                 # identity (id, slug, or stored display name), which can
-                # independently land on the owner's own entity for a spelling
-                # the alias check above doesn't cover ("Dana Okafor" when the
-                # owner's node itself carries that display name). When that
-                # happens this IS the install owner, so canonicalize now
-                # rather than carrying the raw variant through to the write.
-                if resolved_owner_eid == owner.entity_id:
-                    resolved_owner_name = owner.name
-        elif owner_fallback == "sender" and sender_id and sender_id != owner.entity_id:
+                # independently land on the owner's own entity -- derived OR
+                # real id -- for a spelling the name check above doesn't cover.
+                # That IS the install owner: canonicalised below.
+        elif (owner_fallback == "sender" and sender_id
+              and sender_id != owner.entity_id):
             resolved_owner_eid = sender_id
             resolved_owner_name = sender_name
 
@@ -2223,7 +2243,7 @@ def _write_actions(store, extraction, *, lead, lead_msg_id, lead_date_iso,
         if is_self:
             # Self-email: owner is definitionally the install owner, bypass inference.
             resolved_owner_name = owner.name
-            resolved_owner_eid = owner.entity_id
+            resolved_owner_eid = oc.entity_id or owner.entity_id
             context_tag_for_action = "self-email"
             synthetic = action.get("_synthetic", False)
             has_prefix = bool(_SELF_PREFIX_RE.match(lead.get("subject", "")))
@@ -2248,9 +2268,12 @@ def _write_actions(store, extraction, *, lead, lead_msg_id, lead_date_iso,
 
         if resolved_owner_name and resolved_owner_name.lower() in _NON_PERSON_OWNERS:
             resolved_owner_name, resolved_owner_eid = None, ""
-        is_not_owner = bool(
-            resolved_owner_name
-            and not _is_owner_alias(resolved_owner_name, owner))
+        # Rule 1 (one owner identity): a config alias, a name the owner's own
+        # node carries, or a name that resolved to the derived or real owner id.
+        is_owner_action = bool(resolved_owner_name) and (
+            _is_owner_alias(resolved_owner_name, owner)
+            or oc.is_owner(resolved_owner_name, resolved_owner_eid))
+        is_not_owner = bool(resolved_owner_name) and not is_owner_action
 
         cluster_id = f"msg-{lead_msg_id[:16]}" if lead_msg_id else ""
 
@@ -2272,7 +2295,7 @@ def _write_actions(store, extraction, *, lead, lead_msg_id, lead_date_iso,
             # consumer (brain_actions(owner="") -> config.owner_name()) relies
             # on for an exact match.
             owner_out = owner.name
-            owner_eid_out = owner.entity_id
+            owner_eid_out = oc.entity_id or owner.entity_id
             confidence_out = deadline_confidence
 
         # Near-duplicate guard: skip insert when an open row already means the
@@ -2283,7 +2306,7 @@ def _write_actions(store, extraction, *, lead, lead_msg_id, lead_date_iso,
             dup_id = _find_near_duplicate_action(
                 conn, description, owner_out, thread_id=thread_id,
                 embedder=embedder, today=today_iso, cache=emb_cache,
-                status=emb_status)
+                status=emb_status, owner_class=oc)
         if emb_status.get("embed_failed"):
             embedder = None  # logged once; lexical for the rest of this apply
         if dup_id is not None:
@@ -2484,6 +2507,82 @@ def _ensure_works_at(conn, entity_id: str, org: str, *, derived: bool = False) -
         (entity_id, org_id, 0 if derived else 1, today, 1 if derived else 0))
 
 
+@dataclass(frozen=True)
+class OwnerClass:
+    """Everything that IS the install owner, for action attribution (2026-10-22
+    ingestion-integrity spec §2, "Owner canonicalisation at write").
+
+    name:      the canonical owner string written to actions.owner
+    entity_id: the owner's REAL node id when the graph has one, else the
+               derived owner.entity_id
+    ids:       every id that is the owner (derived + real)
+    names:     lower-cased names that are the owner: the config aliases and
+               owner name, plus the real owner node's own name and aliases.
+
+    Only names the owner's OWN node carries count, never a display-name match
+    against the graph at large: that is the hazard resolve_owner_entity_id
+    documents (a stranger who shares a first name is not the owner).
+    """
+    name: str = ""
+    entity_id: str = ""
+    ids: frozenset = field(default_factory=frozenset)
+    names: frozenset = field(default_factory=frozenset)
+
+    def is_owner_name(self, name) -> bool:
+        low = (name or "").strip().lower()
+        return bool(low) and low in self.names
+
+    def is_owner(self, name, entity_id="") -> bool:
+        """True when (name, entity_id) is the owner: a name in the class, or an
+        id in it. A blank or non-person name never is."""
+        low = (name or "").strip().lower()
+        if not low or low in _NON_PERSON_OWNERS:
+            return False
+        return low in self.names or bool(entity_id and entity_id in self.ids)
+
+    def key(self, name, entity_id="") -> str:
+        """Owner-compatibility key: '' for blank/unclear/non-person (joins any
+        owner), the canonical name for the owner, else the lower-cased name."""
+        low = (name or "").strip().lower()
+        if not low or low in _NON_PERSON_OWNERS:
+            return ""
+        if self.is_owner(name, entity_id):
+            return (self.name or low).strip().lower()
+        return low
+
+
+def _owner_class_db(db, owner, owner_email: str = "") -> OwnerClass:
+    """resolve_owner_class on an open connection (the clean-up holds one)."""
+    name = (getattr(owner, "name", "") or "").strip()
+    derived = getattr(owner, "entity_id", "") or ""
+    aliases = {a.strip().lower() for a in getattr(owner, "aliases", ()) or ()
+               if a and a.strip()}
+    if not name and not aliases:
+        return OwnerClass()          # unconfigured: nothing is the owner
+    names = set(aliases)
+    if name:
+        names.add(name.lower())
+    real = _owner_entity_id_db(db, owner, owner_email)
+    if real:
+        row = db.execute("SELECT name, aliases FROM entities WHERE id=?",
+                         (real,)).fetchone()
+        if row:
+            if (row[0] or "").strip():
+                names.add(row[0].strip().lower())
+            names |= _alias_match_set(row[1])
+    names = {n for n in names if n and n not in _NON_PERSON_OWNERS}
+    return OwnerClass(name=name, entity_id=real or derived,
+                      ids=frozenset(i for i in (derived, real) if i),
+                      names=frozenset(names))
+
+
+def resolve_owner_class(store, owner, owner_email: str = "") -> OwnerClass:
+    """The owner's identity class (see OwnerClass). Two queries; resolve it
+    once per apply / repair run, not per action."""
+    with store._connect() as db:
+        return _owner_class_db(db, owner, owner_email)
+
+
 def resolve_owner_entity_id(store, owner, owner_email: str = "") -> str:
     """The owner's REAL entity id in this graph, or '' if the graph has no
     owner node. NEVER creates one.
@@ -2513,6 +2612,12 @@ def resolve_owner_entity_id(store, owner, owner_email: str = "") -> str:
     someone else's whole meeting history. is_role_address() closes it, same
     as every other identity resolution in this module (0.7.77).
     """
+    with store._connect() as db:
+        return _owner_entity_id_db(db, owner, owner_email)
+
+
+def _owner_entity_id_db(db, owner, owner_email: str = "") -> str:
+    """resolve_owner_entity_id on an open connection."""
     eid = getattr(owner, "entity_id", "") or ""
     addrs = [a.lower() for a in ([owner_email] if owner_email else [])
              + [a for a in getattr(owner, "aliases", ()) or () if "@" in a]]
@@ -2523,15 +2628,14 @@ def resolve_owner_entity_id(store, owner, owner_email: str = "") -> str:
     if cfg_email and cfg_email not in addrs:
         addrs.append(cfg_email)
     addrs = [a for a in addrs if a and not is_role_address(a)]
-    with store._connect() as db:
-        if eid and db.execute("SELECT 1 FROM entities WHERE id=?", (eid,)).fetchone():
-            return eid
-        for addr in addrs:
-            row = db.execute(
-                "SELECT id FROM entities WHERE lower(email_addr)=? AND type='person'",
-                (addr,)).fetchone()
-            if row:
-                return row["id"]
+    if eid and db.execute("SELECT 1 FROM entities WHERE id=?", (eid,)).fetchone():
+        return eid
+    for addr in addrs:
+        row = db.execute(
+            "SELECT id FROM entities WHERE lower(email_addr)=? AND type='person'",
+            (addr,)).fetchone()
+        if row:
+            return row[0]
     return ""
 
 

@@ -495,3 +495,38 @@ def test_legacy_strength_skips_org_relations(env):
                  "--steps", "legacy_strength") == 0
     r = _row(env, "entity_relations", "id", rid)
     assert (r["strength"], r["legacy_strength"]) == (6, None)
+
+
+def test_owner_aliases_uses_the_owner_nodes_own_names(env):
+    """Rule 1 (one owner identity): a name the owner's REAL node carries is the
+    owner even when no config alias names it; a stranger who shares the first
+    name is not. The real node's id is written on every owner row."""
+    with env["store"]._connect(write=True) as db:
+        db.execute("INSERT INTO entities(id, name, type, email_addr, aliases) "
+                   "VALUES ('dana-o', 'Dana O.', 'person', ?, 'D Okafor, dokafor|Dee O')",
+                   (OWNER,))
+        db.execute("INSERT INTO entities(id, name, type) "
+                   "VALUES ('dana-smith', 'Dana Smith', 'person')")
+        node = _action(db, "Node name item", src=M1, thread=T1, owner="Dana O.")
+        alias = _action(db, "Node alias item", src=M1, thread=T1, owner="Dee O")
+        stranger = _action(db, "Stranger item", src=M1, thread=T1, owner="Dana Smith")
+    assert _main(env, "--yes", "--skip-snapshot-for-tests", "--steps", "owner_aliases") == 0
+    for aid, prior in ((node, "Dana O."), (alias, "Dee O"),
+                       (env["ids"]["alias"], "Dana Okafor")):
+        r = _row(env, "actions", "id", aid)
+        assert (r["owner"], r["owner_entity_id"], r["prior_owner"]) == \
+            ("Dana", "dana-o", prior)
+    assert _row(env, "actions", "id", stranger)["owner"] == "Dana Smith"
+
+
+def test_dedup_treats_owner_spellings_as_one_owner(env):
+    with env["store"]._connect(write=True) as db:
+        db.execute("INSERT INTO entities(id, name, type, email_addr, aliases) "
+                   "VALUES ('dana-o', 'Dana O.', 'person', ?, '')", (OWNER,))
+        a = _action(db, "Email the venue about the booking", src=M1, thread=T1,
+                    owner="Dana", created="2026-09-01")
+        b = _action(db, "email the venue re the booking", src=M1, thread=T1,
+                    owner="Dana O.", created="2026-09-02")
+    assert _main(env, "--yes", "--skip-snapshot-for-tests", "--steps", "dedup_embed") == 0
+    assert _row(env, "actions", "id", a)["status"] == "open"
+    assert _row(env, "actions", "id", b)["resolved_by"] == "dedup_embed"
