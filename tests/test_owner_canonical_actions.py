@@ -42,7 +42,7 @@ def _owner_node(s):
         db.execute(
             "INSERT INTO entities(id, name, type, email_addr, aliases) "
             "VALUES (?, 'Dana Okafor', 'person', ?, ?)",
-            (REAL, OWNER_EMAIL, "D. Okafor (via Forms), dokafor|Dana O"))
+            (REAL, OWNER_EMAIL, "D. Okafor (via Forms), dokafor|Dana O|Dan"))
 
 
 def _stranger(s):
@@ -104,10 +104,13 @@ def test_owner_class_carries_node_names_and_both_ids(s):
     oc = gw.resolve_owner_class(s, OWNER)
     assert oc.name == "Dana" and oc.entity_id == REAL
     assert oc.ids == frozenset({REAL, DERIVED})
-    for n in ("Dana", "dana okafor x", "Dana Okafor", "dokafor", "Dana O",
+    for n in ("Dana", "dana okafor x", "Dana Okafor", "Dana O",
               "D. Okafor (via Forms)"):
         assert oc.is_owner_name(n), n
-    assert not oc.is_owner_name("Dana Smith")
+    # Ruling I18: a single-token name is the owner only as a CONFIG alias; the
+    # node's single-token aliases (a nickname, a handle) are not.
+    for n in ("Dana Smith", "Dan", "dokafor"):
+        assert not oc.is_owner_name(n), n
     assert not oc.is_owner_name("")
 
 
@@ -126,7 +129,7 @@ def test_owner_class_unconfigured_matches_nothing(s):
 # rule 1 at write
 # ---------------------------------------------------------------------------
 
-@pytest.mark.parametrize("variant", ["Dana Okafor", "Dana O", "dokafor", "Dana",
+@pytest.mark.parametrize("variant", ["Dana Okafor", "Dana O", "Dana",
                                      "dana okafor x"])
 def test_owner_variants_written_canonically_with_real_id(s, variant):
     _owner_node(s)
@@ -358,13 +361,186 @@ def test_repair_is_bounded_per_run_and_resumes(s):
                           ).fetchone()[0] == 3
 
 
-def test_repair_embedder_failure_falls_back_to_lexical(s):
+def test_repair_embedder_failure_skips_dedupe_and_keeps_the_watermark(s):
+    """M5: an embedder that fails mid-run never falls back to the weaker lexical
+    rules and never moves the watermark -- the threads are compared next run."""
     _owner_node(s)
 
     class Boom:
         def embed_passages(self, texts):
             raise RuntimeError("model unavailable")
 
-    _add(s, "Send the signed venue form", "Dana", created="2026-05-01")
-    _add(s, "Send the signed venue form today", "Dana O", created="2026-05-02")
-    assert _repair(s, Boom())["deduped"] == 1
+    a = _add(s, "Add the code of conduct to the student expectations", "Dana",
+             created="2026-05-01")
+    b = _add(s, "Put the conduct code into the student expectations doc", "Dana O",
+             created="2026-05-02")
+    out = _repair(s, Boom())
+    assert out["skipped"] == "embedder_failed" and out["deduped"] == 0
+    assert out["canonicalised"] == 2                 # canonicalising needs no model
+    assert {_get(s, x)["status"] for x in (a, b)} == {"open"}
+    assert _repair(s, _Emb(SAME))["deduped"] == 1     # compared on the next run
+
+
+# ---------------------------------------------------------------------------
+# Fix round 1: rulings I18-I20
+# ---------------------------------------------------------------------------
+
+def _dan_stranger(s):
+    s.upsert_entity("dan-smith", "Dan Smith", "person")
+
+
+def test_i18_bare_nickname_from_the_node_is_not_the_owner_at_write(s):
+    _owner_node(s)
+    _dan_stranger(s)
+    _apply(s, _ext([_act("Confirm the booking", "Dan")]))
+    assert _rows(s) == [("Confirm the booking", "Dan", "")]
+
+
+def test_i18_repair_leaves_a_bare_nickname_alone(s):
+    _owner_node(s)
+    _dan_stranger(s)
+    a = _add(s, "One", "Dan", "")
+    assert _repair(s)["canonicalised"] == 0
+    assert (_get(s, a)["owner"], _get(s, a)["owner_entity_id"]) == ("Dan", "")
+
+
+def test_i18_nickname_row_is_not_a_dedupe_candidate_for_the_owner(s):
+    _owner_node(s)
+    s.add_unified_action(text="Send the signed venue form", owner="Dan",
+                         status="open", source="email", thread_id="t-1",
+                         created_at="2026-05-30T00:00:00Z")
+    assert _apply(s, _ext([_act("Send the signed venue form", "Dana")]))["actions"] == 1
+
+
+def test_i18_config_alias_single_token_still_counts(s):
+    _owner_node(s)
+    oc = gw.resolve_owner_class(s, OWNER)
+    assert oc.is_owner_name("Dana")
+
+
+def test_i19_class_name_never_overrides_another_persons_id(s):
+    """('Dana', dana-v) where dana-v is a real person: the id is a positive
+    resolution to someone else, so the row is left for the owner to decide."""
+    _owner_node(s)
+    s.upsert_entity("dana-v", "Dana V", "person")
+    a = _add(s, "One", "Dana", "dana-v")
+    assert _repair(s)["canonicalised"] == 0
+    r = _get(s, a)
+    assert (r["owner"], r["owner_entity_id"], r["prior_owner_entity_id"]) == \
+        ("Dana", "dana-v", None)
+
+
+def test_i19_non_person_or_missing_id_does_not_block(s):
+    _owner_node(s)
+    s.upsert_entity("budget-topic", "Budget", "topic")
+    a = _add(s, "One", "Dana", "budget-topic")
+    b = _add(s, "Two", "Dana", "gone-id", thread="t-2")
+    assert _repair(s)["canonicalised"] == 2
+    assert _get(s, a)["owner_entity_id"] == REAL
+    assert _get(s, b)["prior_owner_entity_id"] == "gone-id"
+
+
+def test_i19_is_owner_respects_foreign_person_ids(s):
+    _owner_node(s)
+    oc = gw.resolve_owner_class(s, OWNER)
+    assert oc.is_owner("Dana", "dana-v") is True               # unknown id
+    assert oc.is_owner("Dana", "dana-v", persons={"dana-v"}) is False
+    assert oc.is_owner("Dana", REAL, persons={REAL}) is True
+    assert oc.is_owner("Dana", "", persons={"dana-v"}) is True
+
+
+def test_i19_prior_id_recorded_and_undo_restores(s):
+    _owner_node(s)
+    a = _add(s, "Add the code of conduct to the student expectations", "Dana",
+             DERIVED, created="2026-05-01")
+    b = _add(s, "Put the conduct code into the student expectations doc",
+             "Dana Okafor", REAL, created="2026-05-02")
+    c = _add(s, "Ring the caterer", "Dana", "", thread="t-2")
+    _repair(s, _Emb(SAME))
+    assert _get(s, a)["prior_owner_entity_id"] == DERIVED
+    assert _get(s, c)["prior_owner_entity_id"] == ""
+    assert _get(s, b)["status"] == "auto_archived"
+    out = ao.undo_owner_repair(s)
+    assert out == {"restored": 3, "reopened": 1}
+    for aid, owner, eid in ((a, "Dana", DERIVED), (b, "Dana Okafor", REAL),
+                            (c, "Dana", "")):
+        r = _get(s, aid)
+        assert (r["owner"], r["owner_entity_id"], r["status"]) == (owner, eid, "open")
+        assert r["prior_owner"] is None and r["prior_owner_entity_id"] is None
+    assert ao.undo_owner_repair(s) == {"restored": 0, "reopened": 0}
+
+
+class _VecEmb:
+    def __init__(self, vecs):
+        self.vecs = vecs
+        self.dim = 64
+
+    def embed_passages(self, texts):
+        out = []
+        for i, t in enumerate(texts):
+            v = [0.0] * 64
+            if t in self.vecs:
+                v[0], v[1] = self.vecs[t]
+            else:
+                v[2 + (hash(t) % 60)] = 1.0
+            out.append(v)
+        return out
+
+
+def test_i20_star_check_never_archives_through_a_chain(s):
+    """A~B and B~C at >= 0.88 but A.C below it: only rows at >= 0.88 to the KEPT
+    row are archived (write-time dedupe is pairwise, never transitive)."""
+    import math
+    _owner_node(s)
+    ang = math.radians(25)        # cos 25 = 0.906, cos 50 = 0.643
+    vec = {"Book venue for event 1": (1.0, 0.0),
+           "Book venue for events 1 and 2": (math.cos(ang), math.sin(ang)),
+           "Book venue for event 2": (math.cos(2 * ang), math.sin(2 * ang))}
+    a = _add(s, "Book venue for event 1", "Dana", created="2026-05-01")
+    b = _add(s, "Book venue for events 1 and 2", "Dana", created="2026-05-02")
+    c = _add(s, "Book venue for event 2", "Dana", created="2026-05-03")
+    assert _repair(s, _VecEmb(vec))["deduped"] == 1
+    assert [_get(s, x)["status"] for x in (a, b, c)] == \
+        ["open", "auto_archived", "open"]
+
+
+def test_i20_different_deadlines_never_merge(s):
+    _owner_node(s)
+    a = _add(s, "Add the code of conduct to the student expectations", "Dana",
+             deadline="2026-06-30")
+    b = _add(s, "Put the conduct code into the student expectations doc", "Dana",
+             deadline="2026-07-31")
+    assert _repair(s, _Emb(SAME))["deduped"] == 0
+    assert {_get(s, x)["status"] for x in (a, b)} == {"open"}
+
+
+def test_i20_same_or_one_blank_deadline_still_merges(s):
+    _owner_node(s)
+    _add(s, "Add the code of conduct to the student expectations", "Dana",
+         deadline="2026-06-30")
+    _add(s, "Put the conduct code into the student expectations doc", "Dana")
+    assert _repair(s, _Emb(SAME))["deduped"] == 1
+
+
+def test_m7_write_time_uses_the_configured_owner_email(s, tmp_path, monkeypatch):
+    """apply resolves the real owner node from config.owner_email of ITS home,
+    not whatever MCPBRAIN_HOME points at."""
+    _owner_node(s)
+    other = tmp_path / "elsewhere"
+    other.mkdir()
+    (other / "config.json").write_text("{}")
+    home = tmp_path / "home"
+    monkeypatch.setenv("MCPBRAIN_HOME", str(other))
+    gw.apply(s, _ext([_act("Confirm the booking", "Dana Okafor")]), doc_ids=["d1"],
+             clock=lambda: NOW, owner=OWNER, identity="someone@example.com",
+             home=str(home))
+    assert _rows(s) == [("Confirm the booking", "Dana", REAL)]
+
+
+def test_i19_row_resolved_to_another_person_is_not_an_owner_candidate(s):
+    _owner_node(s)
+    s.upsert_entity("dana-v", "Dana V", "person")
+    s.add_unified_action(text="Send the signed venue form", owner="Dana",
+                         owner_entity_id="dana-v", status="open", source="email",
+                         thread_id="t-1", created_at="2026-05-30T00:00:00Z")
+    assert _apply(s, _ext([_act("Send the signed venue form", "Dana")]))["actions"] == 1

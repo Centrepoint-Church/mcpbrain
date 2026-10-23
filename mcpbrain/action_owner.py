@@ -1,5 +1,5 @@
 """Daily, idempotent repair of the owner's split actions (2026-10-22
-ingestion-integrity spec §2, follow-up).
+ingestion-integrity spec §2, follow-up; rulings I18-I20).
 
 Before graph_write resolved one owner identity (graph_write.OwnerClass), the
 owner's open actions were written under several (owner, owner_entity_id)
@@ -12,21 +12,31 @@ stayed open.
 repair_owner_actions heals existing rows on every install with no attended run
 (it runs in the daemon's daily action_hygiene cadence):
 
-1. canonicalise: every OPEN action that is the owner under rule 1 gets
-   owner = owner.name and owner_entity_id = the owner class's id; the prior
-   owner string is kept in prior_owner (an existing value is never replaced);
-2. dedupe: open email actions of one logical source (thread_id) are clustered
-   with the write-time rule -- cosine >= ACTION_SIM_THRESHOLD on unit
-   embeddings, the lexical rules when there is no embedder -- never joining two
-   different named owners; per cluster the row with a deadline is kept, else
-   the earliest, and the rest become auto_archived with resolved_by
-   'dedup_owner' (reversible: reopen with set_action_status).
+1. canonicalise: every OPEN action that is the owner (OwnerClass.is_owner) gets
+   owner = owner.name and owner_entity_id = the owner class's id. The prior
+   owner string goes to prior_owner and the prior id to prior_owner_entity_id
+   (an existing value is never replaced). A row whose id names ANOTHER existing
+   person is left alone (ruling I19): a name never overrides a resolution.
+2. same-thread duplicates: open email actions of one logical source
+   (thread_id) -- any owner, not only the owner's -- are grouped with the
+   write-time rule: cosine >= ACTION_SIM_THRESHOLD on unit embeddings, the
+   lexical rules when no model is configured. Groups never join two different
+   named owners or two different non-empty deadlines. Per group the row with a
+   deadline is kept (then a named owner, then the earliest), and only the rows
+   that match the KEPT row directly are archived (star check, ruling I20 --
+   write-time dedupe is pairwise, never transitive): auto_archived with
+   resolved_by 'dedup_owner'.
+
+undo_owner_repair reverses both: owner/owner_entity_id restored from the prior
+columns, 'dedup_owner' rows reopened.
 
 Bounded and incremental: a watermark (sync_cursors 'action_owner_repair') is
 the highest per-thread newest-open-action id already compared. Each run
 compares at most `max_threads` threads whose newest open action is above it,
 oldest first, and canonicalising a row in an older thread pulls the watermark
 back so that thread is compared again. Nothing new -> no embedding, no write.
+A model that fails mid-run skips the comparison and leaves the watermark where
+it was (never the weaker lexical rules with a configured model).
 """
 from __future__ import annotations
 
@@ -45,7 +55,7 @@ MAX_THREADS = 1000
 
 
 # ---------------------------------------------------------------------------
-# Clustering (shared with ingestion_cleanup's dedup_embed step)
+# Grouping (shared with ingestion_cleanup's dedup_embed step)
 # ---------------------------------------------------------------------------
 
 def lexical_same(a: str, b: str) -> bool:
@@ -66,11 +76,27 @@ def lexical_same(a: str, b: str) -> bool:
             or difflib.SequenceMatcher(None, na, nb).ratio() >= 0.82)
 
 
+def _sim(vecs, a: str, b: str) -> float:
+    return sum(x * y for x, y in zip(vecs[a], vecs[b]))
+
+
+def _same(vecs, a: str, b: str) -> bool:
+    if vecs is None:
+        return lexical_same(a, b)
+    return _sim(vecs, a, b) >= gw.ACTION_SIM_THRESHOLD
+
+
+def _deadline(r) -> str:
+    return (r.get("deadline") or "").strip()[:10]
+
+
 def cluster(rows, vecs, owner_key) -> list[list[dict]]:
-    """Single-link clusters at ACTION_SIM_THRESHOLD, strongest pairs first,
-    never joining two different named owners (blank/'unclear' joins any).
-    `owner_key(row)` gives the owner-compatibility key ('' = blank).
-    vecs=None: lexical pairs (lexical_same) instead of cosine."""
+    """Single-link candidate groups at ACTION_SIM_THRESHOLD, strongest pairs
+    first, never joining two different named owners (blank/'unclear' joins any)
+    or two different non-empty deadlines (recurring instances). `owner_key(row)`
+    gives the owner-compatibility key ('' = blank). vecs=None: lexical pairs.
+    A group is a CANDIDATE set: dedupe_groups archives only the members that
+    match the kept row directly."""
     n = len(rows)
     if vecs is None:
         pairs = [(1.0, i, j) for i in range(n) for j in range(i + 1, n)
@@ -85,13 +111,13 @@ def cluster(rows, vecs, owner_key) -> list[list[dict]]:
         except ImportError:  # numpy ships with fastembed; this is only a fallback
             pairs = []
             for i in range(n):
-                vi = vecs[rows[i]["text"]]
                 for j in range(i + 1, n):
-                    s = sum(a * b for a, b in zip(vi, vecs[rows[j]["text"]]))
+                    s = _sim(vecs, rows[i]["text"], rows[j]["text"])
                     if s >= gw.ACTION_SIM_THRESHOLD:
                         pairs.append((s, i, j))
     parent = list(range(n))
     owners = [{owner_key(r)} - {""} for r in rows]
+    deadlines = [{_deadline(r)} - {""} for r in rows]
 
     def find(x):
         while parent[x] != x:
@@ -101,40 +127,71 @@ def cluster(rows, vecs, owner_key) -> list[list[dict]]:
 
     for _s, i, j in sorted(pairs, key=lambda p: (-p[0], p[1], p[2])):
         a, b = find(i), find(j)
-        if a == b or len(owners[a] | owners[b]) > 1:
+        if (a == b or len(owners[a] | owners[b]) > 1
+                or len(deadlines[a] | deadlines[b]) > 1):
             continue
         parent[b] = a
         owners[a] |= owners[b]
+        deadlines[a] |= deadlines[b]
     groups: dict[int, list[dict]] = defaultdict(list)
     for i, r in enumerate(rows):
         groups[find(i)].append(r)
     return [g for g in groups.values() if len(g) > 1]
 
 
+def dedupe_groups(rows, vecs, owner_key) -> list[tuple[dict, list[dict]]]:
+    """[(kept row, rows to archive)] for one logical source's open actions.
+    Keep: a deadline, then a named owner, then the earliest created_at, then
+    the lowest id. Archive only the members that match the kept row directly
+    (star check): a chain A~B~C never archives C through B."""
+    out = []
+    for g in cluster(rows, vecs, owner_key):
+        keep = min(g, key=lambda a: (not _deadline(a), owner_key(a) == "",
+                                     a.get("created_at") or "", a["id"]))
+        drop = [a for a in g if a is not keep and _same(vecs, keep["text"], a["text"])]
+        if drop:
+            out.append((keep, drop))
+    return out
+
+
 # ---------------------------------------------------------------------------
 # The repair
 # ---------------------------------------------------------------------------
 
+def _person_ids(db, ids) -> set:
+    found: set = set()
+    ids = sorted({i for i in ids if i})
+    for k in range(0, len(ids), 500):
+        part = ids[k:k + 500]
+        qs = ",".join("?" * len(part))
+        found |= {r[0] for r in db.execute(
+            f"SELECT id FROM entities WHERE type='person' AND id IN ({qs})", part)}
+    return found
+
+
 def canonicalise(db, oc, *, stamp) -> list[str]:
-    """Rewrite the owner of every OPEN action that is the owner under rule 1.
-    Returns the thread_ids of the rows changed (one entry per row)."""
+    """Rewrite the owner of every OPEN action that is the owner. Returns the
+    thread_ids of the rows changed (one entry per row)."""
     if not oc.name:
         return []
     want_eid = oc.entity_id or ""
+    rows = db.execute(
+        "SELECT id, owner, owner_entity_id, thread_id FROM actions "
+        "WHERE status='open' AND COALESCE(trim(owner),'') != ''").fetchall()
+    persons = _person_ids(db, {r["owner_entity_id"] for r in rows} - set(oc.ids))
     touched: list[str] = []
-    for r in db.execute(
-            "SELECT id, owner, owner_entity_id, prior_owner, thread_id FROM actions "
-            "WHERE status='open' AND COALESCE(trim(owner),'') != ''").fetchall():
+    for r in rows:
         owner, eid = r["owner"] or "", r["owner_entity_id"] or ""
-        if not oc.is_owner(owner, eid):
+        if not oc.is_owner(owner, eid, persons):
             continue
         if owner == oc.name and eid == want_eid:
             continue
         db.execute(
             "UPDATE actions SET owner=?, owner_entity_id=?, "
-            "prior_owner=COALESCE(prior_owner, ?), updated_at=? "
+            "prior_owner=COALESCE(prior_owner, ?), "
+            "prior_owner_entity_id=COALESCE(prior_owner_entity_id, ?), updated_at=? "
             "WHERE id=? AND status='open'",
-            (oc.name, want_eid, owner, stamp, r["id"]))
+            (oc.name, want_eid, owner, eid, stamp, r["id"]))
         touched.append(r["thread_id"] or "")
     return touched
 
@@ -157,10 +214,7 @@ def _thread_max_ids(db, thread_ids) -> dict[str, int]:
 
 
 def _vectors(embedder, texts):
-    """{text: unit vector}, or None (lexical) when there is no embedder or it
-    fails -- dedupe must never abort the repair."""
-    if embedder is None:
-        return None
+    """{text: unit vector}; None when the embedder fails."""
     cache: dict = {}
     uniq = list(dict.fromkeys(texts))
     for i in range(0, len(uniq), 256):
@@ -172,18 +226,21 @@ def _vectors(embedder, texts):
 def repair_owner_actions(store, owner, *, embedder=None, owner_email: str = "",
                          as_of: str | None = None,
                          max_threads: int = MAX_THREADS) -> dict:
-    """Canonicalise the owner's open actions, then collapse owner-split
-    duplicates within each logical source. Returns
-    {'canonicalised': n, 'deduped': n, 'threads': n compared}."""
+    """Canonicalise the owner's open actions, then collapse same-thread
+    duplicates. Returns {'canonicalised': n, 'deduped': n, 'threads': n
+    compared}, plus 'skipped': 'embedder_failed' when the model failed (the
+    comparison is then left for the next run). embedder=None: lexical rules."""
     now = (datetime.now(timezone.utc) if as_of is None
            else datetime.fromisoformat(as_of.replace("Z", "+00:00")))
     stamp = now.strftime("%Y-%m-%dT%H:%M:%SZ")
     oc = gw.resolve_owner_class(store, owner, owner_email)
+    limit = max(1, int(max_threads))
 
     try:
         wm = int(store.get_cursor(CURSOR) or 0)
     except (TypeError, ValueError):
         wm = 0
+    start_wm = wm
 
     # 1. canonicalise (one write transaction)
     with store._connect(write=True) as db:
@@ -193,13 +250,15 @@ def repair_owner_actions(store, owner, *, embedder=None, owner_email: str = "",
             if back:
                 wm = min(wm, min(back.values()) - 1)
 
-    # 2. which threads changed since the watermark (oldest first, bounded)
+    # 2. which threads changed since the watermark (oldest first, bounded),
+    # read in ONE read transaction so the page and the watermark agree.
     with store._connect() as db:
+        db.execute("BEGIN")
         sel = db.execute(
             f"SELECT thread_id, MAX(id) AS m, COUNT(*) AS n FROM actions "
             f"WHERE {_THREAD_ROWS} GROUP BY thread_id HAVING MAX(id) > ? "
-            f"ORDER BY m LIMIT ?", (wm, max(1, int(max_threads)))).fetchall()
-        if len(sel) < max(1, int(max_threads)):
+            f"ORDER BY m LIMIT ?", (wm, limit)).fetchall()
+        if len(sel) < limit:
             top = db.execute("SELECT COALESCE(MAX(id), 0) FROM actions").fetchone()[0]
             new_wm = max(wm, top)
         else:
@@ -213,24 +272,33 @@ def repair_owner_actions(store, owner, *, embedder=None, owner_email: str = "",
                 f"SELECT id, text, owner, owner_entity_id, deadline, created_at, "
                 f"thread_id FROM actions WHERE {_THREAD_ROWS} "
                 f"AND thread_id IN ({qs}) ORDER BY id", part)]
+        persons = _person_ids(db, {r["owner_entity_id"] for r in rows} - set(oc.ids))
+        db.execute("COMMIT")
+
+    result = {"canonicalised": len(touched), "deduped": 0, "threads": len(threads)}
+    vecs = None
+    if rows and embedder is not None:
+        vecs = _vectors(embedder, [r["text"] for r in rows])
+        if vecs is None:
+            # Never the weaker lexical rules with a configured model, and the
+            # watermark stays (a pulled-back one is kept) for the next run.
+            if wm != start_wm:
+                store.set_cursor(CURSOR, str(wm))
+            log.warning("action_owner_repair: embedder failed; same-thread "
+                        "comparison left for the next run")
+            return {**result, "threads": 0, "skipped": "embedder_failed"}
 
     deduped = 0
     if rows:
-        vecs = _vectors(embedder, [r["text"] for r in rows])
         by_thread: dict[str, list[dict]] = defaultdict(list)
         for r in rows:
             by_thread[r["thread_id"]].append(r)
-        drop: list[int] = []
 
         def key(r):
-            return oc.key(r["owner"], r["owner_entity_id"])
+            return oc.key(r["owner"], r["owner_entity_id"], persons)
 
-        for g in by_thread.values():
-            for c in cluster(g, vecs, key):
-                keep = min(c, key=lambda a: (
-                    not (a["deadline"] or "").strip(), key(a) == "",
-                    a["created_at"] or "", a["id"]))
-                drop += [a["id"] for a in c if a is not keep]
+        drop = [a["id"] for g in by_thread.values()
+                for _keep, ds in dedupe_groups(g, vecs, key) for a in ds]
         if drop:
             with store._connect(write=True) as db:
                 for aid in drop:
@@ -239,10 +307,33 @@ def repair_owner_actions(store, owner, *, embedder=None, owner_email: str = "",
                         "resolved_at=?, updated_at=? WHERE id=? AND status='open'",
                         (RESOLVED_BY, stamp, stamp, aid)).rowcount
 
-    if new_wm != wm or touched:
+    if new_wm != start_wm:
         store.set_cursor(CURSOR, str(new_wm))
     if touched or deduped:
         log.info("action_owner_repair: canonicalised=%d deduped=%d threads=%d",
                  len(touched), deduped, len(threads))
-    return {"canonicalised": len(touched), "deduped": deduped,
-            "threads": len(threads)}
+    return {**result, "deduped": deduped}
+
+
+def undo_owner_repair(store, *, as_of: str | None = None) -> dict:
+    """Reverse repair_owner_actions: restore owner / owner_entity_id from
+    prior_owner / prior_owner_entity_id on every row the repair canonicalised
+    (prior_owner_entity_id is set only by the repair) and clear both prior
+    columns; reopen every 'dedup_owner' row. The watermark is reset, so the
+    next daily run would apply the repair again -- turn the cadence off first
+    if that is not wanted. Returns {'restored': n, 'reopened': n}."""
+    now = (datetime.now(timezone.utc) if as_of is None
+           else datetime.fromisoformat(as_of.replace("Z", "+00:00")))
+    stamp = now.strftime("%Y-%m-%dT%H:%M:%SZ")
+    with store._connect(write=True) as db:
+        restored = db.execute(
+            "UPDATE actions SET owner=COALESCE(prior_owner, owner), "
+            "owner_entity_id=prior_owner_entity_id, prior_owner=NULL, "
+            "prior_owner_entity_id=NULL, updated_at=? "
+            "WHERE prior_owner_entity_id IS NOT NULL", (stamp,)).rowcount
+        reopened = db.execute(
+            "UPDATE actions SET status='open', resolved_by='', resolved_at='', "
+            "updated_at=? WHERE status='auto_archived' AND resolved_by=?",
+            (stamp, RESOLVED_BY)).rowcount
+        db.execute("DELETE FROM sync_cursors WHERE source=?", (CURSOR,))
+    return {"restored": restored, "reopened": reopened}

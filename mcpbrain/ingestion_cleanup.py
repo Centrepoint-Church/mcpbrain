@@ -416,6 +416,10 @@ class Ctx:
         self.owner_class = gw._owner_class_db(
             db, gw.owner_identity_from_config(home), config.owner_email(home))
         self.owner_aliases = self.owner_class.names
+        # Ruling I19: an action id naming another existing person is never
+        # overridden by an owner name.
+        self.person_ids = frozenset(r[0] for r in db.execute(
+            "SELECT id FROM entities WHERE type='person'"))
         self._embedder = embedder
         self.derived_rels: set[int] = set()     # marked derived by this run
         self.derived_links: set[tuple] = set()  # (message_id, entity_id), ditto
@@ -679,7 +683,8 @@ def _owner_key(ctx, owner, owner_entity_id="") -> str:
     lo = (owner or "").strip().lower()
     if lo in ("", gw._UNCLEAR_OWNER) or lo in _NON_PERSON:
         return ""
-    if ctx.owner_name and ctx.owner_class.is_owner(owner, owner_entity_id):
+    if ctx.owner_name and ctx.owner_class.is_owner(owner, owner_entity_id,
+                                                   ctx.person_ids):
         return ctx.owner_name.strip().lower()
     return lo
 
@@ -700,12 +705,13 @@ def _unit_vectors(ctx, texts) -> dict:
 _lexical_same = action_owner.lexical_same
 
 
-def _clusters(ctx, rows, vecs) -> list[list[dict]]:
-    """Single-link clusters at SIM_THRESHOLD, strongest pairs first, never
-    joining two different named owners (ruling I6: blank/'unclear' joins any).
-    vecs=None: lexical pairs instead of cosine. The rule lives in
-    action_owner.cluster, shared with the daily owner repair."""
-    return action_owner.cluster(
+def _dedupe_groups(ctx, rows, vecs):
+    """[(kept, archived)] per logical source: action_owner.dedupe_groups,
+    shared with the daily owner repair -- never two different named owners
+    (ruling I6: blank/'unclear' joins any) or two different deadlines, and only
+    rows matching the kept row directly are archived (star check, ruling I20).
+    vecs=None: the lexical rules instead of cosine."""
+    return action_owner.dedupe_groups(
         rows, vecs, lambda r: _owner_key(ctx, r["owner"], r.get("owner_entity_id")))
 
 
@@ -724,14 +730,8 @@ def step_dedup_embed(ctx, tx):
         vecs = None
         tx.counts["dedup:lexical_fallback"] = 1
     for g in groups:
-        for cluster in _clusters(ctx, g, vecs):
-            keep = min(cluster, key=lambda a: (
-                not (a["deadline"] or "").strip(),
-                _owner_key(ctx, a["owner"], a["owner_entity_id"]) == "",
-                a["created_at"] or "", a["id"]))
-            for a in cluster:
-                if a is keep:
-                    continue
+        for _keep, drop in _dedupe_groups(ctx, g, vecs):
+            for a in drop:
                 tx.update("actions", {"id": a["id"]}, a,
                           {"status": "auto_archived", "resolved_by": tx.step,
                            "resolved_at": tx.at})
@@ -886,7 +886,8 @@ def step_owner_aliases(ctx, tx):
         if lo in _NON_PERSON:
             new = {"owner": gw._UNCLEAR_OWNER, "owner_entity_id": ""}
             label = "actions:non_person"
-        elif canon and ctx.owner_class.is_owner(raw, a["owner_entity_id"]):
+        elif canon and ctx.owner_class.is_owner(raw, a["owner_entity_id"],
+                                                ctx.person_ids):
             want = ctx.owner_class.entity_id or ""
             if raw != canon:
                 new["owner"] = canon

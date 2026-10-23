@@ -530,3 +530,37 @@ def test_dedup_treats_owner_spellings_as_one_owner(env):
     assert _main(env, "--yes", "--skip-snapshot-for-tests", "--steps", "dedup_embed") == 0
     assert _row(env, "actions", "id", a)["status"] == "open"
     assert _row(env, "actions", "id", b)["resolved_by"] == "dedup_embed"
+
+
+def test_owner_aliases_rulings_i18_i19(env):
+    """I18: the owner node's single-token alias is not the owner. I19: a class
+    name never overrides an id that resolves to another existing person."""
+    with env["store"]._connect(write=True) as db:
+        db.execute("INSERT INTO entities(id, name, type, email_addr, aliases) "
+                   "VALUES ('dana-o', 'Dana O.', 'person', ?, 'Dee|D Okafor')", (OWNER,))
+        nick = _action(db, "Nickname item", src=M1, thread=T1, owner="Dee")
+        other = db.execute(
+            "INSERT INTO actions(text, owner, owner_entity_id, source, thread_id) "
+            "VALUES ('Other person item', 'Dana', 'p1', 'email', ?)", (T1,)).lastrowid
+        multi = _action(db, "Multi-token alias item", src=M1, thread=T1, owner="D Okafor")
+    assert _main(env, "--yes", "--skip-snapshot-for-tests", "--steps", "owner_aliases") == 0
+    assert _row(env, "actions", "id", nick)["owner"] == "Dee"
+    r = _row(env, "actions", "id", other)
+    assert (r["owner"], r["owner_entity_id"]) == ("Dana", "p1")
+    assert _row(env, "actions", "id", multi)["owner"] == "Dana"
+
+
+def test_dedup_embed_star_check_and_distinct_deadlines():
+    """The clean-up shares action_owner.dedupe_groups with the daily repair."""
+    import math
+    from mcpbrain import action_owner as ao
+    ang = math.radians(25)
+    vecs = {"a": [1.0, 0.0], "b": [math.cos(ang), math.sin(ang)],
+            "c": [math.cos(2 * ang), math.sin(2 * ang)]}
+    rows = [{"id": i, "text": t, "owner": "", "deadline": "", "created_at": f"2026-0{i}"}
+            for i, t in ((1, "a"), (2, "b"), (3, "c"))]
+    got = ao.dedupe_groups(rows, vecs, lambda r: "")
+    assert [(k["id"], [d["id"] for d in drop]) for k, drop in got] == [(1, [2])]
+    rows2 = [dict(rows[0], deadline="2026-06-30"), dict(rows[1], deadline="2026-07-31")]
+    vecs2 = {"a": [1.0, 0.0], "b": [1.0, 0.0]}
+    assert ao.dedupe_groups(rows2, vecs2, lambda r: "") == []

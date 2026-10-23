@@ -137,3 +137,32 @@ def test_owner_repair_waits_while_the_model_loads(monkeypatch):
     dm._embedder_bounded = lambda timeout=None: None
     out = dm._run_action_hygiene()
     assert called == [] and out["owner_repair"] == "embedder_loading"
+    # M5: a skipped repair does not use up the day -- retried next tick.
+    assert dm._last_action_hygiene is None
+
+
+def test_owner_repair_embedder_build_error_skips_too(monkeypatch):
+    from mcpbrain import action_owner
+    called = []
+    monkeypatch.setattr(action_owner, "repair_owner_actions",
+                        lambda *a, **k: called.append(1))
+    dm = _hygiene_daemon(_QuietStore())
+    dm._embedder_factory = lambda: object()
+
+    def boom(timeout=None):
+        raise RuntimeError("model build failed")
+    dm._embedder_bounded = boom
+    out = dm._run_action_hygiene()
+    assert called == [] and out["owner_repair"] == "embedder_failed"
+    assert dm._last_action_hygiene is None
+
+
+def test_owner_repair_reporting_a_skip_keeps_the_tick_due(monkeypatch):
+    from mcpbrain import action_owner
+    monkeypatch.setattr(action_owner, "repair_owner_actions",
+                        lambda *a, **k: {"canonicalised": 2, "deduped": 0,
+                                         "threads": 0, "skipped": "embedder_failed"})
+    dm = _hygiene_daemon(_QuietStore())
+    out = dm._run_action_hygiene()
+    assert out["owner_repair"] == "embedder_failed"
+    assert dm._last_action_hygiene is None

@@ -4018,13 +4018,17 @@ class Daemon:
         except Exception as exc:  # noqa: BLE001 — a sweep must never kill the cycle
             log.warning("action_hygiene failed: %s", exc, exc_info=True)
             return {"action_hygiene": False, "error": str(exc)}
-        self._last_action_hygiene = now
         summary = {"actions_archived": stale.get("archived", 0),
                    "actions_deduped": dupes.get("archived", 0)}
         if summary["actions_archived"] or summary["actions_deduped"]:
             log.info("action_hygiene: archived=%d deduped=%d",
                      summary["actions_archived"], summary["actions_deduped"])
         summary.update(self._run_owner_action_repair())
+        # A skipped owner repair (model loading / failed) does not use up the
+        # day: the pass stays due and retries on the next tick (both sweeps
+        # are idempotent, so re-running them costs nothing).
+        if "owner_repair" not in summary:
+            self._last_action_hygiene = now
         return summary
 
     def _run_owner_action_repair(self) -> dict:
@@ -4033,9 +4037,10 @@ class Daemon:
         a source collapsed. Daily, idempotent and incremental, so every install
         heals with no attended run. Its own try: a failure here never loses the
         sweeps' result. The embedder is taken bounded (never parks the tick); a
-        model still loading waits for the next run rather than comparing with
-        the weaker lexical rules and moving the watermark past those threads.
-        No model configured at all (or a build that fails) means lexical."""
+        model still loading, a build that fails, or a model that fails mid-run
+        skips the comparison ({'owner_repair': reason}) rather than comparing
+        with the weaker lexical rules and moving the watermark past those
+        threads. Only an install with no model configured at all is lexical."""
         from mcpbrain import action_owner
         from mcpbrain import config as _config
         from mcpbrain import graph_write as gw
@@ -4043,12 +4048,12 @@ class Daemon:
         if getattr(self, "_embedder_factory", None) is not None:
             try:
                 emb = self._embedder_bounded()
-            except Exception as exc:  # noqa: BLE001 — lexical, never a failure
-                log.warning("action_owner_repair: embedder failed (%s); lexical", exc)
-                emb = None
-            else:
-                if emb is None:
-                    return {"owner_repair": "embedder_loading"}
+            except Exception as exc:  # noqa: BLE001 — skip, retried next tick
+                log.warning("action_owner_repair: embedder failed (%s); "
+                            "retrying next tick", exc)
+                return {"owner_repair": "embedder_failed"}
+            if emb is None:
+                return {"owner_repair": "embedder_loading"}
         try:
             home = str(app_dir())
             got = action_owner.repair_owner_actions(
@@ -4057,8 +4062,11 @@ class Daemon:
         except Exception as exc:  # noqa: BLE001 — a sweep must never kill the cycle
             log.warning("action_owner_repair failed: %s", exc, exc_info=True)
             return {"owner_repair_error": str(exc)}
-        return {"owner_canonicalised": got.get("canonicalised", 0),
-                "owner_deduped": got.get("deduped", 0)}
+        out = {"owner_canonicalised": got.get("canonicalised", 0),
+               "owner_deduped": got.get("deduped", 0)}
+        if got.get("skipped"):
+            out["owner_repair"] = got["skipped"]
+        return out
 
     def _run_ingestion_cleanup(self) -> dict | None:
         """The one-shot ingestion clean-up (ruling I13). The embedder is built

@@ -1298,15 +1298,19 @@ def _find_near_duplicate_action(conn, text, owner, *, thread_id="", embedder=Non
     elif owner_class is not None and owner_class.is_owner(owner):
         names = sorted(owner_class.names | {owner.strip().lower()})
         ids = sorted(owner_class.ids)
-        owner_sql = (f"(lower(trim(owner)) IN ({','.join('?' * len(names))}) "
+        # A class name counts unless the row's id resolved to another person
+        # (ruling I19); an owner id always counts.
+        name_sql = (f"(lower(trim(owner)) IN ({','.join('?' * len(names))}) "
+                    "AND (COALESCE(owner_entity_id,'') = '' OR owner_entity_id NOT IN "
+                    "(SELECT id FROM entities WHERE type='person')))")
+        owner_sql = (f"({name_sql} "
                      + (f"OR owner_entity_id IN ({','.join('?' * len(ids))}) "
                         if ids else "")
-                     + f"OR owner = '' OR owner IS NULL OR owner = '{_UNCLEAR_OWNER}')")
-        owner_params = [*names, *ids]
+                     + "OR owner = '' OR owner IS NULL OR owner = ?)")
+        owner_params = [*names, *ids, _UNCLEAR_OWNER]
     else:
-        owner_sql = ("(owner = ? OR owner = '' OR owner IS NULL "
-                     f"OR owner = '{_UNCLEAR_OWNER}')")
-        owner_params = [owner]
+        owner_sql = "(owner = ? OR owner = '' OR owner IS NULL OR owner = ?)"
+        owner_params = [owner, _UNCLEAR_OWNER]
     base = f"status='open' AND source='email' AND {owner_sql}"
 
     fp = _compute_fingerprint(text)
@@ -2055,7 +2059,8 @@ def apply(store, extraction, *, doc_ids, identity=None,
         content_type=content_type, org=org, sender_id=sender_id,
         sender_name=sender_name, is_self=is_self, in_inbox=in_inbox,
         name_to_id=name_to_id, now=now, thread_id=thread_id, owner=owner,
-        embedder=embedder, embed_cache=embed_cache)
+        embedder=embedder, embed_cache=embed_cache,
+        owner_email=config.owner_email(_home))
 
     # ── 5. Semantic layer (Task 5) ──────────────────────────────────────────
     # One synthesised vector doc per thread, keyed enriched-{thread_id}. Written
@@ -2114,7 +2119,7 @@ def apply(store, extraction, *, doc_ids, identity=None,
 def _write_actions(store, extraction, *, lead, lead_msg_id, lead_date_iso,
                    content_type, org, sender_id, sender_name, is_self, in_inbox,
                    name_to_id, now, thread_id, owner, embedder=None,
-                   embed_cache=None) -> dict:
+                   embed_cache=None, owner_email="") -> dict:
     """Action lifecycle: gates, self-synthesis, dedup, owner/deadline inference,
     routing into the unified actions table, then resolve/update.
 
@@ -2200,8 +2205,9 @@ def _write_actions(store, extraction, *, lead, lead_msg_id, lead_date_iso,
     # aliases. Without the real node, a variant the owner's own node carries
     # ("Dana Okafor" when config says "Dana") was written as a different,
     # "not owner" person and the owner's actions split across name strings.
-    oc = (resolve_owner_class(store, owner)
+    oc = (resolve_owner_class(store, owner, owner_email)
           if actions_list else OwnerClass())
+    persons = PersonIds(store)
 
     actions_created = 0
     for action in actions_list:
@@ -2270,7 +2276,12 @@ def _write_actions(store, extraction, *, lead, lead_msg_id, lead_date_iso,
             resolved_owner_name, resolved_owner_eid = None, ""
         # Rule 1 (one owner identity): a config alias, a name the owner's own
         # node carries, or a name that resolved to the derived or real owner id.
-        is_owner_action = bool(resolved_owner_name) and (
+        # Ruling I19: an id that resolved to another existing person is never
+        # overridden by a name.
+        foreign = bool(resolved_owner_eid
+                       and resolved_owner_eid not in oc.ids
+                       and resolved_owner_eid in persons)
+        is_owner_action = bool(resolved_owner_name) and not foreign and (
             _is_owner_alias(resolved_owner_name, owner)
             or oc.is_owner(resolved_owner_name, resolved_owner_eid))
         is_not_owner = bool(resolved_owner_name) and not is_owner_action
@@ -2517,7 +2528,9 @@ class OwnerClass:
                derived owner.entity_id
     ids:       every id that is the owner (derived + real)
     names:     lower-cased names that are the owner: the config aliases and
-               owner name, plus the real owner node's own name and aliases.
+               owner name, plus the real owner node's own MULTI-token name and
+               aliases (ruling I18: a single token is the owner only as a
+               config alias).
 
     Only names the owner's OWN node carries count, never a display-name match
     against the graph at large: that is the hazard resolve_owner_entity_id
@@ -2532,23 +2545,48 @@ class OwnerClass:
         low = (name or "").strip().lower()
         return bool(low) and low in self.names
 
-    def is_owner(self, name, entity_id="") -> bool:
+    def is_owner(self, name, entity_id="", persons=()) -> bool:
         """True when (name, entity_id) is the owner: a name in the class, or an
-        id in it. A blank or non-person name never is."""
+        id in it. A blank or non-person name never is. Ruling I19: an
+        entity_id outside the class that names an existing person (`persons`:
+        any container answering `id in persons`) is a positive resolution to
+        someone else, and a name never overrides it."""
         low = (name or "").strip().lower()
         if not low or low in _NON_PERSON_OWNERS:
             return False
-        return low in self.names or bool(entity_id and entity_id in self.ids)
+        if entity_id and entity_id in self.ids:
+            return True
+        if entity_id and entity_id in persons:
+            return False
+        return low in self.names
 
-    def key(self, name, entity_id="") -> str:
+    def key(self, name, entity_id="", persons=()) -> str:
         """Owner-compatibility key: '' for blank/unclear/non-person (joins any
         owner), the canonical name for the owner, else the lower-cased name."""
         low = (name or "").strip().lower()
         if not low or low in _NON_PERSON_OWNERS:
             return ""
-        if self.is_owner(name, entity_id):
+        if self.is_owner(name, entity_id, persons):
             return (self.name or low).strip().lower()
         return low
+
+
+class PersonIds:
+    """`id in PersonIds(store)` -- True when an entities row of type person
+    has that id. Lazy (one point query per id, cached) for the write path."""
+
+    def __init__(self, store):
+        self._store, self._seen = store, {}
+
+    def __contains__(self, eid) -> bool:
+        if not eid:
+            return False
+        if eid not in self._seen:
+            with self._store._connect() as db:
+                self._seen[eid] = db.execute(
+                    "SELECT 1 FROM entities WHERE id=? AND type='person'",
+                    (eid,)).fetchone() is not None
+        return self._seen[eid]
 
 
 def _owner_class_db(db, owner, owner_email: str = "") -> OwnerClass:
@@ -2567,9 +2605,12 @@ def _owner_class_db(db, owner, owner_email: str = "") -> OwnerClass:
         row = db.execute("SELECT name, aliases FROM entities WHERE id=?",
                          (real,)).fetchone()
         if row:
-            if (row[0] or "").strip():
-                names.add(row[0].strip().lower())
-            names |= _alias_match_set(row[1])
+            # Ruling I18: the node's names count only when MULTI-token. A
+            # single token the node carries (a nickname, a handle) is shared
+            # with other people in the graph; a single-token name is the owner
+            # only when config says so (the aliases above).
+            node = {(row[0] or "").strip().lower()} | _alias_match_set(row[1])
+            names |= {n for n in node if len(n.split()) > 1}
     names = {n for n in names if n and n not in _NON_PERSON_OWNERS}
     return OwnerClass(name=name, entity_id=real or derived,
                       ids=frozenset(i for i in (derived, real) if i),

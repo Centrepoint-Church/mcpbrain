@@ -2098,7 +2098,11 @@ class Store:
                     ("derived", "INTEGER NOT NULL DEFAULT 0"),)),
                 ("actions", (
                     ("prior_thread_id", "TEXT DEFAULT NULL"),
-                    ("prior_owner", "TEXT DEFAULT NULL"))),
+                    ("prior_owner", "TEXT DEFAULT NULL"),
+                    # The owner repair's prior owner id (ruling I19) -- set
+                    # only by action_owner.repair_owner_actions, cleared by
+                    # its undo.
+                    ("prior_owner_entity_id", "TEXT DEFAULT NULL"))),
             ):
                 _have = {r["name"] for r in
                          db.execute(f"PRAGMA table_info({_tbl})")}

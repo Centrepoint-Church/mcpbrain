@@ -27,7 +27,8 @@ def test_fresh_init_has_columns_tables_and_index(tmp_path):
     for t in ("email_entities", "entity_relations", "entity_observations"):
         assert _cols(p, t)["derived"][4] == "0"
     assert "legacy_strength" in _cols(p, "entity_relations")
-    assert {"prior_thread_id", "prior_owner"} <= set(_cols(p, "actions"))
+    assert {"prior_thread_id", "prior_owner",
+            "prior_owner_entity_id"} <= set(_cols(p, "actions"))
     assert set(_cols(p, "relation_sources")) == {
         "relation_id", "source_key", "source_class", "first_seen"}
     assert set(_cols(p, "observation_sources")) == {
