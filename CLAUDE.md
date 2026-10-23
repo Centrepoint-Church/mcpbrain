@@ -101,6 +101,11 @@ the cursor is a watermark and every write is checkpointed by id+hash.
    but not `integrity_check`.
 4. **Keep the snapshots.** Three snapshots at different times are what made the cause
    datable and the fix targeted rather than a wholesale restore.
+5. **Scheduled Claude sessions can restart a booted-out daemon.** On 2026-10-23 the
+   `brain-enrich-hourly` task found the daemon gone mid-maintenance, took it for a wedge and
+   ran `launchctl bootstrap` within minutes. Its guidance now says: never bootstrap a service
+   that is NOT LOADED (bootout = deliberate); only `kickstart -k` a loaded-but-wedged one.
+   Still, re-confirm no daemon process right before any attended write.
 
 ## HISTORY REWRITTEN — 2026-10-22, the owner's email in two backup docs
 
