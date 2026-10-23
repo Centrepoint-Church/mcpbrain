@@ -402,6 +402,18 @@ upload for the first time. `bin/optimise_store.py` still uses
 
 ## Ingestion integrity (2026-10-22, source-only, NOT released)
 
+**LIVE on this machine (2026-10-23, installed from the working tree, NOT released).**
+The one-shot clean-up ran by the DAEMON at 01:54Z, not the attended CLI: a scheduled
+enrich session re-bootstrapped the booted-out daemon (rule 5 above), and the new code's
+migration then ran itself (backup gate passed, all 13 steps, integrity ok). Open actions
+12,522 -> 2,604; gold on the live store 0.900 / 0.601, identical to the copy rehearsal.
+Then the owner-identity fix (`action_owner.py`, daily in `action_hygiene`): the owner's
+open actions were split across the derived config id, the real graph node and a name
+variant, so owner-scoped dedupe let paraphrases through. Live: 1,342 rows canonicalised,
+18 same-thread duplicates archived (`dedup_owner`), open 2,586. A single-token name counts
+as the owner only when it is a config alias (the node's bare first-name alias matched 23
+people), and a name never overrides an id that points at another real person.
+
 Spec `docs/superpowers/specs/2026-10-22-ingestion-integrity-design.md`, plan
 `docs/superpowers/plans/2026-10-22-ingestion-integrity.md`. **The brain was reading its
 own output back as evidence and counting repeats as support**: Claude session
