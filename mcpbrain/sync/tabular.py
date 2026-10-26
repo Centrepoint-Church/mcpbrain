@@ -247,10 +247,42 @@ def _looks_like_identifier_column(name: str, values: list[float]) -> bool:
     return len(widths) == 1 and widths.pop() >= 3
 
 
-def _summary_text(file_name: str, t: Table) -> str:
-    lines = [f"### Sheet summary: {t.sheet} ({file_name})",
-             f"Rows: {t.rows_total} · Columns: {len(t.header)}",
-             f"Columns: {', '.join(h for h in t.header if h.strip())}"]
+def _clip(entry: str, budget: int) -> str:
+    """Hard-clip one list entry that alone exceeds `budget` (a pathological
+    single header); everything else is split between entries, never inside."""
+    return entry if len(entry) <= budget else entry[:max(1, budget - 1)] + "…"
+
+
+def _pack_entries(prefix: str, entries: list[str], budget: int) -> list[list[str]]:
+    """Greedily group `entries` (joined by ', ') so `prefix + joined` <= budget.
+
+    The first group is measured with `prefix`; callers pass the budget for it.
+    Returns at least one group when `entries` is non-empty."""
+    groups: list[list[str]] = []
+    cur: list[str] = []
+    for e in entries:
+        e = _clip(e, max(1, budget - len(prefix)))
+        if cur and len(prefix) + len(", ".join([*cur, e])) > budget:
+            groups.append(cur)
+            cur = []
+        cur.append(e)
+    if cur:
+        groups.append(cur)
+    return groups
+
+
+def _summary_texts(file_name: str, t: Table, max_chars: int) -> list[str]:
+    """Summary chunk text(s) for one sheet, every one <= `max_chars`.
+
+    A sheet whose summary fits renders as ONE chunk, byte-identical to the
+    original single-text design. A wide sheet (the live store has 64-68 column
+    sheets whose `Columns:` line alone reached 5,400 chars) keeps its title,
+    `Rows:`, `Totals:` and NOTE in the first chunk and carries the remaining
+    column names in continuation chunks."""
+    title = f"### Sheet summary: {t.sheet} ({file_name})"
+    rows_line = f"Rows: {t.rows_total} · Columns: {len(t.header)}"
+    names = [h for h in t.header if h.strip()]
+    columns_line = f"Columns: {', '.join(names)}"
     totals = []
     for i, name in enumerate(t.header):
         values = []
@@ -266,11 +298,42 @@ def _summary_text(file_name: str, t: Table) -> str:
         if (values and len(values) >= max(1, len(t.rows) // 2)
                 and not _looks_like_identifier_column(name, values)):
             totals.append(f"{name or f'col{i}'} {sum(values):.2f}")
-    if totals:
-        lines.append("Totals: " + ", ".join(totals))
-    if t.truncated:
-        lines.append(f"NOTE: only {len(t.rows)} of {t.rows_total} rows captured.")
-    return "\n".join(lines)
+    totals_line = "Totals: " + ", ".join(totals) if totals else ""
+    note = (f"NOTE: only {len(t.rows)} of {t.rows_total} rows captured."
+            if t.truncated else "")
+
+    whole = "\n".join(x for x in [title, rows_line, columns_line,
+                                  totals_line, note] if x)
+    if len(whole) <= max_chars:
+        return [whole]
+
+    # Wide sheet. Totals get at most half the first chunk (the remainder spills
+    # to their own continuation chunks); columns fill what is left of it.
+    head = [title, rows_line]
+    head_len = len("\n".join(head))
+    tot_groups = _pack_entries("Totals: ", totals,
+                               max(1, (max_chars - head_len) // 2))
+    first_totals = ("Totals: " + ", ".join(tot_groups[0])) if tot_groups else ""
+    tot_rest = tot_groups[1:]
+    tail = [x for x in [first_totals, note] if x]
+    col_budget = max_chars - head_len - len("\n".join(tail)) - len(tail) - 1
+    col_groups = _pack_entries("Columns: ", names, max(len("Columns: ") + 1,
+                                                        col_budget))
+    cont_title = f"### Sheet summary: {t.sheet} ({file_name}) — columns cont."
+    texts = []
+    first_cols = ("Columns: " + ", ".join(col_groups[0])) if col_groups else ""
+    texts.append("\n".join(x for x in [*head, first_cols, *tail] if x))
+    # Continuation groups re-pack against the full budget (no head/totals).
+    rest_names = [e for g in col_groups[1:] for e in g]
+    for g in _pack_entries("Columns: ", rest_names,
+                           max_chars - len(cont_title) - 1):
+        texts.append(f"{cont_title}\nColumns: {', '.join(g)}")
+    tot_title = f"### Sheet summary: {t.sheet} ({file_name}) — totals cont."
+    rest_totals = [e for g in tot_rest for e in g]
+    for g in _pack_entries("Totals: ", rest_totals,
+                           max_chars - len(tot_title) - 1):
+        texts.append(f"{tot_title}\nTotals: {', '.join(g)}")
+    return texts
 
 
 def _title(t: Table, row_start: int, row_end: int) -> str:
@@ -301,6 +364,23 @@ _MAX_FIELDS_PER_ROW = 40  # generous for a real spreadsheet, tight enough to
                           # normalise_rows' own fix (defense in depth).
 
 
+def _row_pairs(header: list[str], row: list[str],
+               max_cell_chars: int = _MAX_CELL_CHARS) -> list[str]:
+    """The 'Header: Value' fields of one row (non-empty cells only), with the
+    40-field valve applied."""
+    pairs = []
+    for i, value in enumerate(row):
+        v = (value or "").strip()
+        if not v:
+            continue
+        h = header[i] if i < len(header) and header[i].strip() else f"col{i}"
+        pairs.append(f"{h}: {_cell(v, max_cell_chars)}")
+    if len(pairs) > _MAX_FIELDS_PER_ROW:
+        extra = len(pairs) - _MAX_FIELDS_PER_ROW
+        pairs = pairs[:_MAX_FIELDS_PER_ROW] + [f"(+{extra} more fields)"]
+    return pairs
+
+
 def _row_sentence(header: list[str], row: list[str],
                   max_cell_chars: int = _MAX_CELL_CHARS) -> str:
     """Render one row as 'Header: Value; Header: Value; ...' for non-empty
@@ -314,17 +394,7 @@ def _row_sentence(header: list[str], row: list[str],
     _fit_row, there is no header_line/sep_line dependency here, so shrinking
     one row's cells cannot affect any other row's rendering.
     """
-    pairs = []
-    for i, value in enumerate(row):
-        v = (value or "").strip()
-        if not v:
-            continue
-        h = header[i] if i < len(header) and header[i].strip() else f"col{i}"
-        pairs.append(f"{h}: {_cell(v, max_cell_chars)}")
-    if len(pairs) > _MAX_FIELDS_PER_ROW:
-        extra = len(pairs) - _MAX_FIELDS_PER_ROW
-        pairs = pairs[:_MAX_FIELDS_PER_ROW] + [f"(+{extra} more fields)"]
-    return "; ".join(pairs)
+    return "; ".join(_row_pairs(header, row, max_cell_chars))
 
 
 def _fit_row_sentence(header: list[str], row: list[str], max_chars: int) -> str:
@@ -348,6 +418,28 @@ def _fit_row_sentence(header: list[str], row: list[str], max_chars: int) -> str:
     return line
 
 
+def _row_title(t: Table, n: int, cont: bool) -> str:
+    return f"### Sheet: {t.sheet} — row {n} of {t.rows_total}" + (
+        " (cont.)" if cont else "")
+
+
+def _split_wide_row(t: Table, n: int, row: list[str], max_chars: int,
+                    base: dict) -> list[tuple[str, dict]]:
+    """Render a row that overflows even at the cell floor as several chunks.
+
+    Cells keep the NORMAL cap (nothing is truncated to force a fit); the row is
+    split at field boundaries into pieces that each fit the budget. Every piece
+    carries `row_start == row_end == n`."""
+    budget = max_chars - len(_row_title(t, n, True)) - 1
+    groups = _pack_entries("", _row_pairs(t.header, row), budget)
+    out = []
+    for k, g in enumerate(groups):
+        text = "\n".join([_row_title(t, n, k > 0), "; ".join(g)])
+        out.append((text, {**base, "table_role": "rows",
+                           "row_start": n, "row_end": n}))
+    return out
+
+
 def render_chunks(tables: list[Table], *, file_name: str,
                   max_chars: int) -> list[tuple[str, dict]]:
     """Render Tables to (chunk_text, metadata_extras) pairs.
@@ -357,13 +449,18 @@ def render_chunks(tables: list[Table], *, file_name: str,
     sentences outperform raw markdown-grid table embeddings for retrieval,
     and is immune to the phantom-column bug by construction (an empty cell
     is never rendered, so there's no shared width to compute or get wrong).
-    Content-free chunks are never emitted.
+    Content-free chunks are never emitted. No chunk exceeds `max_chars`: a wide
+    summary spills its column list into continuation chunks and a row too wide
+    for one chunk is split at field boundaries (see _split_wide_row).
     """
     out: list[tuple[str, dict]] = []
     for t in tables:
         base = {"sheet": t.sheet, "rows_total": t.rows_total,
                 "rows_captured": len(t.rows), "truncated": t.truncated}
-        out.append((_summary_text(file_name, t), {**base, "table_role": "summary"}))
+        summaries = _summary_texts(file_name, t, max_chars)
+        for k, text in enumerate(summaries, start=1):
+            extra = {"summary_part": k} if len(summaries) > 1 else {}
+            out.append((text, {**base, "table_role": "summary", **extra}))
 
         group: list[str] = []
         start = 1
@@ -381,6 +478,14 @@ def render_chunks(tables: list[Table], *, file_name: str,
                 # estimate.
                 row_budget = max_chars - len(_title(t, start, n)) - 1
                 line = _fit_row_sentence(t.header, row, row_budget)
+            if len(line) > row_budget:
+                # Too wide even at the cell floor: split, don't truncate.
+                if group:
+                    out.append(_emit(t, "", "", group, base, start,
+                                     start + len(group) - 1))
+                out.extend(_split_wide_row(t, n, row, max_chars, base))
+                start, group = n + 1, []
+                continue
             group.append(line)
         if group:
             out.append(_emit(t, "", "", group, base, start, start + len(group) - 1))

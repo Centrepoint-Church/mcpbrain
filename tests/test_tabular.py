@@ -405,3 +405,77 @@ def test_a_fully_packed_table_chunk_fits_the_embedder_window_once_prefixed():
         f"prefixed table chunk is {biggest + len(prefix)} chars, over the "
         f"{EMBED_WINDOW_CHARS}-char embedder window"
     )
+
+
+# ---- chunk budget: wide summaries and wide rows never overflow ----
+
+def test_narrow_sheet_output_unchanged():
+    """Frozen from the implementation BEFORE the wide-table split landed: a sheet
+    that fits renders byte-identically (hash of the canonical JSON dump)."""
+    import hashlib
+    import json
+    hdr = ["Date", "Account", "Description", "Amount", "Note"]
+    rows = [[f"2024-03-{i:02d}", str(4500 + i), f"Item number {i} purchase",
+             f"{i * 10}.50", f"n{i}"] for i in range(1, 31)]
+    t = tabular.Table(sheet="Narrow", header=hdr, rows=rows, rows_total=30)
+    out = tabular.render_chunks([t], file_name="Narrow.xlsx", max_chars=600)
+    dump = json.dumps(out, ensure_ascii=False, sort_keys=True)
+    assert hashlib.sha256(dump.encode()).hexdigest() == (
+        "6bacec915c636372cbf3f9b94bb664ac82016873b8530f2a47f70d4fb9c920b3")
+    assert all(m.get("summary_part") is None for _, m in out)
+
+
+def test_wide_sheet_summary_fits():
+    headers = [f"Quarterly programme budget line {i:02d} " + "x" * 30
+               for i in range(68)]
+    headers[5] = "  "  # blank headers are not listed
+    rows = [[str(r * 10 + c) if c % 7 == 0 else "" for c in range(68)]
+            for r in range(1, 4)]
+    t = tabular.Table(sheet="Wide", header=headers, rows=rows, rows_total=3)
+    chunks = tabular.render_chunks([t], file_name="Wide.xlsx",
+                                   max_chars=tabular.CHUNK_CHARS)
+    assert all(len(text) <= tabular.CHUNK_CHARS for text, _ in chunks)
+    summ = [(x, m) for x, m in chunks if m["table_role"] == "summary"]
+    assert len(summ) > 1
+    assert "Rows: 3" in summ[0][0] and "Totals:" in summ[0][0]
+    listed = []
+    for text, _ in summ:
+        for line in text.splitlines():
+            if line.startswith("Columns: ") and not line.startswith("Columns: 68"):
+                listed.extend(line[len("Columns: "):].split(", "))
+    assert listed == [h for h in headers if h.strip()]
+    for k, (_, m) in enumerate(summ, start=1):
+        assert m["summary_part"] == k
+
+
+def test_wide_row_splits_instead_of_overflowing():
+    headers = [f"Programme attendance measure {i:02d} " + "y" * 25
+               for i in range(40)]
+    row = [f"v{i}" for i in range(40)]
+    t = tabular.Table(sheet="WideRow", header=headers, rows=[row], rows_total=1)
+    chunks = tabular.render_chunks([t], file_name="W.xlsx",
+                                   max_chars=tabular.CHUNK_CHARS)
+    assert all(len(text) <= tabular.CHUNK_CHARS for text, _ in chunks)
+    rows = [(x, m) for x, m in chunks if m["table_role"] == "rows"]
+    assert len(rows) > 1
+    body = "\n".join(x for x, _ in rows)
+    for h, v in zip(headers, row):
+        assert body.count(f"{h}: {v}") == 1
+    for k, (text, m) in enumerate(rows):
+        assert m["row_start"] == m["row_end"] == 1
+        assert "row 1" in text.splitlines()[0]
+        assert ("(cont.)" in text.splitlines()[0]) == (k > 0)
+
+
+def test_wide_row_between_normal_rows_keeps_row_ranges():
+    headers = [f"Programme attendance measure {i:02d} " + "y" * 25
+               for i in range(40)]
+    wide = [f"v{i}" for i in range(40)]
+    t = tabular.Table(sheet="Mixed", header=headers,
+                      rows=[["a"], wide, ["b"]], rows_total=3)
+    chunks = tabular.render_chunks([t], file_name="M.xlsx", max_chars=1800)
+    assert all(len(x) <= 1800 for x, _ in chunks)
+    spans = [(m["row_start"], m["row_end"]) for _, m in chunks
+             if m["table_role"] == "rows"]
+    assert spans[0] == (1, 1) and spans[-1] == (3, 3)
+    assert all(s == (2, 2) for s in spans[1:-1])
