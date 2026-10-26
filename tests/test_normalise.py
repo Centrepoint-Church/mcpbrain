@@ -1,7 +1,9 @@
 """Tests for mcpbrain.sync.normalise — pure unit tests, no personal data."""
 
 import base64
+import sys
 
+import pytest
 
 from mcpbrain.chunking import content_hash
 from mcpbrain.sync.normalise import Chunk, normalise_gmail
@@ -647,3 +649,40 @@ def test_every_gmail_chunk_records_its_document_chunk_count():
 
     assert len(chunks) > 1
     assert all(c.metadata["chunk_total"] == len(chunks) for c in chunks)
+
+
+# ---------------------------------------------------------------------------
+# strip_html: non-visible content (style/script/head/comments) is dropped on
+# BOTH the bs4 path and the regex fallback.
+# ---------------------------------------------------------------------------
+
+_HIDDEN_CASES = [
+    ('<html><head><title>T</title><style>body{margin:0}@font-face{font-family:x}'
+     '</style></head><body><p>Hi Dana,</p><script>var a=1;</script>'
+     '<p>Your trip cost $12.</p></body></html>',
+     ["Hi Dana,", "Your trip cost $12."]),
+    ('<p>A</p><!--[if mso]><style>td{x:1}</style><![endif]--><!-- tracking --><p>B</p>',
+     ["A", "B"]),
+    ('<p>Hi <b>Sam</b>, can you confirm <a href="x">the booking</a>?</p>',
+     ["Hi Sam, can you confirm the booking?"]),
+]
+
+
+@pytest.fixture
+def no_bs4(monkeypatch):
+    monkeypatch.setitem(sys.modules, "bs4", None)
+
+
+@pytest.mark.parametrize("html,expected", _HIDDEN_CASES)
+def test_regex_fallback_drops_hidden_content(no_bs4, html, expected):
+    from mcpbrain.sync.normalise import strip_html
+
+    assert strip_html(html).splitlines() == expected
+
+
+@pytest.mark.parametrize("html,expected", _HIDDEN_CASES)
+def test_bs4_path_drops_hidden_content(html, expected):
+    pytest.importorskip("bs4")
+    from mcpbrain.sync.normalise import strip_html
+
+    assert strip_html(html).splitlines() == expected

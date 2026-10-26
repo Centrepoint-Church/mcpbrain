@@ -99,6 +99,16 @@ def _tag_replacement(m: re.Match) -> str:
     return "\n" if (m.group(1) or "").lower() in _BLOCK_TAGS else ""
 
 
+_HTML_COMMENT = re.compile(r"<!--.*?-->", re.IGNORECASE | re.DOTALL)
+# Elements whose CONTENT is never visible text. Backreference closes on the
+# same tag name; non-greedy so two sibling elements do not swallow the text
+# between them.
+_HTML_HIDDEN_ELEMENT = re.compile(
+    r"<(script|style|head|title|noscript|template|svg)\b[^>]*>.*?</\1\s*>",
+    re.IGNORECASE | re.DOTALL)
+_HIDDEN_TAGS = ["script", "style", "head", "title", "noscript", "template", "svg"]
+
+
 def strip_html(html: str) -> str:
     """Convert HTML email body to plain text. bs4 if available, else regex.
 
@@ -111,12 +121,18 @@ def strip_html(html: str) -> str:
     sentence stays on one line — see _BLOCK_TAGS.
     """
     try:
-        from bs4 import BeautifulSoup
+        from bs4 import BeautifulSoup, Comment
         soup = BeautifulSoup(html, "html.parser")
-        for tag in soup(["script", "style", "head"]):
+        for node in soup.find_all(string=lambda t: isinstance(t, Comment)):
+            node.extract()
+        for tag in soup(_HIDDEN_TAGS):
             tag.decompose()
         text = soup.get_text(separator="\n")
     except Exception:
+        # Comments first (they can wrap MSO <style> blocks), then whole hidden
+        # elements, then the remaining tags.
+        html = _HTML_COMMENT.sub("", html)
+        html = _HTML_HIDDEN_ELEMENT.sub("", html)
         text = _HTML_TAG.sub(_tag_replacement, html)
     lines = [line.strip() for line in text.splitlines()]
     return "\n".join(line for line in lines if line)
