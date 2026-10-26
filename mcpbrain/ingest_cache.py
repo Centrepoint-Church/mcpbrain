@@ -497,6 +497,7 @@ def _import_artifact(store, drive_id: str, art: CacheArtifact, pin,
     # marker) is imported searchable but cold, never marked enriched, and its
     # cached extraction is never applied — otherwise the cache would be a side
     # door around "derived sources are never evidence".
+    _defer_over_window_vectors(rows, home)
     derived = _artifact_is_derived(rows, home)
     if derived:
         mark_enriched = False
@@ -527,6 +528,21 @@ def _import_artifact(store, drive_id: str, art: CacheArtifact, pin,
             log.info("ingest_cache: cached-enrichment apply skipped for %s: %s",
                      art.file_id, exc, exc_info=True)
     return True
+
+
+def _defer_over_window_vectors(rows: list[dict], home) -> None:
+    """Drop the peer's vector from every row whose embed passage is over the
+    model window (embed.passage_over_window, the embedder's own measure):
+    a publisher on an older install embedded only the passage's head, and
+    importing that vector as embedded=1 would keep the truncation for good.
+    Such a row is written embedded=0 and index_pending re-embeds it locally
+    across windows; every other row keeps the cached vector."""
+    from mcpbrain import config as _cfg
+    from mcpbrain.embed import passage_over_window
+    use_prefix = _cfg.contextual_retrieval_enabled(home)
+    for r in rows:
+        if passage_over_window(r["text"], r["metadata"], use_prefix=use_prefix):
+            r["vector"] = None
 
 
 def _artifact_is_derived(rows: list[dict], home) -> bool:

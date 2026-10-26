@@ -382,3 +382,18 @@ def test_doctor_no_oversize(tmp_path, monkeypatch):
     _store(tmp_path, "brain.sqlite3")
     assert _line(_doctor(tmp_path, monkeypatch)) == (
         f"✅ {_W} 0 chunk(s) longer than one window")
+
+
+def test_doctor_counts_the_prefixed_passage(tmp_path, monkeypatch):
+    """I4: doctor uses the heal/embedder measure (prefix + text), so a chunk
+    that crosses the window only with its context prefix is counted, both in
+    the headline and in the pending (embedded=0) count."""
+    from mcpbrain.embed import EMBED_WINDOW_CHARS, contextual_prefix
+    md = {"source_type": "gdrive", "file_name": "Northgate Trust budget.pdf"}
+    s = _store(tmp_path, "brain.sqlite3")
+    _c(s, "d1", "y" * (EMBED_WINDOW_CHARS - len(contextual_prefix(md)) + 5), **md)
+    _c(s, "d2", "short", **md)
+    assert s.count_passages_over_window(EMBED_WINDOW_CHARS) == (1, 1)
+    assert s.count_passages_over_window(EMBED_WINDOW_CHARS, use_prefix=False) == (0, 0)
+    assert _line(_doctor(tmp_path, monkeypatch)) == (
+        f"⚠️ {_W} 1 chunk(s) longer than one window — re-embed pending (1 left)")

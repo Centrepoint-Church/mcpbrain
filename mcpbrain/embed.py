@@ -34,16 +34,58 @@ EMBED_WINDOW_CHARS = 2000
 _MIN_PIECE_CHARS = 200
 
 
-def _plan_passages(text: str, prefix: str, window: int) -> list[str]:
-    """Passages (each <= window chars) covering one chunk, every one carrying the
-    prefix. A chunk that fits is a single `prefix + text` passage."""
-    if len(prefix) + len(text) <= window:
-        return [prefix + text]
+def passage_over_window(text: str, metadata, *, use_prefix: bool,
+                        window: int = EMBED_WINDOW_CHARS) -> bool:
+    """True when the passage this chunk is embedded as -- `contextual_prefix(
+    metadata) + text` when use_prefix, else the raw text -- is longer than
+    `window`. The ONE measure of "over the window": the embedder splits on it,
+    the heal resets on it, doctor counts on it and a cache import re-embeds on
+    it, so they cannot disagree about which chunks are oversize."""
+    plen = len(contextual_prefix(metadata if isinstance(metadata, dict) else {})) \
+        if use_prefix else 0
+    return len(text) + plen > window
+
+
+def _even_pieces(text: str, budget: int) -> list[str]:
+    """Split `text` losslessly into the fewest pieces of at most `budget` chars,
+    as evenly sized as the lossless break points allow.
+
+    A greedy `split_lossless(text, budget)` makes a just-over-budget text one
+    full piece plus a tiny tail; averaged, that tail (mostly prefix) would get
+    half the vector. So aim for n = ceil(len/budget) pieces and use the
+    SMALLEST per-piece cap in [ceil(len/n), budget] that still yields n pieces
+    (a lossless boundary can push the count up at a tight cap). If no cap does,
+    the break points force more pieces: try n + 1. Every piece is <= budget,
+    because split_lossless never exceeds its cap."""
     from mcpbrain.chunking import split_lossless
+    n = max(1, -(-len(text) // budget))
+    while True:
+        lo, hi = -(-len(text) // n), budget
+        if lo > hi:
+            return split_lossless(text, budget)
+        if len(split_lossless(text, hi)) > n:
+            n += 1
+            continue
+        while lo < hi:  # smallest cap still giving <= n pieces
+            mid = (lo + hi) // 2
+            if len(split_lossless(text, mid)) <= n:
+                hi = mid
+            else:
+                lo = mid + 1
+        return split_lossless(text, hi)
+
+
+def _plan_passages(text: str, prefix: str, window: int) -> tuple[list[str], list[int]]:
+    """(passages, weights) covering one chunk. Every passage is <= window chars
+    and carries the prefix; each weight is the length of the chunk TEXT in that
+    passage, so the mean is weighted by how much of the chunk each one holds.
+    A chunk that fits is a single `prefix + text` passage."""
+    if len(prefix) + len(text) <= window:
+        return [prefix + text], [max(1, len(text))]
     # Never let a long prefix starve the text of its window share.
     prefix = prefix[:max(0, min(len(prefix), window - _MIN_PIECE_CHARS))]
-    pieces = split_lossless(text, window - len(prefix)) or [""]
-    return [prefix + p for p in pieces]
+    pieces = _even_pieces(text, window - len(prefix)) or [""]
+    return [prefix + p for p in pieces], [max(1, len(p)) for p in pieces]
 
 
 def embed_chunk_passages(embedder, items, *, use_prefix: bool,
@@ -51,23 +93,25 @@ def embed_chunk_passages(embedder, items, *, use_prefix: bool,
     """One unit vector per `(text, metadata)` item, with no truncated tail.
 
     A chunk whose prefixed text exceeds the model window is split losslessly
-    into window-sized pieces, each carrying the prefix; the chunk's vector is the
-    L2-normalised mean of its piece vectors. All passages of the batch go to the
-    embedder in ONE `embed_passages` call. Chunks that fit return the embedder's
-    vector unchanged."""
+    into evenly sized pieces that each fit the window, each carrying the
+    prefix; the chunk's vector is the mean of its piece vectors weighted by
+    each piece's text length, L2-normalised. All passages of the batch go to
+    the embedder in ONE `embed_passages` call. Chunks that fit return the
+    embedder's vector unchanged."""
     plans = [_plan_passages(text, contextual_prefix(md) if use_prefix else "", window)
              for text, md in items]
-    flat = [p for plan in plans for p in plan]
+    flat = [p for passages, _ in plans for p in passages]
     vectors = embedder.embed_passages(flat) if flat else []
     out, i = [], 0
-    for plan in plans:
-        vs = vectors[i:i + len(plan)]
-        i += len(plan)
+    for passages, weights in plans:
+        vs = vectors[i:i + len(passages)]
+        i += len(passages)
         if len(vs) == 1:
             out.append(vs[0])
             continue
-        n = len(vs[0])
-        mean = [sum(float(v[k]) for v in vs) / len(vs) for k in range(n)]
+        n, total = len(vs[0]), float(sum(weights))
+        mean = [sum(w * float(v[k]) for v, w in zip(vs, weights)) / total
+                for k in range(n)]
         norm = sum(x * x for x in mean) ** 0.5
         out.append([x / norm for x in mean] if norm else mean)
     return out

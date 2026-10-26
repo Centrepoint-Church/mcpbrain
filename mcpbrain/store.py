@@ -3361,6 +3361,43 @@ class Store:
                     (stype, *args, stype))]
         return out
 
+    def _over_window_rows(self, db, window: int, *, use_prefix: bool, where: str = "1"):
+        """Yield (rowid, embedded) for every chunk (matching `where`) whose
+        embed passage is longer than `window`, by embed.passage_over_window --
+        the embedder's own measure. `length(text) + length(metadata) + 64`
+        bounds the prefixed passage from above (the prefix is built from
+        metadata values plus under 64 chars of fixed labels), so it serves as
+        the SQL prefilter; the exact check runs in Python. A row whose metadata
+        is not valid JSON is skipped (it cannot be embedded with a prefix)."""
+        from mcpbrain.embed import passage_over_window
+        bound = "length(text) + length(metadata) + 64" if use_prefix else "length(text)"
+        for r in db.execute(
+                f"SELECT rowid, embedded, text, metadata FROM chunks "
+                f"WHERE ({where}) AND {bound} > ?", (int(window),)):
+            md: dict = {}
+            if use_prefix:
+                try:
+                    md = json.loads(r["metadata"] or "{}")
+                except ValueError:
+                    continue
+            if passage_over_window(r["text"] or "", md, use_prefix=use_prefix,
+                                   window=window):
+                yield r["rowid"], r["embedded"]
+
+    def count_passages_over_window(self, window: int, *, use_prefix: bool = True
+                                   ) -> tuple[int, int]:
+        """(total, unembedded): chunks whose embed passage is over `window`,
+        and how many of those still wait for their (windowed) embedding.
+        Read-only, one prefiltered scan; the measure doctor reports so it
+        matches what the heal and the embedder act on."""
+        total = pending = 0
+        with self._connect() as db:
+            for _rowid, embedded in self._over_window_rows(db, window,
+                                                           use_prefix=use_prefix):
+                total += 1
+                pending += 0 if embedded else 1
+        return total, pending
+
     def reset_embedding_for_oversize(self, window: int, *, use_prefix: bool = True,
                                      bulk_section=None, batch: int = 2000) -> int:
         """Set embedded=0 on every embedded chunk whose embed passage is longer
@@ -3368,31 +3405,14 @@ class Store:
         keeping the vector of its truncated head. Returns the number reset.
 
         The passage is `contextual_prefix(metadata) + text` when use_prefix
-        (what index_pending embeds), else the raw text. The prefix is built
-        from metadata values plus under 64 chars of fixed labels, so
-        `length(text) + length(metadata) + 64` bounds the passage from above
-        and serves as the SQL prefilter; the exact check runs in Python. A row
-        whose metadata is not valid JSON is skipped (it cannot be embedded
-        with a prefix anyway).
+        (what index_pending embeds), else the raw text -- measured by
+        embed.passage_over_window via _over_window_rows.
 
         Writes in transactions of at most `batch` rows, each inside
         `bulk_section()` when given (the daemon's chunk-mutating section)."""
-        from mcpbrain.embed import contextual_prefix
-        bound = "length(text) + length(metadata) + 64" if use_prefix else "length(text)"
-        hits: list[tuple[int]] = []
         with self._connect() as db:
-            for r in db.execute(
-                    f"SELECT rowid, length(text) AS n, metadata FROM chunks "
-                    f"WHERE embedded=1 AND {bound} > ?", (int(window),)):
-                plen = 0
-                if use_prefix:
-                    try:
-                        md = json.loads(r["metadata"] or "{}")
-                    except ValueError:
-                        continue
-                    plen = len(contextual_prefix(md if isinstance(md, dict) else {}))
-                if r["n"] + plen > window:
-                    hits.append((r["rowid"],))
+            hits = [(rowid,) for rowid, _ in self._over_window_rows(
+                db, window, use_prefix=use_prefix, where="embedded=1")]
         section = bulk_section or nullcontext
         for i in range(0, len(hits), max(1, int(batch))):
             with section():
@@ -3400,14 +3420,6 @@ class Store:
                     db.executemany("UPDATE chunks SET embedded=0 WHERE rowid=?",
                                    hits[i:i + batch])
         return len(hits)
-
-    def count_unembedded_longer_than(self, n: int) -> int:
-        """Chunks longer than n characters still waiting for an embedding
-        (embedded=0) -- served by the partial index on unembedded rows."""
-        with self._connect() as db:
-            return db.execute(
-                "SELECT COUNT(*) FROM chunks WHERE embedded=0 AND length(text) > ?",
-                (int(n),)).fetchone()[0]
 
     def unembedded_chunks(self, limit: int | None = None) -> list[dict]:
         """Chunks awaiting embedding. `limit` bounds one cycle's slice of work.
@@ -3865,7 +3877,12 @@ class Store:
         `uncover=True` (the cache-import paths) applies upsert_chunk's H4 rule:
         a new row, or one whose content_hash changes, leaves its file's enrich
         payload `covers`. apply_reflow passes False because it rewrites covers
-        itself from the plan in the same transaction."""
+        itself from the plan in the same transaction.
+
+        `vector=None` writes the row embedded=0 with no vec_chunks row, so
+        index_pending embeds it locally (a cache import whose passage is over
+        the window: the peer's vector may be of its truncated head)."""
+        embedded = 0 if vector is None else 1
         row = db.execute("SELECT rowid, content_hash FROM chunks WHERE doc_id=?",
                          (doc_id,)).fetchone()
         if uncover and (row is None or row["content_hash"] != content_hash):
@@ -3873,9 +3890,9 @@ class Store:
         if row:
             rowid = row["rowid"]
             db.execute(
-                "UPDATE chunks SET text=?,content_hash=?,metadata=?,embedded=1,"
+                "UPDATE chunks SET text=?,content_hash=?,metadata=?,embedded=?,"
                 "enriched=?,enriched_version=? WHERE rowid=?",
-                (text, content_hash, json.dumps(metadata),
+                (text, content_hash, json.dumps(metadata), embedded,
                  1 if enriched else 0, enriched_version, rowid))
             if row["content_hash"] != content_hash:
                 # New text at this id: it is no longer a copy of anything, and
@@ -3885,13 +3902,14 @@ class Store:
         else:
             cur = db.execute(
                 "INSERT INTO chunks(doc_id,text,content_hash,metadata,embedded,"
-                "enriched,enriched_version) VALUES(?,?,?,?,1,?,?)",
-                (doc_id, text, content_hash, json.dumps(metadata),
+                "enriched,enriched_version) VALUES(?,?,?,?,?,?,?)",
+                (doc_id, text, content_hash, json.dumps(metadata), embedded,
                  1 if enriched else 0, enriched_version))
             rowid = cur.lastrowid
         db.execute("DELETE FROM vec_chunks WHERE rowid=?", (rowid,))
-        db.execute("INSERT INTO vec_chunks(rowid, embedding) VALUES(?,?)",
-                   (rowid, sqlite_vec.serialize_float32(list(vector))))
+        if vector is not None:
+            db.execute("INSERT INTO vec_chunks(rowid, embedding) VALUES(?,?)",
+                       (rowid, sqlite_vec.serialize_float32(list(vector))))
         db.execute("DELETE FROM fts_chunks WHERE rowid=?", (rowid,))
         fts_text, applied = Store._fts_text(text, metadata, home=home)
         db.execute("INSERT INTO fts_chunks(rowid, text) VALUES(?,?)", (rowid, fts_text))

@@ -477,15 +477,17 @@ def run_doctor(home, *, conns=None, repairs=None, reprobe=None, platform=None,
     except Exception as exc:  # noqa: BLE001 — a diagnostic must not break doctor
         lines.append(f"⚠️  {'OCR':<16} could not check tesseract ({exc})")
 
-    # Chunks whose stored text exceeds the embedder window (512 tokens ≈ 2,000
-    # chars). They are embedded across windows (embed_chunk_passages), so no
-    # tail is lost -- but only once re-embedded: a chunk embedded before that
-    # change keeps its truncated vector until the one-shot oversize heal
-    # (daemon._oversize_heal_once, meta `oversize_heal`) resets it. Counted on
-    # RAW text length, a cheap COUNT; the heal itself measures
-    # the prefixed passage, so a chunk that only crosses the window with its
-    # context prefix is healed but not counted here.
+    # Chunks whose embed passage exceeds the embedder window (512 tokens ≈
+    # 2,000 chars). They are embedded across windows (embed_chunk_passages), so
+    # no tail is lost -- but only once re-embedded: a chunk embedded before
+    # that change keeps its truncated vector until the one-shot oversize heal
+    # (daemon._oversize_heal_once, meta `oversize_heal`) resets it. Measured on
+    # the PREFIXED passage (embed.passage_over_window via
+    # Store.count_passages_over_window), the same measure the heal and the
+    # embedder act on, so a chunk that only crosses the window with its
+    # context prefix is counted too.
     from mcpbrain.store import Store
+    from mcpbrain.embed import EMBED_WINDOW_CHARS
     # "brain.sqlite3" — the same filename config.store_path() builds under
     # app_dir(); spelled relative to the injected `home` because run_doctor is
     # home-parameterised (tests pass a tmp_path). It said "b.sqlite3" for a
@@ -494,14 +496,15 @@ def run_doctor(home, *, conns=None, repairs=None, reprobe=None, platform=None,
     # window + repair-state lines never printed on any real install.
     store = Store(Path(home) / "brain.sqlite3", dim=4, read_only=True)
     try:
-        oversize = store.count_chunks_longer_than(2000)
+        from mcpbrain import config as _cfg
+        oversize, left = store.count_passages_over_window(
+            EMBED_WINDOW_CHARS, use_prefix=_cfg.contextual_retrieval_enabled(home))
         text = f"{oversize} chunk(s) longer than one window"
         if not oversize:
             lines.append(f"✅ {'Chunk window':<16} {text}")
         else:
             # ✅ only once the heal is done AND nothing over the window is
             # still waiting for its (windowed) embedding.
-            left = store.count_unembedded_longer_than(2000)
             try:
                 heal = json.loads(store.get_meta("oversize_heal") or "{}")
             except ValueError:

@@ -2,7 +2,8 @@
 import logging
 from contextlib import nullcontext
 
-from mcpbrain.embed import EMBED_WINDOW_CHARS, embed_chunk_passages  # noqa: F401
+from mcpbrain.embed import (EMBED_WINDOW_CHARS, embed_chunk_passages,  # noqa: F401
+                            passage_over_window)
 
 log = logging.getLogger(__name__)
 
@@ -84,7 +85,8 @@ def index_pending(store, embedder, batch_size: int = 32, *, home: str | None = N
             # A chunk longer than the model window is embedded as several
             # windows (mean vector) rather than truncated, so its tail is
             # searchable.
-            multi = sum(1 for c in normal_batch if len(c["text"]) > EMBED_WINDOW_CHARS)
+            multi = sum(1 for c in normal_batch if passage_over_window(
+                c["text"], c["metadata"], use_prefix=use_prefix))
             if multi:
                 log.debug("index: %d of %d chunks embedded across multiple windows",
                           multi, len(normal_batch))

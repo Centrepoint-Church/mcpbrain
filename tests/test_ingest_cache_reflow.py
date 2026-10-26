@@ -476,3 +476,45 @@ def test_fully_carried_reflow_keeps_a_whole_file_payload(tmp_path):
     p.apply_reflow("F", "drive", reflow.plan(p.owner_chunks(["gdrive-F-"]), new), [V])
     assert ingest_cache.publish_file(p, fs, "D1", "F", "vh2", PIN) is True
     assert _artifact_enrich(fs)["extraction"]["summary"] == "whole old"
+
+
+def _embed_state(s):
+    with s._connect() as db:
+        return {r["doc_id"]: (r["embedded"], r["has_vec"]) for r in db.execute(
+            "SELECT doc_id, embedded, rowid IN (SELECT rowid FROM vec_chunks) AS has_vec "
+            "FROM chunks WHERE doc_id LIKE 'gdrive-F-%'")}
+
+
+LONG = " ".join(f"w{i:04d}" for i in range(500))  # ~2,500 chars: over one window
+
+
+def test_import_writes_over_window_rows_unembedded_for_local_reembed(tmp_path):
+    """I2: a peer's vector of an over-window passage may be of its truncated
+    head, so the row lands embedded=0 (no vec row) and index_pending re-embeds
+    it across windows; a fitting row keeps the cached vector."""
+    fs = LocalDirFleetStorage(tmp_path / "fleet")
+    _publish(tmp_path, fs, ["short text", LONG])
+    b = _store(tmp_path, "B.sqlite3")
+    assert ingest_cache.try_import(b, fs, "D1", "F", "vh2", PIN, mime=PDF) is True
+    assert _embed_state(b) == {"gdrive-F-0": (1, 1), "gdrive-F-1": (0, 0)}
+    assert [c["doc_id"] for c in b.unembedded_chunks()
+            if c["doc_id"].startswith("gdrive-F-")] == ["gdrive-F-1"]
+
+
+def test_import_over_window_by_prefix_only_is_unembedded(tmp_path):
+    """The measure is the PREFIXED passage: text that fits on its own but not
+    with its contextual prefix is still re-embedded locally."""
+    from mcpbrain.embed import EMBED_WINDOW_CHARS
+    fs = LocalDirFleetStorage(tmp_path / "fleet")
+    _publish(tmp_path, fs, ["x" * (EMBED_WINDOW_CHARS - 5)])
+    b = _store(tmp_path, "B.sqlite3")
+    assert ingest_cache.try_import(b, fs, "D1", "F", "vh2", PIN, mime=PDF) is True
+    assert _embed_state(b) == {"gdrive-F-0": (0, 0)}
+
+
+def test_carry_over_import_writes_over_window_rows_unembedded(tmp_path):
+    fs = LocalDirFleetStorage(tmp_path / "fleet")
+    a = _local(tmp_path)
+    _publish(tmp_path, fs, ["alpha beta gamma\ndelta epsilon", LONG])
+    assert ingest_cache.try_import(a, fs, "D1", "F", "vh2", PIN, mime=PDF) is True
+    assert _embed_state(a) == {"gdrive-F-0": (1, 1), "gdrive-F-1": (0, 0)}
