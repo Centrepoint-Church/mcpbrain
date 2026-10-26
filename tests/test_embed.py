@@ -232,7 +232,7 @@ def test_embedder_dim_does_not_import_onnxruntime():
     assert not any(m == "fastembed" or m.startswith("onnxruntime") for m in sys.modules)
 
 
-def test_an_over_window_passage_is_counted_and_logged(caplog, tmp_path, monkeypatch):
+def test_an_over_window_passage_is_embedded_across_windows_not_warned(caplog, tmp_path, monkeypatch):
     """B3: 15,576 chunks exceed the 512-token BGE window and are silently
     truncated at embed time, so their tails are unsearchable — not logged, not
     counted. chunk_text now bounds everything that goes through it; what remains
@@ -253,12 +253,13 @@ def test_an_over_window_passage_is_counted_and_logged(caplog, tmp_path, monkeypa
     store.upsert_chunk("enriched-t1", "x" * (EMBED_WINDOW_CHARS + 500), "h1",
                        {"source_type": "gmail_enriched_v2"})
 
-    with caplog.at_level("WARNING"):
+    with caplog.at_level("DEBUG"):
         index_pending(store, _Embedder())
 
-    assert any("window" in r.message for r in caplog.records), (
-        f"the truncation was silent: {[r.message for r in caplog.records]}"
-    )
+    # No longer truncated, so no warning; the multi-window count is DEBUG.
+    assert not [r for r in caplog.records if r.levelname == "WARNING"
+                and "window" in r.message]
+    assert any("multiple windows" in r.message for r in caplog.records)
 
 
 def test_a_within_window_passage_logs_nothing(caplog, tmp_path, monkeypatch):

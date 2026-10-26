@@ -2,11 +2,9 @@
 import logging
 from contextlib import nullcontext
 
-from mcpbrain.embed import contextual_prefix
+from mcpbrain.embed import EMBED_WINDOW_CHARS, embed_chunk_passages  # noqa: F401
 
 log = logging.getLogger(__name__)
-
-EMBED_WINDOW_CHARS = 2000
 
 
 def index_pending(store, embedder, batch_size: int = 32, *, home: str | None = None,
@@ -80,23 +78,16 @@ def index_pending(store, embedder, batch_size: int = 32, *, home: str | None = N
                 normal_batch = [c for c in batch if c not in table_batch]
             else:
                 table_batch, normal_batch = [], batch
-            texts = [
-                (contextual_prefix(c["metadata"]) + c["text"]) if use_prefix else c["text"]
-                for c in normal_batch
-            ]
-            oversize = sum(1 for t in texts if len(t) > EMBED_WINDOW_CHARS)
-            if oversize:
-                # The BGE window is 512 tokens ≈ 2,000 characters; anything
-                # longer is silently truncated by the model and its tail is
-                # unsearchable. 15,576 such chunks existed in the live store,
-                # uncounted and unlogged (B3). This measures the PREFIXED text:
-                # contextual_retrieval is default ON and its prefix eats into
-                # the same window, which is part of why chunks sized right at
-                # 2,000 chars still overflowed.
-                log.warning("index: %d of %d passages exceed the %d-char embedder "
-                            "window; their tails will not be searchable",
-                            oversize, len(texts), EMBED_WINDOW_CHARS)
-            vectors = embedder.embed_passages(texts) if normal_batch else []
+            vectors = embed_chunk_passages(
+                embedder, [(c["text"], c["metadata"]) for c in normal_batch],
+                use_prefix=use_prefix) if normal_batch else []
+            # A chunk longer than the model window is embedded as several
+            # windows (mean vector) rather than truncated, so its tail is
+            # searchable.
+            multi = sum(1 for c in normal_batch if len(c["text"]) > EMBED_WINDOW_CHARS)
+            if multi:
+                log.debug("index: %d of %d chunks embedded across multiple windows",
+                          multi, len(normal_batch))
             with bulk_section():
                 for c, v in zip(normal_batch, vectors):
                     store.write_embedding(c["rowid"], v, home=_home)

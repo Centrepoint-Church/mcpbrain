@@ -32,7 +32,7 @@ from googleapiclient.errors import HttpError
 
 from mcpbrain import config, reflow
 from mcpbrain.chunking import SPLIT_VERSION
-from mcpbrain.embed import contextual_prefix
+from mcpbrain.embed import embed_chunk_passages
 from mcpbrain.store import REFLOW_HALT_CURSOR, ReflowOrphanError
 from mcpbrain.sync import queue
 from mcpbrain.sync.blocks import extraction_version
@@ -403,9 +403,8 @@ class ReflowContext:
 
     def _embed(self, chunks) -> list:
         use = config.contextual_retrieval_enabled(self.home)
-        passages = [(contextual_prefix(c.metadata) + c.text) if use else c.text
-                    for c in chunks]
-        return self.embedder.embed_passages(passages)
+        return embed_chunk_passages(
+            self.embedder, [(c.text, c.metadata) for c in chunks], use_prefix=use)
 
     def _record(self, outcome: str) -> None:
         owner, kind = getattr(self, "_cur", (None, None))

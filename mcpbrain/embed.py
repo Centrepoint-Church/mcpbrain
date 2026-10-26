@@ -27,6 +27,52 @@ def embedder_dim(kind: str = "bge-small") -> int:
 # The query path (embed_query / _BGE_Q instruction) is NOT touched here.
 # ---------------------------------------------------------------------------
 
+# The BGE window is 512 tokens ~ 2,000 characters. Defined here (not in index.py)
+# so embed_chunk_passages can default to it without a circular import;
+# index.EMBED_WINDOW_CHARS re-exports it.
+EMBED_WINDOW_CHARS = 2000
+_MIN_PIECE_CHARS = 200
+
+
+def _plan_passages(text: str, prefix: str, window: int) -> list[str]:
+    """Passages (each <= window chars) covering one chunk, every one carrying the
+    prefix. A chunk that fits is a single `prefix + text` passage."""
+    if len(prefix) + len(text) <= window:
+        return [prefix + text]
+    from mcpbrain.chunking import split_lossless
+    # Never let a long prefix starve the text of its window share.
+    prefix = prefix[:max(0, min(len(prefix), window - _MIN_PIECE_CHARS))]
+    pieces = split_lossless(text, window - len(prefix)) or [""]
+    return [prefix + p for p in pieces]
+
+
+def embed_chunk_passages(embedder, items, *, use_prefix: bool,
+                         window: int = EMBED_WINDOW_CHARS) -> list:
+    """One unit vector per `(text, metadata)` item, with no truncated tail.
+
+    A chunk whose prefixed text exceeds the model window is split losslessly
+    into window-sized pieces, each carrying the prefix; the chunk's vector is the
+    L2-normalised mean of its piece vectors. All passages of the batch go to the
+    embedder in ONE `embed_passages` call. Chunks that fit return the embedder's
+    vector unchanged."""
+    plans = [_plan_passages(text, contextual_prefix(md) if use_prefix else "", window)
+             for text, md in items]
+    flat = [p for plan in plans for p in plan]
+    vectors = embedder.embed_passages(flat) if flat else []
+    out, i = [], 0
+    for plan in plans:
+        vs = vectors[i:i + len(plan)]
+        i += len(plan)
+        if len(vs) == 1:
+            out.append(vs[0])
+            continue
+        n = len(vs[0])
+        mean = [sum(float(v[k]) for v in vs) / len(vs) for k in range(n)]
+        norm = sum(x * x for x in mean) ** 0.5
+        out.append([x / norm for x in mean] if norm else mean)
+    return out
+
+
 def contextual_prefix(metadata: dict) -> str:
     """Return a provenance prefix for a passage chunk, e.g. '[Context: Email from ..., re: ...] '.
 

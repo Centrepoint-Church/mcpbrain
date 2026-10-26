@@ -3658,7 +3658,7 @@ class Store:
         chunk is left at embedded=0 for the daemon's index_pending pass.
         """
         from mcpbrain import config
-        from mcpbrain.embed import contextual_prefix
+        from mcpbrain.embed import embed_chunk_passages
         _home = str(home) if home is not None else str(config.app_dir())
         with self._connect() as db:
             r = db.execute(
@@ -3668,8 +3668,8 @@ class Store:
             return False
         metadata = json.loads(r["metadata"])
         use_prefix = config.contextual_retrieval_enabled(_home)
-        passage = (contextual_prefix(metadata) + r["text"]) if use_prefix else r["text"]
-        vector = embedder.embed_passages([passage])[0]
+        vector = embed_chunk_passages(
+            embedder, [(r["text"], metadata)], use_prefix=use_prefix)[0]
         self.write_embedding(r["rowid"], vector, home=_home)
         return True
 
