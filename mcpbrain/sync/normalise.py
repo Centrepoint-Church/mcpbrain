@@ -105,7 +105,15 @@ _HTML_COMMENT = re.compile(r"<!--.*?-->", re.IGNORECASE | re.DOTALL)
 # same tag name; non-greedy so two sibling elements do not swallow the text
 # between them.
 _HTML_HIDDEN_ELEMENT = re.compile(
-    r"<(script|style|head|title|noscript|template|svg)\b[^>]*>.*?</\1\s*>",
+    r"<(script|style|noscript|template|svg)\b[^>]*>.*?</\1\s*>",
+    re.IGNORECASE | re.DOTALL)
+# `head` and `title` are hidden too, but real marketing mail is malformed: the
+# `</head>` can sit at the very end of the document, after `<body>`, or be
+# missing. They therefore end at their close tag OR at the first `<body` tag,
+# whichever comes first (the lookahead leaves `<body` in place). Script/style
+# stay on the strict rule above: a `<style>` legitimately appears in a body.
+_HTML_HEAD_ELEMENT = re.compile(
+    r"<(head|title)\b[^>]*>.*?(?:</\1\s*>|(?=<body\b))",
     re.IGNORECASE | re.DOTALL)
 
 
@@ -123,6 +131,7 @@ def strip_html(html: str) -> str:
     # Comments first (they can wrap MSO <style> blocks), then whole hidden
     # elements, then the remaining tags.
     html = _HTML_COMMENT.sub("", html)
+    html = _HTML_HEAD_ELEMENT.sub("", html)
     html = _HTML_HIDDEN_ELEMENT.sub("", html)
     text = _HTML_TAG.sub(_tag_replacement, html)
     # Entities AFTER the tag pass, so an escaped `&lt;b&gt;` stays the literal

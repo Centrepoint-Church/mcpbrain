@@ -674,6 +674,26 @@ def test_strip_html_drops_hidden_content(html, expected):
     assert strip_html(html).splitlines() == expected
 
 
+def test_strip_html_head_closed_after_body_keeps_the_body():
+    from mcpbrain.sync.normalise import strip_html
+    html = ("<html><head><style>td{x:1}</style><body><p>Create a Password</p>"
+            "<p>Visit the help desk.</p></body></head></html>")
+    assert strip_html(html).splitlines() == ["Create a Password", "Visit the help desk."]
+
+
+def test_strip_html_head_without_close_tag_keeps_the_body():
+    from mcpbrain.sync.normalise import strip_html
+    html = ('<html><head><meta charset="utf-8"><style>td{x:1}</style>'
+            '<body class="m"><p>Hello Dana Okafor</p></body></html>')
+    assert strip_html(html).splitlines() == ["Hello Dana Okafor"]
+
+
+def test_strip_html_title_normal_and_unclosed():
+    from mcpbrain.sync.normalise import strip_html
+    assert strip_html("<title>T</title><p>Hi</p>").splitlines() == ["Hi"]
+    assert strip_html("<title>T<body><p>Hi</p>").splitlines() == ["Hi"]
+
+
 def test_strip_html_unescapes_entities():
     from mcpbrain.sync.normalise import strip_html
     out = strip_html("<p>Dana &amp; Marcus</p><p>it&#39;s done</p>"
