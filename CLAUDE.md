@@ -514,6 +514,13 @@ Found by auditing why chunks exceeded the embed window and why one owner stayed 
 - **CSS leak.** `bs4` was never a dependency; the regex fallback kept `<style>` / `<script>` /
   `<head>` / comment text (516 Gmail messages). `strip_html` is regex-only now: hidden
   elements and comments dropped, `html.unescape` applied. **Do not reintroduce a bs4 branch.**
+  **A `<head>`/`<title>` ends at its close tag OR the first `<body`** (`6491f3b2`): live
+  marketing mail closes `</head>` after the body, and the first version of the rule
+  swallowed whole bodies. Found on the heal's 9th Gmail reflow (it raised "no chunks", so
+  nothing was applied); reflow paused via local `reflow_enabled=false`, the 18 messages
+  already reflowed were checked against Gmail (none lost text), and the fixed cleaner was
+  validated over all 516 targets before re-enabling (0 empty, 0 CSS left; 105 no longer
+  fetchable). Validate a cleaner change on REAL mail before it re-renders history.
 - **Wide tables.** Tabular splits wide summaries (`columns cont.`, `summary_part`) and wide
   rows (`row N (cont.)`); output is byte-identical for sheets that fit.
 - **Embedding.** `embed.embed_chunk_passages` = even, length-weighted multi-window mean.
