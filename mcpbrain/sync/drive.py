@@ -731,6 +731,9 @@ def _cache_first_extract_one(
         return True, None
     content = fetch_content(service, fmeta, store=store, report=report)
     if content is None or (not content.text and not content.tables):
+        if content is not None:
+            with bulk_section():
+                drop_emptied_native(store, fmeta, content, drive_id=drive_id)
         return False, None
     # Re-check right before extraction: another daemon may have just published.
     if ingest_cache.try_import(store, fleet_storage, drive_id, fid, content_h, pin,
@@ -949,6 +952,64 @@ def unchanged_reflow_owner(store, fmeta: dict, *, folder=None) -> bool:
     return True
 
 
+_GOOGLE_NATIVE_PREFIX = "application/vnd.google-apps."
+
+
+def _drop_file_chunks(store, fid: str, *, drive_id: str | None = None) -> list[str]:
+    """Remove a file's chunks and take its actions/links with them (reason
+    `source_gone`). Shared by the remove event and the emptied-native case.
+
+    My Drive (`drive_id` None) has no per-drive scoping and invalidates even with
+    no chunks left, since the file's actions/links may outlive its chunks (an
+    earlier removal, a sweep). With a `drive_id` only chunks stamped with THIS
+    drive are touched -- a file moved to another synced drive may already have
+    been upserted there, and its chunks, actions and links belong to that copy
+    now -- and nothing happens when none remain. Returns the removed doc ids."""
+    doc_ids = store.doc_ids_for_file(fid)
+    if drive_id is not None:
+        doc_ids = [d for d in doc_ids
+                   if ((store.get_chunk(d) or {}).get("metadata") or {}
+                       ).get("drive_id") == drive_id]
+        if not doc_ids:
+            return []
+    store.invalidate_sources_for_docs(
+        doc_ids, source_ids=[fid, *doc_ids], file_ids=[fid], reason="source_gone")
+    if doc_ids:
+        store.delete_chunks(doc_ids)
+    return doc_ids
+
+
+def drop_emptied_native(store, fmeta: dict, content, *,
+                        drive_id: str | None = None) -> bool:
+    """A Google-native file whose CHANGED export is now empty (a doc whose text
+    was replaced with images) must lose the stale chunks of text that no longer
+    exists; otherwise they stay forever and the reflow holds the owner daily.
+
+    Only when the export is complete (not partial), the mime is Google-native
+    (a PDF/Office file that extracts empty is an extraction failure, not
+    emptiness), and the stored chunks carry a different `modified` than the
+    file's current modifiedTime. Returns True when it removed chunks."""
+    fid = fmeta.get("id")
+    modified = fmeta.get("modifiedTime") or ""
+    if (content is None or content.partial or content.text or content.tables
+            or not fid or not modified
+            or not (fmeta.get("mimeType") or "").startswith(_GOOGLE_NATIVE_PREFIX)):
+        return False
+    stored = [d for d in store.doc_ids_for_file(fid)
+              if drive_id is None or ((store.get_chunk(d) or {}).get("metadata")
+                                      or {}).get("drive_id") == drive_id]
+    if not stored or all(
+            ((store.get_chunk(d) or {}).get("metadata") or {}).get("modified") == modified
+            for d in stored):
+        return False
+    removed = _drop_file_chunks(store, fid, drive_id=drive_id)
+    if drive_id is not None:
+        store.clear_pending_publish(drive_id, fid)
+    log.info("drive: %s changed and now exports empty; dropped %d stale chunk(s)",
+             fid, len(removed))
+    return bool(removed)
+
+
 def handle_drive_item(service, store, item, *, folder_cache=None,
                       bulk_section=None, report=None) -> None:
     """Work one queued Drive item. Raises on failure so the loop backs it off."""
@@ -956,15 +1017,7 @@ def handle_drive_item(service, store, item, *, folder_cache=None,
     fid = item["ref_id"]
     if item["event"] == "remove":
         with bulk_section():
-            doc_ids = store.doc_ids_for_file(fid)
-            # My Drive has no per-drive scoping: runs even with no chunks left,
-            # since the file's actions/links may outlive its chunks (an earlier
-            # removal, a sweep). Only the shared-drive path skips when none remain.
-            store.invalidate_sources_for_docs(
-                doc_ids, source_ids=[fid, *doc_ids], file_ids=[fid],
-                reason="source_gone")
-            if doc_ids:
-                store.delete_chunks(doc_ids)
+            _drop_file_chunks(store, fid)
         return
     fmeta = service.files().get(
         fileId=fid, supportsAllDrives=True,
@@ -975,6 +1028,9 @@ def handle_drive_item(service, store, item, *, folder_cache=None,
         return                      # the reflow owns it (or already stamped it)
     content = fetch_content(service, fmeta, store=store, report=report)
     if content is None or (not content.text and not content.tables):
+        if content is not None:
+            with bulk_section():
+                drop_emptied_native(store, fmeta, content)
         return                      # unsupported/empty: done, nothing to write
     folder = folder_path(service, fmeta, folder_cache if folder_cache is not None else {})
     with bulk_section():
@@ -1009,17 +1065,7 @@ def handle_shared_drive_item(service, store, item, *, fleet_storage, pin,
     fid = item["ref_id"]
     if item["event"] == "remove":
         with bulk_section():
-            # Scope to THIS drive: a file moved to another synced drive may
-            # already have been upserted there; its chunks, actions and links
-            # belong to that copy now.
-            doc_ids = [d for d in store.doc_ids_for_file(fid)
-                       if ((store.get_chunk(d) or {}).get("metadata") or {}
-                           ).get("drive_id") == drive_id]
-            if doc_ids:
-                store.invalidate_sources_for_docs(
-                    doc_ids, source_ids=[fid, *doc_ids], file_ids=[fid],
-                    reason="source_gone")
-                store.delete_chunks(doc_ids)
+            _drop_file_chunks(store, fid, drive_id=drive_id)
         # Clear any durable pending-publish row for this file too (final-
         # review fix): a file can be extracted-with-a-miss in one cycle
         # (recording a shared_drive_pending_publish row) and then deleted
