@@ -118,6 +118,11 @@ from mcpbrain.store import _IN_BATCH, Store
 SC = sc.SourceClass
 log = logging.getLogger("mcpbrain.ingestion_cleanup")
 
+# An undo-able step the clean-up never runs: the daily owner repair
+# (action_owner.repair_owner_actions) logs its changes here; `--undo
+# owner_repair` reverses them. Deliberately NOT in STEPS.
+OWNER_REPAIR_STEP = action_owner.LOG_STEP
+
 STEPS = ("source_session", "rekey_notes", "source_brief", "source_draft",
          "source_consolidated", "source_digest", "derived_links",
          "derived_observations", "dedup_embed", "legacy_strength",
@@ -320,6 +325,17 @@ class Resolver:
 # Logged writes
 # ---------------------------------------------------------------------------
 
+def log_change(db, step, table, key, column, old, new, at) -> None:
+    """Write one cleanup_log row (the format `undo` reads). Shared with
+    action_owner's owner repair, which logs under step 'owner_repair'."""
+    ins = column == _INSERT
+    db.execute(
+        "INSERT INTO cleanup_log(step, table_name, row_key, column_name, "
+        "old_value, new_value, at) VALUES (?, ?, ?, ?, ?, ?, ?)",
+        (step, table, json.dumps(key, sort_keys=True), column,
+         None if ins else json.dumps(old), None if ins else json.dumps(new), at))
+
+
 class Tx:
     """One step's writes on one connection. In a dry run nothing is executed;
     action changes are mirrored into ctx.actions so later steps see them."""
@@ -330,13 +346,7 @@ class Tx:
         self.at = _now()
 
     def _log(self, table, key, column, old, new=None):
-        ins = column == _INSERT
-        self.db.execute(
-            "INSERT INTO cleanup_log(step, table_name, row_key, column_name, "
-            "old_value, new_value, at) VALUES (?, ?, ?, ?, ?, ?, ?)",
-            (self.step, table, json.dumps(key, sort_keys=True), column,
-             None if ins else json.dumps(old), None if ins else json.dumps(new),
-             self.at))
+        log_change(self.db, self.step, table, key, column, old, new, self.at)
 
     def update(self, table, key: dict, old: dict, new: dict) -> set:
         changed = {c: v for c, v in new.items() if old.get(c) != v}
@@ -1230,7 +1240,9 @@ def main(argv=None, *, embedder=None, dim=None) -> int:
         print(f"[clean] no store at {store_path}")
         return 1
     steps = [s.strip() for s in ns.steps.split(",") if s.strip()] or list(STEPS)
-    bad = [s for s in steps + ([ns.undo] if ns.undo else []) if s not in STEPS]
+    bad = [s for s in steps if s not in STEPS]
+    if ns.undo and ns.undo not in STEPS and ns.undo != OWNER_REPAIR_STEP:
+        bad.append(ns.undo)
     if bad:
         print(f"[clean] unknown step(s): {', '.join(bad)}; valid: {', '.join(STEPS)}")
         return 1
@@ -1301,14 +1313,24 @@ def main(argv=None, *, embedder=None, dim=None) -> int:
     # partial --steps run never marks the whole clean-up done — the prior
     # state comes back, so the daemon still runs the rest. A crash leaves the
     # claim, which goes stale after CLI_CLAIM_TTL_S (shown as interrupted).
+    owner_undo = ns.undo == OWNER_REPAIR_STEP
     prior = read_marker(store)
     claim = {"by": "cli", "steps": [ns.undo] if ns.undo else steps,
              "undo": bool(ns.undo), "full": full_run}
-    _write_marker(store, {**prior, "state": "running", "by": "cli",
-                          "claim": claim})
+    if not owner_undo:       # the owner repair is not part of the clean-up
+        _write_marker(store, {**prior, "state": "running", "by": "cli",
+                              "claim": claim})
     results: dict = {}
     try:
-        if ns.undo:
+        if owner_undo:
+            got = action_owner.undo_owner_repair(store)
+            restored, drifted = got["restored"] + got["reopened"], got["drifted"]
+            print(f"[clean] --undo {ns.undo}: restored {got['restored']} owner "
+                  f"row(s), reopened {got['reopened']}")
+            if drifted:
+                print(f"[clean] --undo {ns.undo}: SKIPPED {drifted} value(s) changed "
+                      "since the repair ran (kept in cleanup_log)")
+        elif ns.undo:
             restored, drifted = undo(store, ns.undo, dry=False)
             print(f"[clean] --undo {ns.undo}: restored {restored} logged value(s)")
             if drifted:
@@ -1320,16 +1342,20 @@ def main(argv=None, *, embedder=None, dim=None) -> int:
             _print_summary(results, dry=False)
         ok = _integrity(store)
     except BaseException as exc:
-        _write_marker(store, {**prior, "last_cli": {**claim, "error": repr(exc)}})
+        if not owner_undo:
+            _write_marker(store, {**prior, "last_cli": {**claim, "error": repr(exc)}})
         raise
     if ok != "ok":
-        _write_marker(store, {**prior, "state": "failed", **claim,
-                              "error": f"integrity_check: {ok}"})
+        if not owner_undo:
+            _write_marker(store, {**prior, "state": "failed", **claim,
+                                  "error": f"integrity_check: {ok}"})
         print(f"[clean] INTEGRITY CHECK FAILED: {ok}")
         if snap:
             print(f"[clean] restore the snapshot (daemon stopped): {snap}")
         return 2
-    if full_run:
+    if owner_undo:
+        pass                      # the shared clean-up marker is untouched
+    elif full_run:
         _write_marker(store, {"state": "done", **claim,
                               "counts": _counts_json(results)})
     elif ns.undo and prior.get("state") not in ("done", "failed"):

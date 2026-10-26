@@ -461,13 +461,13 @@ def test_i19_prior_id_recorded_and_undo_restores(s):
     assert _get(s, c)["prior_owner_entity_id"] == ""
     assert _get(s, b)["status"] == "auto_archived"
     out = ao.undo_owner_repair(s)
-    assert out == {"restored": 3, "reopened": 1}
+    assert out == {"restored": 3, "reopened": 1, "drifted": 0}
     for aid, owner, eid in ((a, "Dana", DERIVED), (b, "Dana Okafor", REAL),
                             (c, "Dana", "")):
         r = _get(s, aid)
         assert (r["owner"], r["owner_entity_id"], r["status"]) == (owner, eid, "open")
         assert r["prior_owner"] is None and r["prior_owner_entity_id"] is None
-    assert ao.undo_owner_repair(s) == {"restored": 0, "reopened": 0}
+    assert ao.undo_owner_repair(s) == {"restored": 0, "reopened": 0, "drifted": 0}
 
 
 class _VecEmb:
@@ -544,3 +544,94 @@ def test_i19_row_resolved_to_another_person_is_not_an_owner_candidate(s):
                          owner_entity_id="dana-v", status="open", source="email",
                          thread_id="t-1", created_at="2026-05-30T00:00:00Z")
     assert _apply(s, _ext([_act("Send the signed venue form", "Dana")]))["actions"] == 1
+
+
+# ---------------------------------------------------------------------------
+# Task 6: canonicalise without a model, logged and exactly undone
+# ---------------------------------------------------------------------------
+
+def _log_rows(s, step="owner_repair"):
+    with s._connect() as db:
+        return [dict(r) for r in db.execute(
+            "SELECT * FROM cleanup_log WHERE step=? ORDER BY id", (step,))]
+
+
+def test_repair_canonicalises_without_a_model_and_holds_the_watermark(s):
+    _owner_node(s)
+    a = _add(s, "Add the code of conduct to the student expectations", "Dana", DERIVED,
+             created="2026-05-01")
+    b = _add(s, "Put the conduct code into the student expectations doc",
+             "Dana Okafor", REAL, created="2026-05-02")
+    out = _repair(s, skip_comparison="embedder_loading")
+    assert out["skipped"] == "embedder_loading" and out["canonicalised"] == 2
+    assert _get(s, a)["owner_entity_id"] == REAL
+    assert {_get(s, x)["status"] for x in (a, b)} == {"open"}
+    assert int(s.get_cursor(ao.CURSOR) or 0) == 0     # not advanced past them
+    assert _repair(s, _Emb(SAME))["deduped"] == 1     # compared once the model is up
+
+
+def test_repair_logs_every_changed_value(s):
+    _owner_node(s)
+    a = _add(s, "Add the code of conduct to the student expectations", "Dana", DERIVED,
+             created="2026-05-01")
+    b = _add(s, "Put the conduct code into the student expectations doc",
+             "Dana Okafor", REAL, created="2026-05-02")
+    _repair(s, _Emb(SAME))
+    rows = _log_rows(s)
+    cols = {(json.loads(r["row_key"])["id"], r["column_name"]):
+            (json.loads(r["old_value"]), json.loads(r["new_value"])) for r in rows}
+    assert cols[(a, "owner_entity_id")] == (DERIVED, REAL)
+    assert cols[(a, "prior_owner")] == (None, "Dana")
+    assert cols[(a, "prior_owner_entity_id")] == (None, DERIVED)
+    assert cols[(b, "status")] == ("open", "auto_archived")
+    assert cols[(b, "resolved_by")] == ("", "dedup_owner")
+    assert (b, "resolved_at") in cols and (a, "owner") not in cols   # unchanged: unlogged
+
+
+def test_undo_restores_exact_logged_values_and_keeps_drifted_rows(s):
+    _owner_node(s)
+    a = _add(s, "One", "Dana Okafor", REAL, thread="t-1")
+    b = _add(s, "Two", "Dana", DERIVED, thread="t-2")
+    c = _add(s, "Three", "Dana", DERIVED, thread="t-3")
+    with s._connect(write=True) as db:
+        db.execute("UPDATE actions SET prior_owner='Claude' WHERE id=?", (a,))
+        db.execute("UPDATE actions SET owner_entity_id=NULL WHERE id=?", (b,))
+    _repair(s)
+    assert _get(s, a)["prior_owner"] == "Claude"
+    with s._connect(write=True) as db:                  # c drifts after the repair
+        db.execute("UPDATE actions SET owner_entity_id='dana-smith' WHERE id=?", (c,))
+    out = ao.undo_owner_repair(s)
+    assert out["drifted"] == 1
+    ra, rb, rc = _get(s, a), _get(s, b), _get(s, c)
+    assert (ra["owner"], ra["owner_entity_id"], ra["prior_owner"],
+            ra["prior_owner_entity_id"]) == ("Dana Okafor", REAL, "Claude", None)
+    assert rb["owner_entity_id"] is None and rb["prior_owner"] is None   # NULL stays NULL
+    assert rc["owner_entity_id"] == "dana-smith"      # the drifted value is kept
+    left = _log_rows(s)
+    assert {(json.loads(r["row_key"])["id"], r["column_name"]) for r in left} == \
+        {(c, "owner_entity_id")}                      # drifted value's log row kept
+
+
+def test_undo_still_handles_rows_repaired_before_the_log(s):
+    _owner_node(s)
+    a = _add(s, "One", "Dana", DERIVED)
+    _repair(s)
+    with s._connect(write=True) as db:
+        db.execute("DELETE FROM cleanup_log WHERE step='owner_repair'")
+    out = ao.undo_owner_repair(s)
+    assert out["restored"] == 1
+    assert _get(s, a)["owner_entity_id"] == DERIVED
+
+
+def test_cli_undo_owner_repair_accepts_the_step_and_is_not_a_cleanup_step(s, tmp_path):
+    from mcpbrain import ingestion_cleanup as ic
+    assert "owner_repair" not in ic.STEPS
+    _owner_node(s)
+    a = _add(s, "One", "Dana", DERIVED)
+    _repair(s)
+    rc = ic.main(["--store", str(s.path), "--home", str(tmp_path), "--undo",
+                  "owner_repair", "--yes", "--skip-snapshot-for-tests",
+                  "--no-brief-rules"], dim=s.dim)
+    assert rc == 0
+    assert _get(s, a)["owner_entity_id"] == DERIVED
+    assert ic.read_marker(s).get("state") in (None, "pending")

@@ -125,27 +125,34 @@ def test_owner_repair_uses_the_built_embedder(monkeypatch):
     assert seen["embedder"] is emb
 
 
-def test_owner_repair_waits_while_the_model_loads(monkeypatch):
-    """A model still building -> the owner repair waits for the next day
-    rather than comparing with weaker lexical rules and moving the watermark."""
+def _capture(monkeypatch):
     from mcpbrain import action_owner
-    called = []
-    monkeypatch.setattr(action_owner, "repair_owner_actions",
-                        lambda *a, **k: called.append(1))
+    calls = []
+
+    def fake(store, owner, **kw):
+        calls.append(kw)
+        return {"canonicalised": 1, "deduped": 0, "threads": 0,
+                "skipped": kw.get("skip_comparison")}
+    monkeypatch.setattr(action_owner, "repair_owner_actions", fake)
+    return calls
+
+
+def test_owner_repair_canonicalises_while_the_model_loads(monkeypatch):
+    """M-N3: a model still building -> canonicalise still runs, only the
+    comparison is skipped, and the cadence stays due."""
+    calls = _capture(monkeypatch)
     dm = _hygiene_daemon(_QuietStore())
     dm._embedder_factory = lambda: object()
     dm._embedder_bounded = lambda timeout=None: None
     out = dm._run_action_hygiene()
-    assert called == [] and out["owner_repair"] == "embedder_loading"
-    # M5: a skipped repair does not use up the day -- retried next tick.
+    assert len(calls) == 1 and calls[0]["skip_comparison"] == "embedder_loading"
+    assert calls[0]["embedder"] is None
+    assert out["owner_repair"] == "embedder_loading" and out["owner_canonicalised"] == 1
     assert dm._last_action_hygiene is None
 
 
-def test_owner_repair_embedder_build_error_skips_too(monkeypatch):
-    from mcpbrain import action_owner
-    called = []
-    monkeypatch.setattr(action_owner, "repair_owner_actions",
-                        lambda *a, **k: called.append(1))
+def test_owner_repair_embedder_build_error_still_canonicalises(monkeypatch):
+    calls = _capture(monkeypatch)
     dm = _hygiene_daemon(_QuietStore())
     dm._embedder_factory = lambda: object()
 
@@ -153,8 +160,58 @@ def test_owner_repair_embedder_build_error_skips_too(monkeypatch):
         raise RuntimeError("model build failed")
     dm._embedder_bounded = boom
     out = dm._run_action_hygiene()
-    assert called == [] and out["owner_repair"] == "embedder_failed"
+    assert calls[0]["skip_comparison"] == "embedder_failed"
+    assert out["owner_repair"] == "embedder_failed"
     assert dm._last_action_hygiene is None
+
+
+def test_owner_repair_backs_off_a_failing_factory(monkeypatch, caplog):
+    """M-N1: a factory raising on every call is called once per backoff step
+    (60 s doubling to a 3600 s ceiling), one WARNING per call, never per tick;
+    a success resets the backoff."""
+    import logging
+    calls = _capture(monkeypatch)
+    dm = _hygiene_daemon(_QuietStore())
+    clock = {"t": 1000.0}
+    dm._clock = lambda: clock["t"]
+    built = []
+    state = {"fail": True}
+
+    def bounded(timeout=None):
+        built.append(clock["t"])
+        if state["fail"]:
+            raise RuntimeError("no model")
+        return object()
+    dm._embedder_factory = lambda: None
+    dm._embedder_bounded = bounded
+    caplog.set_level(logging.WARNING, logger="mcpbrain.daemon")
+
+    def tick(at):
+        clock["t"] = at
+        return dm._run_owner_action_repair()
+
+    tick(1000.0)
+    for t in (1010.0, 1030.0, 1059.0):               # inside the 60 s backoff
+        assert tick(t)["owner_repair"] == "embedder_failed"
+    assert built == [1000.0]
+    assert len([r for r in caplog.records if "embedder failed" in r.message]) == 1
+    tick(1060.0)                                     # next step: 120 s
+    assert built == [1000.0, 1060.0]
+    tick(1179.0)
+    assert built == [1000.0, 1060.0]
+    tick(1180.0)                                     # 240 s
+    assert dm._owner_repair_backoff_s == 240.0
+    for _ in range(12):                              # doubles to the ceiling
+        tick(clock["t"] + dm._owner_repair_backoff_s)
+    assert dm._owner_repair_backoff_s == 3600.0
+    assert len([r for r in caplog.records if "embedder failed" in r.message]) == len(built)
+    assert all(c["skip_comparison"] == "embedder_failed" for c in calls)
+    state["fail"] = False                            # success resets
+    out = tick(clock["t"] + 3600.0)
+    assert "owner_repair" not in out and dm._owner_repair_backoff_s is None
+    state["fail"] = True
+    tick(clock["t"] + 1.0)
+    assert dm._owner_repair_backoff_s == 60.0
 
 
 def test_owner_repair_reporting_a_skip_keeps_the_tick_due(monkeypatch):

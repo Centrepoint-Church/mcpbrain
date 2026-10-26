@@ -27,8 +27,23 @@ repair_owner_actions heals existing rows on every install with no attended run
    write-time dedupe is pairwise, never transitive): auto_archived with
    resolved_by 'dedup_owner'.
 
-undo_owner_repair reverses both: owner/owner_entity_id restored from the prior
-columns, 'dedup_owner' rows reopened.
+Every changed value is logged to cleanup_log under step LOG_STEP
+('owner_repair'), in the clean-up's own format (owner, owner_entity_id,
+prior_owner, prior_owner_entity_id for canonicalised rows; status, resolved_by,
+resolved_at for archived rows; old and new value). The step is undo-able
+(`mcpbrain clean-ingestion --undo owner_repair --yes`) but is NOT one of
+ingestion_cleanup.STEPS: the clean-up never runs it.
+
+undo_owner_repair restores exactly the logged old values (NULL stays NULL),
+only on rows still holding the logged new value; a drifted row is skipped and
+its log row kept. Rows repaired BEFORE the log existed have no log rows and are
+undone the old way: owner/owner_entity_id restored from the prior columns,
+'dedup_owner' rows reopened. The old way never touches a row that has log rows
+(a drifted row stays as it is).
+
+The comparison needs the model, canonicalising does not: with the model still
+loading or failed (skip_comparison=reason) the rows are still rewritten, the
+comparison is skipped, and the watermark is never moved past uncompared threads.
 
 Bounded and incremental: a watermark (sync_cursors 'action_owner_repair') is
 the highest per-thread newest-open-action id already compared. Each run
@@ -41,6 +56,7 @@ it was (never the weaker lexical rules with a configured model).
 from __future__ import annotations
 
 import difflib
+import json
 import logging
 from collections import defaultdict
 from datetime import datetime, timezone
@@ -52,6 +68,14 @@ log = logging.getLogger("mcpbrain.action_owner")
 CURSOR = "action_owner_repair"
 RESOLVED_BY = "dedup_owner"
 MAX_THREADS = 1000
+LOG_STEP = "owner_repair"
+_OWNER_COLS = ("owner", "owner_entity_id", "prior_owner", "prior_owner_entity_id")
+_ARCHIVE_COLS = ("status", "resolved_by", "resolved_at")
+
+
+def _log(db, aid, column, old, new, stamp) -> None:
+    from mcpbrain import ingestion_cleanup as ic
+    ic.log_change(db, LOG_STEP, "actions", {"id": aid}, column, old, new, stamp)
 
 
 # ---------------------------------------------------------------------------
@@ -176,7 +200,8 @@ def canonicalise(db, oc, *, stamp) -> list[str]:
         return []
     want_eid = oc.entity_id or ""
     rows = db.execute(
-        "SELECT id, owner, owner_entity_id, thread_id FROM actions "
+        "SELECT id, owner, owner_entity_id, prior_owner, prior_owner_entity_id, "
+        "thread_id FROM actions "
         "WHERE status='open' AND COALESCE(trim(owner),'') != ''").fetchall()
     persons = _person_ids(db, {r["owner_entity_id"] for r in rows} - set(oc.ids))
     touched: list[str] = []
@@ -186,12 +211,21 @@ def canonicalise(db, oc, *, stamp) -> list[str]:
             continue
         if owner == oc.name and eid == want_eid:
             continue
-        db.execute(
+        new = {"owner": oc.name, "owner_entity_id": want_eid,
+               "prior_owner": r["prior_owner"] if r["prior_owner"] is not None else owner,
+               "prior_owner_entity_id": (r["prior_owner_entity_id"]
+                                         if r["prior_owner_entity_id"] is not None
+                                         else eid)}
+        cur = db.execute(
             "UPDATE actions SET owner=?, owner_entity_id=?, "
             "prior_owner=COALESCE(prior_owner, ?), "
             "prior_owner_entity_id=COALESCE(prior_owner_entity_id, ?), updated_at=? "
             "WHERE id=? AND status='open'",
             (oc.name, want_eid, owner, eid, stamp, r["id"]))
+        if cur.rowcount:
+            for c in _OWNER_COLS:
+                if r[c] != new[c]:
+                    _log(db, r["id"], c, r[c], new[c], stamp)
         touched.append(r["thread_id"] or "")
     return touched
 
@@ -225,11 +259,14 @@ def _vectors(embedder, texts):
 
 def repair_owner_actions(store, owner, *, embedder=None, owner_email: str = "",
                          as_of: str | None = None,
-                         max_threads: int = MAX_THREADS) -> dict:
+                         max_threads: int = MAX_THREADS,
+                         skip_comparison: str | None = None) -> dict:
     """Canonicalise the owner's open actions, then collapse same-thread
     duplicates. Returns {'canonicalised': n, 'deduped': n, 'threads': n
     compared}, plus 'skipped': 'embedder_failed' when the model failed (the
-    comparison is then left for the next run). embedder=None: lexical rules."""
+    comparison is then left for the next run). embedder=None: lexical rules.
+    skip_comparison=reason (the model is loading / failed): canonicalise only,
+    return skipped=reason; the watermark is only ever pulled back."""
     now = (datetime.now(timezone.utc) if as_of is None
            else datetime.fromisoformat(as_of.replace("Z", "+00:00")))
     stamp = now.strftime("%Y-%m-%dT%H:%M:%SZ")
@@ -249,6 +286,12 @@ def repair_owner_actions(store, owner, *, embedder=None, owner_email: str = "",
             back = _thread_max_ids(db, touched)
             if back:
                 wm = min(wm, min(back.values()) - 1)
+
+    if skip_comparison:
+        if wm != start_wm:
+            store.set_cursor(CURSOR, str(wm))
+        return {"canonicalised": len(touched), "deduped": 0, "threads": 0,
+                "skipped": skip_comparison}
 
     # 2. which threads changed since the watermark (oldest first, bounded),
     # read in ONE read transaction so the page and the watermark agree.
@@ -302,10 +345,18 @@ def repair_owner_actions(store, owner, *, embedder=None, owner_email: str = "",
         if drop:
             with store._connect(write=True) as db:
                 for aid in drop:
-                    deduped += db.execute(
+                    old = db.execute(
+                        "SELECT status, resolved_by, resolved_at FROM actions "
+                        "WHERE id=?", (aid,)).fetchone()
+                    n = db.execute(
                         "UPDATE actions SET status='auto_archived', resolved_by=?, "
                         "resolved_at=?, updated_at=? WHERE id=? AND status='open'",
                         (RESOLVED_BY, stamp, stamp, aid)).rowcount
+                    if n:
+                        for c, v in zip(_ARCHIVE_COLS,
+                                        ("auto_archived", RESOLVED_BY, stamp)):
+                            _log(db, aid, c, old[c], v, stamp)
+                    deduped += n
 
     if new_wm != start_wm:
         store.set_cursor(CURSOR, str(new_wm))
@@ -316,24 +367,51 @@ def repair_owner_actions(store, owner, *, embedder=None, owner_email: str = "",
 
 
 def undo_owner_repair(store, *, as_of: str | None = None) -> dict:
-    """Reverse repair_owner_actions: restore owner / owner_entity_id from
-    prior_owner / prior_owner_entity_id on every row the repair canonicalised
-    (prior_owner_entity_id is set only by the repair) and clear both prior
-    columns; reopen every 'dedup_owner' row. The watermark is reset, so the
-    next daily run would apply the repair again -- turn the cadence off first
-    if that is not wanted. Returns {'restored': n, 'reopened': n}."""
+    """Reverse repair_owner_actions. Logged changes (cleanup_log step
+    'owner_repair') are restored exactly, through the clean-up's own `undo`:
+    old values back (NULL stays NULL), only on rows still holding the value the
+    repair wrote; a drifted row is skipped and its log row kept. Rows repaired
+    BEFORE the log existed have no log rows and are undone the old way (owner /
+    owner_entity_id from the prior columns, 'dedup_owner' rows reopened) -- but
+    never a row that has log rows. The watermark is reset, so the next daily run
+    would apply the repair again -- turn the cadence off first if that is not
+    wanted. Returns {'restored': rows, 'reopened': rows, 'drifted': values}."""
+    from mcpbrain import ingestion_cleanup as ic
     now = (datetime.now(timezone.utc) if as_of is None
            else datetime.fromisoformat(as_of.replace("Z", "+00:00")))
     stamp = now.strftime("%Y-%m-%dT%H:%M:%SZ")
+    with store._connect() as db:
+        logged = [(r["id"], json.loads(r["row_key"])["id"], r["column_name"])
+                  for r in db.execute(
+                      "SELECT id, row_key, column_name FROM cleanup_log WHERE step=?",
+                      (LOG_STEP,))]
+    _restored, drifted = ic.undo(store, LOG_STEP, dry=False) if logged else (0, 0)
+    with store._connect() as db:
+        left = {r[0] for r in db.execute(
+            "SELECT id FROM cleanup_log WHERE step=?", (LOG_STEP,))}
+    done = [(aid, col) for lid, aid, col in logged if lid not in left]
+    logged_ids = sorted({aid for _l, aid, _c in logged})
+    restored = {aid for aid, col in done if col in _OWNER_COLS}
+    reopened = {aid for aid, col in done if col == "status"}
+    skip = ",".join("?" * len(logged_ids))
+    not_logged = f" AND id NOT IN ({skip})" if logged_ids else ""
     with store._connect(write=True) as db:
-        restored = db.execute(
+        restored |= {r[0] for r in db.execute(
+            "SELECT id FROM actions WHERE prior_owner_entity_id IS NOT NULL"
+            + not_logged, logged_ids)}
+        db.execute(
             "UPDATE actions SET owner=COALESCE(prior_owner, owner), "
             "owner_entity_id=prior_owner_entity_id, prior_owner=NULL, "
             "prior_owner_entity_id=NULL, updated_at=? "
-            "WHERE prior_owner_entity_id IS NOT NULL", (stamp,)).rowcount
-        reopened = db.execute(
+            "WHERE prior_owner_entity_id IS NOT NULL" + not_logged,
+            (stamp, *logged_ids))
+        reopened |= {r[0] for r in db.execute(
+            "SELECT id FROM actions WHERE status='auto_archived' AND resolved_by=?"
+            + not_logged, (RESOLVED_BY, *logged_ids))}
+        db.execute(
             "UPDATE actions SET status='open', resolved_by='', resolved_at='', "
-            "updated_at=? WHERE status='auto_archived' AND resolved_by=?",
-            (stamp, RESOLVED_BY)).rowcount
+            "updated_at=? WHERE status='auto_archived' AND resolved_by=?"
+            + not_logged, (stamp, RESOLVED_BY, *logged_ids))
         db.execute("DELETE FROM sync_cursors WHERE source=?", (CURSOR,))
-    return {"restored": restored, "reopened": reopened}
+    return {"restored": len(restored), "reopened": len(reopened),
+            "drifted": drifted}

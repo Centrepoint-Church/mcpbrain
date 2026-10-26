@@ -4031,34 +4031,57 @@ class Daemon:
             self._last_action_hygiene = now
         return summary
 
+    # A model build that keeps failing is retried on a doubling backoff (never
+    # every tick): 60 s up to an hour, reset by the first success.
+    _OWNER_REPAIR_BACKOFF_FIRST_S = 60.0
+    _OWNER_REPAIR_BACKOFF_MAX_S = 3600.0
+
     def _run_owner_action_repair(self) -> dict:
         """The owner-split repair (action_owner.repair_owner_actions): one
         owner identity on every open action, then owner-split duplicates within
         a source collapsed. Daily, idempotent and incremental, so every install
         heals with no attended run. Its own try: a failure here never loses the
-        sweeps' result. The embedder is taken bounded (never parks the tick); a
-        model still loading, a build that fails, or a model that fails mid-run
-        skips the comparison ({'owner_repair': reason}) rather than comparing
+        sweeps' result. Canonicalising needs no model, so it ALWAYS runs; only
+        the same-thread comparison needs one. The embedder is taken bounded
+        (never parks the tick); a model still loading, a build that fails (the
+        factory is then not called again until its backoff expires, one WARNING
+        per failure), or a model that fails mid-run skips the comparison
+        ({'owner_repair': reason}, the cadence stays due) rather than comparing
         with the weaker lexical rules and moving the watermark past those
         threads. Only an install with no model configured at all is lexical."""
         from mcpbrain import action_owner
         from mcpbrain import config as _config
         from mcpbrain import graph_write as gw
         emb = None
+        skip = None
         if getattr(self, "_embedder_factory", None) is not None:
-            try:
-                emb = self._embedder_bounded()
-            except Exception as exc:  # noqa: BLE001 — skip, retried next tick
-                log.warning("action_owner_repair: embedder failed (%s); "
-                            "retrying next tick", exc)
-                return {"owner_repair": "embedder_failed"}
-            if emb is None:
-                return {"owner_repair": "embedder_loading"}
+            now = self._clock()
+            retry_at = getattr(self, "_owner_repair_retry_at", None)
+            if retry_at is not None and now < retry_at:
+                skip = "embedder_failed"
+            else:
+                try:
+                    emb = self._embedder_bounded()
+                except Exception as exc:  # noqa: BLE001 — back off, retried later
+                    prev = getattr(self, "_owner_repair_backoff_s", None)
+                    step = (self._OWNER_REPAIR_BACKOFF_FIRST_S if not prev else
+                            min(prev * 2, self._OWNER_REPAIR_BACKOFF_MAX_S))
+                    self._owner_repair_backoff_s = step
+                    self._owner_repair_retry_at = now + step
+                    log.warning("action_owner_repair: embedder failed (%s); "
+                                "comparison retried in %ds", exc, int(step))
+                    skip = "embedder_failed"
+                else:
+                    if emb is not None:
+                        self._owner_repair_backoff_s = None
+                        self._owner_repair_retry_at = None
+                    else:
+                        skip = "embedder_loading"
         try:
             home = str(app_dir())
             got = action_owner.repair_owner_actions(
                 self._store, gw.owner_identity_from_config(home), embedder=emb,
-                owner_email=_config.owner_email(home))
+                owner_email=_config.owner_email(home), skip_comparison=skip)
         except Exception as exc:  # noqa: BLE001 — a sweep must never kill the cycle
             log.warning("action_owner_repair failed: %s", exc, exc_info=True)
             return {"owner_repair_error": str(exc)}
