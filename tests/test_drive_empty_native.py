@@ -134,3 +134,37 @@ def test_reflow_routes_emptied_native_and_owner_no_longer_held(tmp_path, monkeyp
     assert ctx.handle({"source": "reflow:drive", "ref_id": "F", "attempts": 0}) is None
     assert s.owner_chunks(["gdrive-F-"]) == []
     assert s.reflow_live_counts(50) == (0, 0)
+
+
+def test_reflow_routes_shared_drive_owner_through_the_cycle_handler(tmp_path, monkeypatch):
+    """M4/Task 4: a shared-drive owner (chunks stamped drive_id) on a
+    `reflow:drive` row is routed to the cycle's own "drive" handler as
+    `drive:<id>`, which dispatches to handle_shared_drive_item; the emptied
+    native file loses its chunks and the owner is no longer held."""
+    from datetime import datetime, timezone
+    s = _store(tmp_path)
+    _seed(s, drive_id="D1")
+    with s._connect(write=True) as db:
+        db.execute("INSERT OR REPLACE INTO reflow_owners(owner, source, at, chunks_new,"
+                   " carried, reenrich, outcome) VALUES('F','drive',?,0,0,0,'ordinary')",
+                   (datetime.now(timezone.utc).isoformat(),))
+    assert s.reflow_live_counts(50) == (1, 1)
+    _fetch(monkeypatch, drive.Content(text=""))
+    svc, fs, seen = _Svc(GDOC, NEW), LocalDirFleetStorage(tmp_path / "fs"), []
+
+    def drive_handler(it):            # the shape sync/__init__ registers
+        seen.append(it["source"])
+        assert ":" in it["source"]
+        return drive.handle_shared_drive_item(
+            svc, s, it, fleet_storage=fs, pin=PIN,
+            drive_id=it["source"].split(":", 1)[1])
+
+    class _Emb:
+        def embed_passages(self, xs):
+            return [[0.1, 0.2, 0.3, 0.4] for _ in xs]
+    ctx = ReflowContext(s, _Emb(), str(tmp_path), drive_service=svc,
+                        normal_handlers={"drive": drive_handler})
+    assert ctx.handle({"source": "reflow:drive", "ref_id": "F", "attempts": 0}) is None
+    assert seen == ["drive:D1"]
+    assert s.owner_chunks(["gdrive-F-"]) == []
+    assert s.reflow_live_counts(50) == (0, 0)

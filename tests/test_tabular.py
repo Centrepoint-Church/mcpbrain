@@ -479,3 +479,32 @@ def test_wide_row_between_normal_rows_keeps_row_ranges():
              if m["table_role"] == "rows"]
     assert spans[0] == (1, 1) and spans[-1] == (3, 3)
     assert all(s == (2, 2) for s in spans[1:-1])
+
+
+def test_wide_numeric_sheet_spills_totals_into_continuation_chunks():
+    """M4/Task 2: a sheet with many numeric columns has more totals than half
+    the first summary chunk holds; the rest go to "— totals cont." chunks,
+    every chunk within budget and every total listed exactly once."""
+    n = 60
+    headers = [f"Programme budget line {i:02d} amount " + "y" * 20 for i in range(n)]
+    rows = [[f"{(r + 1) * 12.5 + c:.2f}" for c in range(n)] for r in range(4)]
+    t = tabular.Table(sheet="Budget", header=headers, rows=rows, rows_total=4)
+    chunks = tabular.render_chunks([t], file_name="Budget.xlsx",
+                                   max_chars=tabular.CHUNK_CHARS)
+    assert all(len(text) <= tabular.CHUNK_CHARS for text, _ in chunks)
+    summ = [(x, m) for x, m in chunks if m["table_role"] == "summary"]
+    tot_cont = [x for x, _ in summ if x.splitlines()[0].endswith("— totals cont.")]
+    assert tot_cont, "expected a totals continuation chunk"
+    assert "Totals:" in summ[0][0]
+    for text in tot_cont:
+        assert text.splitlines()[0] == "### Sheet summary: Budget (Budget.xlsx) — totals cont."
+        assert text.splitlines()[1].startswith("Totals: ")
+    totals = []
+    for text, _ in summ:
+        for line in text.splitlines():
+            if line.startswith("Totals: "):
+                totals.extend(line[len("Totals: "):].split(", "))
+    assert [e.rsplit(" ", 1)[0] for e in totals] == headers
+    expect = [f"{sum((r + 1) * 12.5 + c for r in range(4)):.2f}" for c in range(n)]
+    assert [e.rsplit(" ", 1)[1] for e in totals] == expect
+    assert [m["summary_part"] for _, m in summ] == list(range(1, len(summ) + 1))
