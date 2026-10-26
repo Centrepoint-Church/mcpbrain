@@ -197,21 +197,29 @@ def test_heal_waits_for_the_seed_gates_then_runs_once(tmp_path, monkeypatch):
     s = _seed_heal_store(tmp_path)
     d = _daemon(tmp_path, monkeypatch, s)
 
-    # Gated (no recent backup): nothing happens and no marker.
+    # M3: no recent backup. The re-embed reset (non-destructive) runs under
+    # the kill switch alone -- every over-window chunk, target owners included
+    # -- and the marker remembers it; the reflow ENQUEUE waits for the gates.
     assert _tick(d) == {"reflow_seed": "no_recent_backup"}
-    assert _heal(s) is None
     assert _queued(s) == []
-    assert _embedded(s, "gdrive-T-0") == 1
-
-    # Open: enqueue the targets (epoch modified_at, like the seed), reset every
-    # over-window chunk -- target owners included -- and write the marker.
-    _open(tmp_path)
-    _tick(d)
-    assert _queued(s) == [("reflow:drive", "T", "1970-01-01T00:00:00"),
-                          ("reflow:gmail", "M1", "1970-01-01T00:00:00")]
     assert _embedded(s, "gdrive-T-0") == 0
     assert _embedded(s, "gdrive-P-0") == 0
     assert _embedded(s, "gdrive-Q-0") == 1
+    rec = _heal(s)
+    assert rec["state"] == "enqueuing" and rec["reembed"] == 2
+    assert rec["remaining"] == {"reflow:gmail": ["M1"], "reflow:drive": ["T"]}
+    assert (rec["gmail"], rec["drive"]) == (0, 0)
+
+    # Open: enqueue the targets (epoch modified_at, like the seed) without a
+    # second scan or reset.
+    _open(tmp_path)
+    with s._connect(write=True) as db:
+        db.execute("UPDATE chunks SET embedded=1")
+    _no_scans(monkeypatch)
+    _tick(d)
+    assert _queued(s) == [("reflow:drive", "T", "1970-01-01T00:00:00"),
+                          ("reflow:gmail", "M1", "1970-01-01T00:00:00")]
+    assert _embedded(s, "gdrive-T-0") == 1
     rec = _heal(s)
     assert rec["state"] == "done" and rec["at"] and "remaining" not in rec
     assert (rec["gmail"], rec["drive"], rec["skipped"], rec["reembed"]) == (1, 1, 0, 2)
@@ -320,7 +328,29 @@ def test_heal_does_not_run_when_disabled_or_halted(tmp_path, monkeypatch):
     monkeypatch.setattr(dmod.config, "reflow_enabled", lambda home: True)
     s.set_cursor("reflow:halted", "reflow F: 1 dangling reference(s)")
     assert _tick(d) == {"reflow_seed": "halted"}
-    assert _heal(s) is None
+    # Halted: the non-destructive reset still runs; nothing is enqueued.
+    assert _heal(s)["state"] == "enqueuing" and _queued(s) == []
+    assert _embedded(s, "gdrive-P-0") == 0
+
+
+def test_heal_enqueues_only_sources_whose_service_is_up_now(tmp_path, monkeypatch):
+    """M1: a source workable but whose service failed to build this tick keeps
+    its owners in `remaining` (not skipped); they are enqueued once it is up."""
+    s = _seed_heal_store(tmp_path)
+    d = _daemon(tmp_path, monkeypatch, s)
+    both = {"reflow:drive", "reflow:gmail"}
+    d._reflow_source_sets = lambda home: ({"reflow:drive"}, both)
+    _open(tmp_path)
+    _tick(d)
+    assert _queued(s) == [("reflow:drive", "T", "1970-01-01T00:00:00")]
+    rec = _heal(s)
+    assert rec["state"] == "enqueuing" and rec["remaining"] == {"reflow:gmail": ["M1"]}
+    assert (rec["gmail"], rec["drive"], rec["skipped"]) == (0, 1, 0)
+    d._reflow_source_sets = lambda home: (both, both)
+    _tick(d)
+    assert ("reflow:gmail", "M1", "1970-01-01T00:00:00") in _queued(s)
+    rec = _heal(s)
+    assert rec["state"] == "done" and (rec["gmail"], rec["skipped"]) == (1, 0)
 
 
 # --- doctor -------------------------------------------------------------------

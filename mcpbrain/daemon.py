@@ -4024,11 +4024,18 @@ class Daemon:
             log.info("action_hygiene: archived=%d deduped=%d",
                      summary["actions_archived"], summary["actions_deduped"])
         summary.update(self._run_owner_action_repair())
-        # A skipped owner repair (model loading / failed) does not use up the
-        # day: the pass stays due and retries on the next tick (both sweeps
-        # are idempotent, so re-running them costs nothing).
-        if "owner_repair" not in summary:
+        # A skipped owner repair does not use up the day. A model still
+        # loading retries on the next tick (both sweeps are idempotent). A
+        # model build that FAILED retries when its backoff expires, not every
+        # tick: the pass is made due again exactly at that retry time, so a
+        # permanently failing embedder cannot run the sweeps and canonicalise
+        # every 60 s forever.
+        skipped = summary.get("owner_repair")
+        retry_at = getattr(self, "_owner_repair_retry_at", None)
+        if skipped is None:
             self._last_action_hygiene = now
+        elif skipped == "embedder_failed" and retry_at is not None:
+            self._last_action_hygiene = retry_at - self._action_hygiene_interval_s
         return summary
 
     # A model build that keeps failing is retried on a doubling backoff (never
@@ -4249,6 +4256,10 @@ class Daemon:
     def _reflow_seed_once(self, home, now: set[str], workable: set[str]) -> dict:
         if not config.reflow_enabled(home):
             return {"reflow_seed": "disabled"}
+        # The heal's re-embed reset only sets embedded=0 (non-destructive), so
+        # it runs under the kill switch alone; its reflow ENQUEUE (below) keeps
+        # every seed gate.
+        self._oversize_heal_reset(home)
         if self._store.get_cursor("reflow:halted"):
             return {"reflow_seed": "halted"}
         from mcpbrain.probes import last_backup_success
@@ -4266,7 +4277,7 @@ class Daemon:
             if dropped:
                 log.info("reflow_seed: freed %d queued row(s) of unavailable source(s) %s",
                          dropped, sorted(gone))
-            self._oversize_heal_once(home, workable)
+            self._oversize_heal_once(home, now, workable)
             # Size the window on DUE rows only: a row deferred with a delay
             # is not work, and counting it lets a long outage stall the rest.
             room = REFLOW_WINDOW - self._store.reflow_due_count()
@@ -4298,51 +4309,72 @@ class Daemon:
             log.warning("reflow_seed failed: %s", exc, exc_info=True)
             return {"reflow_seed": False, "error": str(exc)}
 
-    def _oversize_heal_once(self, home, workable: set[str]) -> None:
-        """One-shot heal of chunks written before the oversize/CSS fixes, run
-        inside the reflow seed AFTER its gates (kill switch, halt, backup
-        < 24 h). Never raises: a failure is logged and the marker is left as
-        it was, so the seed itself carries on and the heal retries next tick.
+    def _oversize_heal_reset(self, home) -> None:
+        """First step of the one-shot heal of chunks written before the
+        oversize/CSS fixes, run by the reflow seed under its kill switch ONLY
+        (not the halt or backup gates): resetting embedded=0 is
+        non-destructive -- index_pending re-embeds the chunk across windows.
+        Never raises: a failure is logged, no marker is written, and it
+        retries next tick.
 
-        State lives in the `oversize_heal` meta marker:
-          absent      -> first open tick: compute the targets ONCE
-                         (Store.oversize_heal_targets: CSS-polluted Gmail
-                         bodies, over-window Drive tables), reset embedded=0 on
-                         every chunk whose embed passage exceeds one window
-                         (target owners included: a reflow that ends
-                         `source_gone` keeps its old chunks), and record
-                         state "enqueuing" with the owners still to enqueue;
+        With no `oversize_heal` meta marker it computes the reflow targets ONCE
+        (Store.oversize_heal_targets: CSS-polluted Gmail bodies, over-window
+        Drive tables), resets embedded=0 on every chunk whose embed passage
+        exceeds one window (target owners included: a reflow that ends
+        `source_gone` keeps its old chunks), and records state "enqueuing"
+        with the owners still to enqueue. Any later tick finds the marker and
+        does nothing here."""
+        try:
+            if self._store.get_meta("oversize_heal"):
+                return
+            import datetime as _dt
+            from mcpbrain.index import EMBED_WINDOW_CHARS
+            targets = self._store.oversize_heal_targets(window=EMBED_WINDOW_CHARS)
+            reembed = self._store.reset_embedding_for_oversize(
+                EMBED_WINDOW_CHARS, use_prefix=config.contextual_retrieval_enabled(home),
+                bulk_section=self._cycle_bulk_section)
+            rec = {"state": "enqueuing", "gmail": 0, "drive": 0, "skipped": 0,
+                   "reembed": reembed, "remaining": targets,
+                   "at": _dt.datetime.now(_dt.timezone.utc).isoformat()}
+            self._store.set_meta("oversize_heal", json.dumps(rec))
+            log.info("oversize_heal: %d gmail / %d drive owner(s) to reflow, "
+                     "reset %d chunk(s) for windowed re-embed",
+                     len(targets.get("reflow:gmail", [])),
+                     len(targets.get("reflow:drive", [])), reembed)
+        except Exception as exc:  # noqa: BLE001 — must never stop the seed
+            log.warning("oversize_heal failed (will retry next tick): %s", exc)
+
+    def _oversize_heal_once(self, home, now: set[str], workable: set[str]) -> None:
+        """Enqueue step of the one-shot heal, run inside the reflow seed AFTER
+        its gates (kill switch, halt, backup < 24 h). Never raises: a failure
+        is logged and the marker is left as it was, so the seed itself carries
+        on and the heal retries next tick.
+
+        State lives in the `oversize_heal` meta marker (written by
+        _oversize_heal_reset):
+          absent      -> the reset has not run (or failed): nothing to enqueue;
           "enqueuing" -> each open tick enqueues at most the seed's free room
                          (REFLOW_WINDOW less the due rows), so the heal never
-                         runs further ahead of a backup than the seed may;
+                         runs further ahead of a backup than the seed may, and
+                         only for sources in `now` (service built right now) --
+                         a source workable but down this tick keeps its owners
+                         in `remaining` for a later tick;
           "done"      -> nothing left; one meta read per tick, no scans.
         Owners of a source not in `workable` (this install cannot work it;
         the next seed would only free its rows) are dropped from the remainder
         and counted in `skipped`, so such a source cannot hold the heal open
         forever. The windowed re-embed still covers their chunks."""
         try:
-            self._oversize_heal_step(home, workable)
+            self._oversize_heal_step(home, now, workable)
         except Exception as exc:  # noqa: BLE001 — must never stop the seed
             log.warning("oversize_heal failed (will retry next tick): %s", exc)
 
-    def _oversize_heal_step(self, home, workable: set[str]) -> None:
+    def _oversize_heal_step(self, home, now: set[str], workable: set[str]) -> None:
         import datetime as _dt
-        from mcpbrain.index import EMBED_WINDOW_CHARS
         raw = self._store.get_meta("oversize_heal")
         rec = json.loads(raw) if raw else None
-        if rec is not None and rec.get("state") == "done":
+        if rec is None or rec.get("state") == "done":
             return
-        if rec is None:
-            targets = self._store.oversize_heal_targets(window=EMBED_WINDOW_CHARS)
-            reembed = self._store.reset_embedding_for_oversize(
-                EMBED_WINDOW_CHARS, use_prefix=config.contextual_retrieval_enabled(home),
-                bulk_section=self._cycle_bulk_section)
-            rec = {"state": "enqueuing", "gmail": 0, "drive": 0, "skipped": 0,
-                   "reembed": reembed, "remaining": targets}
-            log.info("oversize_heal: %d gmail / %d drive owner(s) to reflow, "
-                     "reset %d chunk(s) for windowed re-embed",
-                     len(targets.get("reflow:gmail", [])),
-                     len(targets.get("reflow:drive", [])), reembed)
         remaining: dict[str, list[str]] = rec.get("remaining") or {}
         for src in list(remaining):
             if src not in workable:
@@ -4352,6 +4384,8 @@ class Daemon:
         for src in sorted(remaining):
             if room <= 0:
                 break
+            if src not in now:
+                continue
             take, remaining[src] = remaining[src][:room], remaining[src][room:]
             room -= len(take)
             n = self._store.enqueue_items(

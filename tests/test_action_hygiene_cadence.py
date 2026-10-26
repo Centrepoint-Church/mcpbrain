@@ -162,7 +162,36 @@ def test_owner_repair_embedder_build_error_still_canonicalises(monkeypatch):
     out = dm._run_action_hygiene()
     assert calls[0]["skip_comparison"] == "embedder_failed"
     assert out["owner_repair"] == "embedder_failed"
-    assert dm._last_action_hygiene is None
+    # Due again exactly when the embedder's backoff expires (1000 + 60 s).
+    assert dm._last_action_hygiene == 1060.0 - dm._action_hygiene_interval_s
+
+
+def test_failing_embedder_runs_the_pass_at_the_backoff_not_every_tick(monkeypatch):
+    """M2: with a permanently failing embedder the sweeps and canonicalise run
+    once per backoff step, not on every 60 s tick."""
+    calls = _capture(monkeypatch)
+    sweeps = []
+
+    class _Counting(_QuietStore):
+        def archive_stale_actions(self, **kw):
+            sweeps.append(1)
+            return {"archived": 0}
+    dm = _hygiene_daemon(_Counting())
+    clock = {"t": 1000.0}
+    dm._clock = lambda: clock["t"]
+    dm._embedder_factory = lambda: object()
+
+    def boom(timeout=None):
+        raise RuntimeError("no model")
+    dm._embedder_bounded = boom
+    ran = []
+    for t in range(1000, 1300, 10):                  # a tick every 10 s for 5 min
+        clock["t"] = float(t)
+        if dm._run_action_hygiene() is not None:
+            ran.append(t)
+    # backoff 60 -> 120 -> 240: runs at 1000, 1060, 1180 only.
+    assert ran == [1000, 1060, 1180]
+    assert len(sweeps) == len(calls) == 3
 
 
 def test_owner_repair_backs_off_a_failing_factory(monkeypatch, caplog):

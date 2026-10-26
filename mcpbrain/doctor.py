@@ -481,7 +481,7 @@ def run_doctor(home, *, conns=None, repairs=None, reprobe=None, platform=None,
     # 2,000 chars). They are embedded across windows (embed_chunk_passages), so
     # no tail is lost -- but only once re-embedded: a chunk embedded before
     # that change keeps its truncated vector until the one-shot oversize heal
-    # (daemon._oversize_heal_once, meta `oversize_heal`) resets it. Measured on
+    # (daemon._oversize_heal_reset, meta `oversize_heal`) resets it. Measured on
     # the PREFIXED passage (embed.passage_over_window via
     # Store.count_passages_over_window), the same measure the heal and the
     # embedder act on, so a chunk that only crosses the window with its
