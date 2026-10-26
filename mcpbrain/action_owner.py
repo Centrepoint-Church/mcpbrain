@@ -369,8 +369,13 @@ def repair_owner_actions(store, owner, *, embedder=None, owner_email: str = "",
 def undo_owner_repair(store, *, as_of: str | None = None) -> dict:
     """Reverse repair_owner_actions. Logged changes (cleanup_log step
     'owner_repair') are restored exactly, through the clean-up's own `undo`:
-    old values back (NULL stays NULL), only on rows still holding the value the
-    repair wrote; a drifted row is skipped and its log row kept. Rows repaired
+    old values back (NULL stays NULL). Drift is judged per ACTION ROW, by
+    column group: if any logged owner column (owner, owner_entity_id,
+    prior_owner, prior_owner_entity_id) of a row no longer holds the value the
+    repair wrote, none of that row's owner columns is restored and all their
+    log rows are kept (each counted as drifted) -- half an owner restored
+    would pair an old name with a newer id. The dedup columns (status,
+    resolved_by, resolved_at) are judged the same way, as their own group. Rows repaired
     BEFORE the log existed have no log rows and are undone the old way (owner /
     owner_entity_id from the prior columns, 'dedup_owner' rows reopened) -- but
     never a row that has log rows. The watermark is reset, so the next daily run
@@ -385,7 +390,9 @@ def undo_owner_repair(store, *, as_of: str | None = None) -> dict:
                   for r in db.execute(
                       "SELECT id, row_key, column_name FROM cleanup_log WHERE step=?",
                       (LOG_STEP,))]
-    _restored, drifted = ic.undo(store, LOG_STEP, dry=False) if logged else (0, 0)
+    _restored, drifted = (ic.undo(store, LOG_STEP, dry=False,
+                                  groups=(_OWNER_COLS, _ARCHIVE_COLS))
+                          if logged else (0, 0))
     with store._connect() as db:
         left = {r[0] for r in db.execute(
             "SELECT id FROM cleanup_log WHERE step=?", (LOG_STEP,))}

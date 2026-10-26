@@ -1026,21 +1026,29 @@ def run(store: Store, home, steps, *, dry: bool, embedder=None) -> dict:
     return out
 
 
-def undo(store: Store, step: str, *, dry: bool) -> tuple[int, int]:
+def undo(store: Store, step: str, *, dry: bool,
+         groups: tuple[tuple[str, ...], ...] = ()) -> tuple[int, int]:
     """Restore every value `step` logged (newest first) and delete the rows it
     inserted, then delete those log rows. A value is restored only while the
     row still holds the value the step wrote (new_value): a row changed since
     (by the daemon, or by a LATER step — undo steps in reverse step order) is
     left alone, its log row kept, and counted as drifted. Returns
-    (restored, drifted); a second undo finds nothing to restore."""
+    (restored, drifted); a second undo finds nothing to restore.
+
+    `groups` names columns judged TOGETHER per row: when any logged column of
+    a group no longer holds the value the step last wrote to it, none of that
+    row's columns in the group is restored and all their log rows are kept
+    (each counted as drifted) -- restoring half of a set of columns that only
+    make sense together would leave the row in a state no one wrote."""
     with store._connect(write=not dry) as db:
         rows = db.execute("SELECT id, table_name, row_key, column_name, old_value, "
                           "new_value FROM cleanup_log WHERE step=? ORDER BY id DESC",
                           (step,)).fetchall()
         if dry:
             return len(rows), 0
+        group_of = {c: i for i, g in enumerate(groups) for c in g}
         cols_of: dict[str, set] = {}
-        done, drifted = [], 0
+        plan = []  # (log row, table, key, where, current value or _GONE)
         for r in rows:
             table = r["table_name"]
             if table not in _KEYS:
@@ -1052,19 +1060,45 @@ def undo(store: Store, step: str, *, dry: bool) -> tuple[int, int]:
                 raise ValueError(f"cleanup_log row {r['id']}: bad key {key!r}")
             where = " AND ".join(f"{k}=?" for k in key)
             col = r["column_name"]
+            cur = None
+            if col != _INSERT:
+                if col not in cols_of[table]:
+                    raise ValueError(f"cleanup_log row {r['id']}: unknown column {col!r}")
+                cur = db.execute(f"SELECT {col} FROM {table} WHERE {where}",
+                                 tuple(key.values())).fetchone()
+            plan.append((r, table, key, where, cur))
+        # A group drifts when the NEWEST log row of any of its columns (rows
+        # are newest first) no longer matches the row's current value.
+        seen: set = set()
+        drifted_groups: set = set()
+        for r, table, key, _where, cur in plan:
+            col = r["column_name"]
+            if col not in group_of or cur is None:
+                continue
+            gk = (table, tuple(sorted(key.items())), group_of[col])
+            if (gk, col) in seen:
+                continue
+            seen.add((gk, col))
+            if r["new_value"] is not None and cur[0] != json.loads(r["new_value"]):
+                drifted_groups.add(gk)
+        done, drifted = [], 0
+        for r, table, key, where, cur in plan:
+            col = r["column_name"]
             if col == _INSERT:
                 db.execute(f"DELETE FROM {table} WHERE {where}",  # admin-delete-ok
                            tuple(key.values()))
                 done.append(r["id"])
                 continue
-            if col not in cols_of[table]:
-                raise ValueError(f"cleanup_log row {r['id']}: unknown column {col!r}")
-            cur = db.execute(f"SELECT {col} FROM {table} WHERE {where}",
-                             tuple(key.values())).fetchone()
             if cur is None:
                 done.append(r["id"])               # row gone: nothing to restore
                 continue
-            if r["new_value"] is not None and cur[0] != json.loads(r["new_value"]):
+            if col in group_of and (table, tuple(sorted(key.items())),
+                                    group_of[col]) in drifted_groups:
+                drifted += 1
+                continue
+            now = db.execute(f"SELECT {col} FROM {table} WHERE {where}",
+                             tuple(key.values())).fetchone()
+            if r["new_value"] is not None and now[0] != json.loads(r["new_value"]):
                 drifted += 1
                 continue
             db.execute(f"UPDATE {table} SET {col}=? WHERE {where}",

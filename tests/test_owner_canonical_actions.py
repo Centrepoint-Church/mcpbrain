@@ -600,16 +600,41 @@ def test_undo_restores_exact_logged_values_and_keeps_drifted_rows(s):
     assert _get(s, a)["prior_owner"] == "Claude"
     with s._connect(write=True) as db:                  # c drifts after the repair
         db.execute("UPDATE actions SET owner_entity_id='dana-smith' WHERE id=?", (c,))
+    logged_c = {r["column_name"] for r in _log_rows(s)
+                if json.loads(r["row_key"])["id"] == c}
     out = ao.undo_owner_repair(s)
-    assert out["drifted"] == 1
+    assert out["drifted"] == len(logged_c) == 3       # the whole owner group of c
     ra, rb, rc = _get(s, a), _get(s, b), _get(s, c)
     assert (ra["owner"], ra["owner_entity_id"], ra["prior_owner"],
             ra["prior_owner_entity_id"]) == ("Dana Okafor", REAL, "Claude", None)
     assert rb["owner_entity_id"] is None and rb["prior_owner"] is None   # NULL stays NULL
-    assert rc["owner_entity_id"] == "dana-smith"      # the drifted value is kept
+    # c is left entirely as-is: the drifted id AND the prior_* the repair wrote.
+    assert (rc["owner_entity_id"], rc["prior_owner"], rc["prior_owner_entity_id"]) == \
+        ("dana-smith", "Dana", DERIVED)
     left = _log_rows(s)
     assert {(json.loads(r["row_key"])["id"], r["column_name"]) for r in left} == \
-        {(c, "owner_entity_id")}                      # drifted value's log row kept
+        {(c, col) for col in logged_c}                # every c log row kept
+
+
+def test_undo_mixed_drift_leaves_the_whole_owner_group(s):
+    """I3: owner AND owner_entity_id changed by the repair, then only
+    owner_entity_id edited: restoring `owner` alone would pair the old name
+    with the newer id, so the row's owner columns are left entirely as-is."""
+    _owner_node(s)
+    a = _add(s, "One", "Dana Okafor", DERIVED, thread="t-1")
+    _repair(s)
+    after = _get(s, a)
+    logged = {r["column_name"] for r in _log_rows(s)}
+    assert {"owner", "owner_entity_id"} <= logged
+    with s._connect(write=True) as db:
+        db.execute("UPDATE actions SET owner_entity_id='dana-smith' WHERE id=?", (a,))
+    out = ao.undo_owner_repair(s)
+    assert out == {"restored": 0, "reopened": 0, "drifted": len(logged)}
+    now = _get(s, a)
+    assert (now["owner"], now["prior_owner"], now["prior_owner_entity_id"]) == \
+        (after["owner"], after["prior_owner"], after["prior_owner_entity_id"])
+    assert now["owner_entity_id"] == "dana-smith"
+    assert {r["column_name"] for r in _log_rows(s)} == logged
 
 
 def test_undo_still_handles_rows_repaired_before_the_log(s):
@@ -635,3 +660,23 @@ def test_cli_undo_owner_repair_accepts_the_step_and_is_not_a_cleanup_step(s, tmp
     assert rc == 0
     assert _get(s, a)["owner_entity_id"] == DERIVED
     assert ic.read_marker(s).get("state") in (None, "pending")
+
+
+def test_undo_judges_the_dedup_columns_as_one_group(s):
+    _owner_node(s)
+    _add(s, "Add the code of conduct to the student expectations", "Dana", DERIVED,
+         created="2026-05-01")
+    b = _add(s, "Put the conduct code into the student expectations doc",
+             "Dana Okafor", REAL, created="2026-05-02")
+    _repair(s, _Emb(SAME))
+    archived = _get(s, b)
+    assert (archived["status"], archived["resolved_by"]) == ("auto_archived", "dedup_owner")
+    with s._connect(write=True) as db:                  # someone closes it by hand
+        db.execute("UPDATE actions SET status='done' WHERE id=?", (b,))
+    ao.undo_owner_repair(s)
+    now = _get(s, b)
+    assert (now["status"], now["resolved_by"], now["resolved_at"]) == \
+        ("done", "dedup_owner", archived["resolved_at"])
+    assert {r["column_name"] for r in _log_rows(s)
+            if json.loads(r["row_key"])["id"] == b} >= {"status", "resolved_by",
+                                                        "resolved_at"}
