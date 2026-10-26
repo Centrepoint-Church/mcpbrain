@@ -1,7 +1,6 @@
 """Tests for mcpbrain.sync.normalise — pure unit tests, no personal data."""
 
 import base64
-import sys
 
 import pytest
 
@@ -653,7 +652,7 @@ def test_every_gmail_chunk_records_its_document_chunk_count():
 
 # ---------------------------------------------------------------------------
 # strip_html: non-visible content (style/script/head/comments) is dropped on
-# BOTH the bs4 path and the regex fallback.
+# the regex path (the only path; bs4 is not a dependency).
 # ---------------------------------------------------------------------------
 
 _HIDDEN_CASES = [
@@ -668,21 +667,8 @@ _HIDDEN_CASES = [
 ]
 
 
-@pytest.fixture
-def no_bs4(monkeypatch):
-    monkeypatch.setitem(sys.modules, "bs4", None)
-
-
 @pytest.mark.parametrize("html,expected", _HIDDEN_CASES)
-def test_regex_fallback_drops_hidden_content(no_bs4, html, expected):
-    from mcpbrain.sync.normalise import strip_html
-
-    assert strip_html(html).splitlines() == expected
-
-
-@pytest.mark.parametrize("html,expected", _HIDDEN_CASES)
-def test_bs4_path_drops_hidden_content(html, expected):
-    pytest.importorskip("bs4")
+def test_strip_html_drops_hidden_content(html, expected):
     from mcpbrain.sync.normalise import strip_html
 
     assert strip_html(html).splitlines() == expected
