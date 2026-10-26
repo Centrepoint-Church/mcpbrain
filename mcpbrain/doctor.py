@@ -928,6 +928,14 @@ def ingestion_cleanup_line(store) -> str:
             "disabled": "➖", "running": "⏳", "pending": "⏳"}.get(state, "⚠️")
     if state == "deferred_no_backup" and st.get("last_backup") is None:
         icon = "⏳"          # a new install before its first backup: pending (I17 N6)
+    if state == "done" and st.get("pending_steps"):
+        # Added steps waiting on a gate read like a first run's gate.
+        reason = st.get("pending_reason")
+        icon = {"disabled": "➖",
+                "no_backup": "⏳" if st.get("last_backup") is None else "⚠️"
+                }.get(reason, "⏳")
+    if state == "done" and st.get("added_error"):
+        icon = "⚠️"          # added steps failed; the original run completed
     if ic.cli_claim_stale(st):
         icon = "⚠️"          # a crashed attended run (I17 N4)
     return f"{icon} {'Clean-up':<16} {ic.summary_line(st)}"

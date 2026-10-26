@@ -37,6 +37,8 @@ _NOREPLY_RE = re.compile(r"\bno.?reply\b|\bnoreply\b|\bmailer.daemon\b|\bautomat
 _BASELINE = 3.0
 _MAX = 10.0
 _MIN = 1.0
+# The salience floor, public for callers outside the scorer.
+SALIENCE_FLOOR = _MIN
 # What an owner-authored chunk adds to its structural score.
 OWNER_BOOST = 1.5
 

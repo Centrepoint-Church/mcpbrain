@@ -432,6 +432,7 @@ def test_done_install_runs_only_the_added_steps_once(env, monkeypatch):
     assert ran == [list(ic.ADDED_STEPS)]
     assert rec["state"] == "done" and rec["by"] == "daemon"
     assert rec["steps"] == list(ic.STEPS) and "pending_steps" not in rec
+    assert rec["added_by"] == "daemon" and rec["added_at"]
     assert rec["counts"]["source_session"] == {"actions:session": 1}    # merged
     assert rec["counts"]["recount_mentions"]["entities:mentions"] >= 1
     assert rec["counts"]["derived_salience"]["chunks_salience:brief"] == 1
@@ -502,7 +503,8 @@ def test_failed_stays_failed_with_added_steps(env, monkeypatch):
     assert _mig(env)["state"] == "failed"
 
 
-def test_added_step_error_records_failed_once(env, monkeypatch):
+def test_added_step_error_stays_done_with_error_never_retried(env, monkeypatch):
+    from mcpbrain import doctor
     _old_done(env)
     calls = []
 
@@ -512,8 +514,20 @@ def test_added_step_error_records_failed_once(env, monkeypatch):
 
     monkeypatch.setattr(ic, "run", boom)
     rec = _mig(env)
-    assert rec["state"] == "failed" and "disk full" in rec["error"]
-    assert _mig(env)["state"] == "failed" and len(calls) == 1
+    assert rec["state"] == "done" and "disk full" in rec["added_error"]
+    assert rec["steps"] == BASE_STEPS and rec["pending_attempts"] == 1
+    assert ic.pending_added_steps(rec) == []
+    assert _mig(env)["state"] == "done" and len(calls) == 1      # never retried
+    line = doctor.ingestion_cleanup_line(env["store"])
+    assert line.startswith("⚠️") and "disk full" in line and "not retried" in line
+
+
+def test_added_step_integrity_failure_stays_done_with_error(env, monkeypatch):
+    _old_done(env)
+    monkeypatch.setattr(ic, "_integrity", lambda store: "*** page 7 corrupt")
+    rec = _mig(env)
+    assert rec["state"] == "done" and "integrity_check" in rec["added_error"]
+    assert "recount_mentions" in rec["counts"]
 
 
 def test_added_steps_interrupted_give_up(env, monkeypatch):
@@ -521,7 +535,23 @@ def test_added_steps_interrupted_give_up(env, monkeypatch):
               pending_attempts=ic.MAX_ATTEMPTS)
     monkeypatch.setattr(ic, "run", lambda *a, **k: (_ for _ in ()).throw(AssertionError))
     rec = _mig(env)
-    assert rec["state"] == "failed" and "interrupted" in rec["error"]
+    assert rec["state"] == "done" and "interrupted" in rec["added_error"]
+    assert rec["pending_attempts"] == ic.MAX_ATTEMPTS
+    assert _mig(env)["added_error"] == rec["added_error"]       # never retried
+
+
+def test_doctor_line_while_added_steps_are_gated(env):
+    from mcpbrain import doctor
+    _old_done(env)
+    _mig(env, last_backup=STALE)
+    line = doctor.ingestion_cleanup_line(env["store"])
+    assert line.startswith("⚠️") and "waiting for a restore point" in line
+    _old_done(env)
+    ic.run_migration(env["store"], str(env["home"]), clock=lambda: NOW)   # none yet
+    line = doctor.ingestion_cleanup_line(env["store"])
+    assert line.startswith("⏳") and "waiting for a restore point" in line
+    _mig(env)
+    assert doctor.ingestion_cleanup_line(env["store"]).startswith("✅")
 
 
 def test_daemon_pass_runs_added_steps_without_a_model(env, monkeypatch):

@@ -884,7 +884,7 @@ def step_derived_salience(ctx, tx):
             "AND column_name='salience'", (tx.step,)):
         done.add(json.loads(r[0]).get("doc_id"))
     for r in tx.db.execute("SELECT doc_id, metadata, salience FROM chunks "
-                           "WHERE salience > 0").fetchall():
+                           "WHERE salience > 0"):
         d, old = r["doc_id"], r["salience"]
         hit = ctx.res.doc.get(d)
         if (hit is None or hit[0] not in _DERIVED or d in done
@@ -896,9 +896,11 @@ def step_derived_salience(ctx, tx):
             continue
         if not importance.owner_signals(meta, owner_email):
             continue
-        new = min(old, max(importance._MIN, round(old - importance.OWNER_BOOST, 2)))
+        new = min(old, max(importance.SALIENCE_FLOOR,
+                           round(old - importance.OWNER_BOOST, 2)))
         if tx.update("chunks", {"doc_id": d}, {"salience": old}, {"salience": new}):
             tx.counts[f"chunks_salience:{hit[0]}"] += 1
+            done.add(d)          # never twice, even if the scan meets it again
 
 
 def _gone(ctx, ident) -> bool:
@@ -1154,10 +1156,11 @@ def cli_claim_stale(rec: dict, now: float | None = None) -> bool:
 
 def pending_added_steps(rec: dict) -> list[str]:
     """ADDED_STEPS a `done` marker has not run yet (STEPS order); [] for any
-    other state, and for the `done` an attended `--undo` writes on a store the
+    other state, for the `done` an attended `--undo` writes on a store the
     clean-up never ran on (marker `undo`): that operator took the clean-up out
-    of the daemon's hands, added steps included."""
-    if rec.get("state") != "done" or rec.get("undo"):
+    of the daemon's hands, added steps included — and once an added-steps run
+    recorded `added_error` (never retried automatically)."""
+    if rec.get("state") != "done" or rec.get("undo") or rec.get("added_error"):
         return []
     seen = set(rec.get("steps") or ()) | set(rec.get("skipped") or ())
     return [s for s in STEPS if s in ADDED_STEPS and s not in seen]
@@ -1176,9 +1179,11 @@ def _run_added_steps(store, home, rec, pending, last_backup, now) -> dict:
     under the same gates as the first run (fleet flag, a restore point < 24 h,
     Store.init first). The marker stays `done` throughout: while a gate is
     closed (or the run is under way) it carries `pending_steps`, retried on
-    the next call. Each start counts in `pending_attempts`; past MAX_ATTEMPTS
-    (a run that keeps dying) it is `failed`, as is any error or a failed
-    integrity_check — never retried automatically."""
+    the next call. Each start counts in `pending_attempts`. A run that keeps
+    dying (past MAX_ATTEMPTS), any error or a failed integrity_check leaves
+    the marker `done` with `added_error` (the original steps did complete):
+    never retried automatically, shown as a warning. Success records
+    `added_by` / `added_at`."""
     waiting = {**rec, "pending_steps": pending}
     if not config.fleet_flag(home, FLEET_FLAG, True):
         return _write_marker(store, {**waiting, "pending_reason": "disabled"})
@@ -1188,9 +1193,8 @@ def _run_added_steps(store, home, rec, pending, last_backup, now) -> dict:
                                      "last_backup": last_backup})
     attempts = int(rec.get("pending_attempts") or 0) + 1
     if attempts > MAX_ATTEMPTS:
-        return _write_marker(store, {**waiting, "state": "failed",
-                                     "error": f"added steps {', '.join(pending)} "
-                                              f"interrupted {attempts - 1} time(s)"})
+        return _write_marker(store, {**waiting, "pending_reason": "error",
+                                     "added_error": f"interrupted {attempts - 1} time(s)"})
     _write_marker(store, {**waiting, "pending_reason": "running",
                           "pending_attempts": attempts})
     try:
@@ -1198,19 +1202,20 @@ def _run_added_steps(store, home, rec, pending, last_backup, now) -> dict:
         results = run(store, home, pending, dry=False, embedder=LEXICAL)
         ok = _integrity(store)
     except Exception as exc:  # noqa: BLE001 — recorded, never retried in a loop
-        return _write_marker(store, {**waiting, "state": "failed",
+        return _write_marker(store, {**waiting, "pending_reason": "error",
                                      "pending_attempts": attempts,
-                                     "error": f"{type(exc).__name__}: {exc}"})
+                                     "added_error": f"{type(exc).__name__}: {exc}"})
     counts = {**(rec.get("counts") or {}), **_counts_json(results)}
     if ok != "ok":
-        return _write_marker(store, {**waiting, "state": "failed", "counts": counts,
-                                     "pending_attempts": attempts,
-                                     "error": f"integrity_check: {ok}"})
+        return _write_marker(store, {**waiting, "pending_reason": "error",
+                                     "counts": counts, "pending_attempts": attempts,
+                                     "added_error": f"integrity_check: {ok}"})
     done = {k: v for k, v in rec.items()
             if k not in ("pending_steps", "pending_reason", "pending_attempts")}
     ran = set(rec.get("steps") or ()) | set(pending)
     return _write_marker(store, {**done, "steps": [s for s in STEPS if s in ran],
-                                 "counts": counts})
+                                 "counts": counts, "added_by": "daemon",
+                                 "added_at": _now()})
 
 
 def run_migration(store, home, *, embedder_factory=None, last_backup=None,
@@ -1303,7 +1308,12 @@ def summary_line(st: dict) -> str:
         n = sum(v for c in (st.get("counts") or {}).values()
                 for k, v in c.items() if k.startswith("actions:"))
         skip = f"; skipped {', '.join(st['skipped'])}" if st.get("skipped") else ""
-        if st.get("pending_steps"):
+        if st.get("added_error"):
+            skip += (f"; added step(s) {', '.join(st.get('pending_steps') or ())} "
+                     f"FAILED ({st['added_error']}), not retried; inspect with "
+                     "`mcpbrain clean-ingestion` (dry run), re-run with "
+                     "`--yes --rerun`")
+        elif st.get("pending_steps"):
             why = {"no_backup": "waiting for a restore point captured in the last 24 h",
                    "disabled": f"held by the `{FLEET_FLAG}` flag",
                    "running": "running"}.get(st.get("pending_reason"), "due")
