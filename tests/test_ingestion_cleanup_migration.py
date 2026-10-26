@@ -564,3 +564,47 @@ def test_daemon_pass_runs_added_steps_without_a_model(env, monkeypatch):
     dm._embedder_bounded = lambda timeout=None: (_ for _ in ()).throw(AssertionError)
     assert dm._run_ingestion_cleanup() == {"ingestion_cleanup": "done"}
     assert seen == [ic.LEXICAL]
+
+
+def test_cli_full_run_on_done_install_names_the_pending_added_steps(env, capsys):
+    """M5: a bare `--yes` on a done install with added steps still due names
+    them and says who runs them, instead of a bare "already applied"."""
+    _old_done(env)
+    before = _dump(env["store"].path)
+    capsys.readouterr()
+    assert _main(env, "--yes", "--skip-snapshot-for-tests") == 0
+    out = capsys.readouterr().out
+    assert "recount_mentions, derived_salience" in out
+    assert "daemon runs them" in out
+    assert "--steps recount_mentions,derived_salience --yes" in out
+    assert "nothing to do" not in out
+    assert _dump(env["store"].path) == before
+
+
+def test_cli_attended_added_steps_mark_them_run(env, monkeypatch, capsys):
+    """M5: `--steps recount_mentions,derived_salience --yes` runs them attended
+    and records them, so the daemon does not run them again."""
+    _old_done(env, pending_steps=list(ic.ADDED_STEPS), pending_reason="no_backup")
+    assert _main(env, "--yes", "--skip-snapshot-for-tests", "--steps",
+                 ",".join(ic.ADDED_STEPS)) == 0
+    rec = ic.read_marker(env["store"])
+    assert rec["state"] == "done" and rec["steps"] == list(ic.STEPS)
+    assert ic.pending_added_steps(rec) == []
+    assert "pending_steps" not in rec and "pending_reason" not in rec
+    assert rec["added_by"] == "cli" and rec["added_at"]
+    assert rec["counts"]["source_session"] == {"actions:session": 1}
+    assert "recount_mentions" in rec["counts"]
+    monkeypatch.setattr(ic, "run", lambda *a, **k: (_ for _ in ()).throw(AssertionError))
+    assert _mig(env)["state"] == "done"
+    capsys.readouterr()
+    assert _main(env, "--yes", "--skip-snapshot-for-tests") == 0
+    assert "nothing to do" in capsys.readouterr().out
+
+
+def test_cli_one_added_step_leaves_the_other_pending(env):
+    _old_done(env)
+    assert _main(env, "--yes", "--skip-snapshot-for-tests", "--steps",
+                 "recount_mentions") == 0
+    rec = ic.read_marker(env["store"])
+    assert ic.pending_added_steps(rec) == ["derived_salience"]
+    assert rec["pending_steps"] == ["derived_salience"]

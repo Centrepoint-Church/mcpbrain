@@ -1468,8 +1468,16 @@ def main(argv=None, *, embedder=None, dim=None) -> int:
     marker = status(ro) if has_schema else {"state": "pending"}
     print(f"[clean] shared marker: {summary_line(marker)}")
     if write and full_run and marker["state"] == "done" and not ns.rerun:
-        print("[clean] already applied; nothing to do. Pass --rerun to run every "
-              "step again (idempotent), or --steps / --undo for one step.")
+        added = pending_added_steps(marker)
+        if added:
+            names = ",".join(added)
+            print(f"[clean] already applied, but added step(s) {', '.join(added)} "
+                  "have not run yet. The daemon runs them on its next ingestion "
+                  "clean-up pass (once a restore point < 24 h exists); to run them "
+                  f"attended now: --steps {names} --yes")
+        else:
+            print("[clean] already applied; nothing to do. Pass --rerun to run every "
+                  "step again (idempotent), or --steps / --undo for one step.")
         return 0
 
     if not write:
@@ -1550,6 +1558,20 @@ def main(argv=None, *, embedder=None, dim=None) -> int:
                               "counts": _counts_json(results)})
     elif ns.undo and prior.get("state") not in ("done", "failed"):
         _write_marker(store, {"state": "done", **claim})
+    elif not ns.undo and set(steps) & set(pending_added_steps(prior)):
+        # An attended run of added steps on a done install: record them as run
+        # (exactly as the daemon's _run_added_steps would), so the daemon does
+        # not run them again.
+        ran = set(prior.get("steps") or ()) | set(steps)
+        rec = {k: v for k, v in prior.items()
+               if k not in ("pending_steps", "pending_reason", "pending_attempts")}
+        rec.update(steps=[s for s in STEPS if s in ran], last_cli=claim,
+                   counts={**(prior.get("counts") or {}), **_counts_json(results)},
+                   added_by="cli", added_at=_now())
+        left = pending_added_steps(rec)
+        if left:
+            rec["pending_steps"] = left
+        _write_marker(store, rec)
     else:
         _write_marker(store, {**prior, "last_cli": claim})
     print("[clean] integrity_check ok")
