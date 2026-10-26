@@ -490,6 +490,57 @@ counted re-extractions, not sources.
   store has no `cleanup_log` until the new-schema daemon or a first `--yes` runs
   `Store.init`. Procedure: `docs/RELEASE-RUNBOOK.md` §9.
 
+- **Parked minors CLOSED (2026-10-26).** Owner repair backs off a failing embedder (60 s
+  doubling to 3,600 s, hygiene due at retry time), logs to `cleanup_log` step `owner_repair`
+  (`--undo owner_repair --yes`, drift judged per action row per column group); canonicalise
+  runs without a model; `/api/recall` answers before writing exposure rows (N5); new step
+  `derived_salience` (-1.5, floor 1.0, pre-M6 owner rule, identity seed untouched; N7); new
+  step `recount_mentions` (mentions := non-derived link count, all local entities) and the
+  live writer bumps/decrements `mentions` for all types. **The clean-up is now 15 steps.**
+  An install whose clean-up is already `done` runs the ADDED steps once under the same gates
+  (marker stays done; `pending_steps` while gated; `added_error` if they fail, never retried,
+  doctor warns). The CLI full run on a done install names the pending steps; the daemon runs them.
+
+## Oversized chunks, CSS leak and the held owner (2026-10-26, source-only, NOT released)
+
+Found by auditing why chunks exceeded the embed window and why one owner stayed held.
+
+- **Findings.** 193 chunks raw > 2,000 chars (79 from ONE Gmail receipt's CSS; 98 wide-sheet
+  rows/summaries in 7 files; 15 enriched digests; 1 identity seed). **Counting the contextual
+  prefix (what is actually embedded) 7,013 chunks were over the window** — raw length
+  understates it ~36x. **The over-window measure is the prefixed passage via
+  `embed.passage_over_window`**, the ONE definition used by heal, doctor and cache import.
+  Do not measure raw length.
+- **CSS leak.** `bs4` was never a dependency; the regex fallback kept `<style>` / `<script>` /
+  `<head>` / comment text (516 Gmail messages). `strip_html` is regex-only now: hidden
+  elements and comments dropped, `html.unescape` applied. **Do not reintroduce a bs4 branch.**
+- **Wide tables.** Tabular splits wide summaries (`columns cont.`, `summary_part`) and wide
+  rows (`row N (cont.)`); output is byte-identical for sheets that fit.
+- **Embedding.** `embed.embed_chunk_passages` = even, length-weighted multi-window mean.
+  `ingest_cache` import writes over-window rows `embedded=0`, so a cache from another install
+  is re-embedded locally.
+- **Held owner.** A shared-drive Google Doc whose text was replaced by images exported EMPTY,
+  so the stale chunks were kept and reflow held the owner daily. `drive.drop_emptied_native`:
+  changed Google-native file + successful empty export -> chunks dropped via the remove path.
+  PDFs, unchanged files and partial exports keep theirs.
+- **Heal is a one-shot marker (`oversize_heal`), not a version bump.** Reset (kill switch only)
+  + reflow enqueue bounded by `REFLOW_WINDOW` behind the seed gates, live sources only.
+  **Do NOT bump `CHUNKER_VERSION` / `SPLIT_VERSION` / `EXTRACTION_VERSIONS` to heal** — that
+  re-fetches the whole corpus. Doctor's `Chunk-window` line counts the prefixed measure and
+  shows "re-embed pending (M left)" until done; no attended step.
+- **Measured (VACUUM INTO copy, 2026-10-26):** gold untouched 0.867 / 0.597 -> after reset +
+  windowed re-embed of 7,015 chunks **0.900 / 0.604** (913 s in one go).
+- **Live on the author machine (installed from the working tree, NOT released):** 516 Gmail /
+  7 Drive owners queued (window-bounded), 7,015 reset; daemon ran the added steps
+  (`recount_mentions` 9,204 entities, `derived_salience` 10 brief + 125 draft chunks);
+  `quick_check` ok. Re-embed drain and the held owner's daily retry were still in progress.
+- **Fleet effects on upgrade:** one windowed re-embed of each install's over-window chunks
+  (here ~15 min CPU spread over cycles), reflow of CSS-polluted / oversized-table owners,
+  mentions recount, derived-salience unboost.
+- **Still open:** unclosed `<style>`/`<title>` keeps text; comment regex vs a stray `<!--`
+  in script; pathological sheet/file-name length; `/api/recall` BrokenPipe logs a 40-line
+  ERROR when the hook times out (pre-existing).
+
 ## Shipping caveats
 
 - **Current state (2026-09-29): the four version files (+ `uv.lock`) are at

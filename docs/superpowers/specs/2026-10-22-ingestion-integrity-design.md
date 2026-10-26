@@ -208,6 +208,22 @@ Archives use `status='auto_archived'` with the step's `resolved_by`; reversible.
   then doctor, gold gate, and that 23-row draft thread's open actions reviewed by the
   owner (expect ≈6–7).
 
+## Amendments (2026-10-26)
+
+- **N5.** `/api/recall` now answers before writing exposure rows, so a slow write cannot
+  delay the hook's reply.
+- **N7 (`derived_salience`).** New clean-up step: derived-class chunks (brief, draft)
+  lose the owner/salience boost (-1.5, floor 1.0, pre-M6 owner rule; the identity seed is
+  untouched). Reversible via `cleanup_log`.
+- **Mentions.** `mentions` is derived (section 3), so a new step `recount_mentions` sets
+  it to the non-derived link count for all local entities, and the live writer bumps it
+  with `email_count` for all types and decrements it on source removal. The clean-up is
+  now 15 steps; an install already `done` runs the added steps once under the same gates
+  (marker stays `done`, `pending_steps` / `added_error` reported).
+- **Owner repair undo.** The daily owner repair logs to `cleanup_log` as `owner_repair`
+  and is reversible with `--undo owner_repair --yes`; drift is judged per action row per
+  column group. It backs off a failing embedder (60 s doubling to 3,600 s).
+
 ## Not done
 
 - Rewriting the external brief routine (outside this repo) — the generated marker

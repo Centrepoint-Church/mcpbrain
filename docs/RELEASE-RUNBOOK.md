@@ -869,7 +869,8 @@ Spec: `docs/superpowers/specs/2026-10-22-ingestion-integrity-design.md`. Archive
 open actions and marks links that came from the brain's own output (session notes,
 briefs, drafts, consolidated notes, digests), marks observations of entities known
 only from that output, dedupes actions by meaning, and recounts relation strength
-from distinct evidence sources. Nothing is deleted: every change is logged in
+from distinct evidence sources (15 steps; the last added are `derived_salience` and
+`recount_mentions`). Nothing is deleted: every change is logged in
 `cleanup_log` and `--undo STEP` reverses it.
 
 **Every install runs it by itself, once** (ruling I13). The code lives in the
@@ -935,6 +936,24 @@ Attended use (this machine, or to inspect / undo):
    (undo later steps first; a value changed since the run is reported as
    SKIPPED and kept). Undo works the same whether the daemon or the CLI applied
    the step.
+   The daily owner repair logs as step `owner_repair`:
+   `mcpbrain clean-ingestion --undo owner_repair --yes` (drift is judged per action
+   row and column group).
+
+**Added steps on an install that is already `done`** (15 steps now; the 14th and 15th,
+`derived_salience` and `recount_mentions`, were added after the first release of this
+clean-up). The daemon runs ADDED steps once under the same gates (kill switch, restore
+point < 24 h, bulk lock, integrity check). The marker stays `done`; `pending_steps` shows
+in `/api/status` while gated; a failure records `added_error`, is never retried, and
+doctor warns. The CLI full run on a done install names the pending steps but the daemon
+runs them.
+
+**Oversize heal (no attended step).** A one-shot daemon marker (`oversize_heal`) resets
+chunks whose PREFIXED passage exceeds the embed window (`embed.passage_over_window`) and
+enqueues the Gmail/Drive owners that produced them for reflow, bounded by the reflow
+window and the seed gates. Doctor's `Chunk-window` line shows "re-embed pending (M left)"
+until the windowed re-embed finishes, then reads clean. Do not bump the chunker, split or
+extraction versions to force it.
 
 ## Environment note — repos live outside iCloud
 
