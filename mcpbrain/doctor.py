@@ -476,8 +476,14 @@ def run_doctor(home, *, conns=None, repairs=None, reprobe=None, platform=None,
     except Exception as exc:  # noqa: BLE001 — a diagnostic must not break doctor
         lines.append(f"⚠️  {'OCR':<16} could not check tesseract ({exc})")
 
-    # Chunks that exceed the embedder window (512 tokens ≈ 2,000 chars). Their
-    # tails are silently truncated at embed time and become unsearchable.
+    # Chunks whose stored text exceeds the embedder window (512 tokens ≈ 2,000
+    # chars). They are embedded across windows (embed_chunk_passages), so no
+    # tail is lost -- but only once re-embedded: a chunk embedded before that
+    # change keeps its truncated vector until the one-shot oversize heal
+    # (daemon._oversize_heal_once, meta `oversize_heal`) resets it. Counted on
+    # RAW text length, a cheap COUNT; the heal itself measures
+    # the prefixed passage, so a chunk that only crosses the window with its
+    # context prefix is healed but not counted here.
     from mcpbrain.store import Store
     # "brain.sqlite3" — the same filename config.store_path() builds under
     # app_dir(); spelled relative to the injected `home` because run_doctor is
@@ -488,9 +494,13 @@ def run_doctor(home, *, conns=None, repairs=None, reprobe=None, platform=None,
     store = Store(Path(home) / "brain.sqlite3", dim=4, read_only=True)
     try:
         oversize = store.count_chunks_longer_than(2000)
-        glyph = "✅" if not oversize else "⚠️"
-        lines.append(f"{glyph} {'Chunk window':<16} {oversize} chunk(s) over the "
-                     f"embedder window")
+        text = f"{oversize} chunk(s) longer than one window"
+        if not oversize:
+            lines.append(f"✅ {'Chunk window':<16} {text}")
+        elif store.get_meta("oversize_heal"):
+            lines.append(f"✅ {'Chunk window':<16} {text}, embedded across windows")
+        else:
+            lines.append(f"⚠️ {'Chunk window':<16} {text} — re-embed pending")
     except Exception as exc:  # noqa: BLE001 — never fatal
         lines.append(f"➖ {'Chunk window':<16} skipped ({exc})")
 

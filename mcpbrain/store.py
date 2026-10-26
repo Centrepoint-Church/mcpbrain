@@ -3321,6 +3321,74 @@ class Store:
             return db.execute("SELECT COUNT(*) FROM chunks WHERE length(text) > ?",
                               (int(n),)).fetchone()[0]
 
+    # --- one-shot oversize heal (2026-10-26) ------------------------------------
+
+    # Gmail bodies rendered before strip_html dropped <style> content carry CSS
+    # rules as text. A brace plus one CSS-only token: a brace alone (a template,
+    # code) or a font name alone (prose about fonts) is not enough.
+    _CSS_TEXT_SQL = ("text LIKE '%{%' AND (text LIKE '%font-family%' OR "
+                     "text LIKE '%@media%' OR text LIKE '%mso-%' OR "
+                     "text LIKE '%-webkit-%')")
+
+    def oversize_heal_targets(self, *, window: int = 2000) -> dict[str, list[str]]:
+        """Owners whose reflow now re-renders differently because of the
+        oversize/CSS fixes: Gmail messages (message_id) with a CSS-polluted
+        chunk, and Drive files (file_id) with a table chunk longer than
+        `window`. Prose over the window is not a target -- its re-render is
+        the same text; the windowed re-embed alone fixes it.
+
+        Excludes owners already queued for any reflow source and owners with
+        any chunk stamped `reflow_skipped` (whatever the reason): those were
+        already given up on, and re-queueing them would only repeat that.
+        One full scan per call -- the daemon calls it once per install."""
+        st, sub = _meta_extract("$.source_type"), _meta_extract("$.content_subtype")
+        skipped = _meta_extract("$.reflow_skipped")
+        rules = (("reflow:gmail", "gmail", "$.message_id", self._CSS_TEXT_SQL, ()),
+                 ("reflow:drive", "gdrive", "$.file_id",
+                  f"COALESCE({sub},'')='table' AND length(text) > ?", (int(window),)))
+        out: dict[str, list[str]] = {}
+        with self._connect() as db:
+            for src, stype, fld, where, args in rules:
+                owner = _meta_extract(fld)
+                out[src] = [str(r["o"]) for r in db.execute(
+                    f"SELECT DISTINCT {owner} AS o FROM chunks "
+                    f"WHERE {st}=? AND {where} "
+                    f"AND {owner} IS NOT NULL AND {owner} != '' "
+                    f"AND {owner} NOT IN (SELECT ref_id FROM sync_queue "
+                    f"WHERE source LIKE 'reflow:%') "
+                    f"AND {owner} NOT IN (SELECT {owner} FROM chunks WHERE {st}=? "
+                    f"AND {skipped} IS NOT NULL AND {owner} IS NOT NULL) "
+                    f"ORDER BY o",
+                    (stype, *args, stype))]
+        return out
+
+    def reset_embedding_for_oversize(self, window: int, *, use_prefix: bool = True) -> int:
+        """Set embedded=0 on every embedded chunk whose embed passage is longer
+        than `window`, so index_pending re-embeds it across windows instead of
+        keeping the vector of its truncated head. Returns the number reset.
+
+        The passage is `contextual_prefix(metadata) + text` when use_prefix
+        (what index_pending embeds), else the raw text. The prefix is built
+        from metadata values plus under 64 chars of fixed labels, so
+        `length(text) + length(metadata) + 64` bounds the passage from above
+        and serves as the SQL prefilter; the exact check runs in Python.
+        One write transaction for the whole reset."""
+        from mcpbrain.embed import contextual_prefix
+        bound = "length(text) + length(metadata) + 64" if use_prefix else "length(text)"
+        hits: list[tuple[int]] = []
+        with self._connect() as db:
+            for r in db.execute(
+                    f"SELECT rowid, length(text) AS n, metadata FROM chunks "
+                    f"WHERE embedded=1 AND {bound} > ?", (int(window),)):
+                plen = len(contextual_prefix(json.loads(r["metadata"] or "{}"))) \
+                    if use_prefix else 0
+                if r["n"] + plen > window:
+                    hits.append((r["rowid"],))
+        if hits:
+            with self._connect(write=True) as db:
+                db.executemany("UPDATE chunks SET embedded=0 WHERE rowid=?", hits)
+        return len(hits)
+
     def unembedded_chunks(self, limit: int | None = None) -> list[dict]:
         """Chunks awaiting embedding. `limit` bounds one cycle's slice of work.
 
