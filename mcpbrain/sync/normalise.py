@@ -5,6 +5,7 @@ No Google API calls here; this module is pure data transformation.
 """
 
 import base64
+import html as _html
 import re
 from dataclasses import dataclass, field
 
@@ -124,6 +125,11 @@ def strip_html(html: str) -> str:
     html = _HTML_COMMENT.sub("", html)
     html = _HTML_HIDDEN_ELEMENT.sub("", html)
     text = _HTML_TAG.sub(_tag_replacement, html)
+    # Entities AFTER the tag pass, so an escaped `&lt;b&gt;` stays the literal
+    # text `<b>` instead of being read as a tag; BEFORE the line split, so a
+    # line holding only `&nbsp;` (unescaped to U+00A0, which strip() removes)
+    # is dropped like any other blank line.
+    text = _html.unescape(text)
     lines = [line.strip() for line in text.splitlines()]
     return "\n".join(line for line in lines if line)
 

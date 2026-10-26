@@ -672,3 +672,15 @@ def test_strip_html_drops_hidden_content(html, expected):
     from mcpbrain.sync.normalise import strip_html
 
     assert strip_html(html).splitlines() == expected
+
+
+def test_strip_html_unescapes_entities():
+    from mcpbrain.sync.normalise import strip_html
+    out = strip_html("<p>Dana &amp; Marcus</p><p>it&#39;s done</p>"
+                     "<p>&nbsp;</p><p>tag text &lt;b&gt; stays</p>")
+    assert out == "Dana & Marcus\nit's done\ntag text <b> stays"
+
+
+def test_strip_html_nbsp_only_lines_dropped():
+    from mcpbrain.sync.normalise import strip_html
+    assert strip_html("<div>one</div>\n&nbsp;\n&nbsp; &nbsp;\n<div>two</div>") == "one\ntwo"
