@@ -1063,3 +1063,30 @@ def test_org_relation_is_not_legacy(tmp_path):
             f"SELECT er.entity_b, {graph_write.legacy_relation_sql('er')} AS l "
             "FROM entity_relations er")}
     assert legacy == aliased == {"b": 0, "c": 1}
+
+
+def _counts(s, eid):
+    e = s.get_entity(eid)
+    return e["email_count"], e["mentions"]
+
+
+def test_mentions_counted_with_email_count_on_every_new_primary_link(tmp_path):
+    """Every NEW primary-source link bumps mentions with email_count, for every
+    entity type (it used to be meetings only); a re-applied thread and a
+    derived source add nothing."""
+    s = _store(tmp_path)
+    _mail_chunk(s, "gm-1", "t1")
+    _mail_chunk(s, "gm-2", "t2")
+    s.upsert_chunk("note-consolidated-abc", "consolidated", "h-c",
+                   {"source": "note", "note_id": "note-consolidated-abc"})
+    graph_write.apply(s, _rel_extraction("t1", "m1"), doc_ids=["gm-1"])
+    assert _counts(s, "sam") == (1, 1)        # sender
+    assert _counts(s, "pat") == (1, 1)        # mentioned person
+    graph_write.apply(s, _rel_extraction("t1", "m1"), doc_ids=["gm-1"])
+    assert _counts(s, "sam") == (1, 1) and _counts(s, "pat") == (1, 1)
+    graph_write.apply(s, _rel_extraction("note-consolidated-abc",
+                                         "note-consolidated-abc"),
+                      doc_ids=["note-consolidated-abc"])
+    assert _counts(s, "pat") == (1, 1)
+    graph_write.apply(s, _rel_extraction("t2", "m2"), doc_ids=["gm-2"])
+    assert _counts(s, "sam") == (2, 2) and _counts(s, "pat") == (2, 2)

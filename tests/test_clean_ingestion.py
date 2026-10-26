@@ -168,6 +168,11 @@ def env(tmp_path):
         ids["o_cal"] = db.execute(
             "INSERT INTO entity_observations(entity_id, attribute, value, source) "
             "VALUES ('p2', 'occurrence', 'x', 'cal-EV1')").lastrowid
+        # Scored chunks for derived_salience: a brief the pre-M6 rule boosted
+        # (SENT, owner sender) and a session note with no owner signal.
+        db.execute("UPDATE chunks SET salience=4.5 WHERE doc_id=?", (f"gmail-{M4}-body-0",))
+        db.execute("UPDATE chunks SET salience=3.0 WHERE doc_id=?", (f"{NOTE_A}-0",))
+        db.execute("UPDATE entities SET mentions=7 WHERE id='t-topic'")
     return {"home": home, "store": s, "ids": ids}
 
 
@@ -564,3 +569,68 @@ def test_dedup_embed_star_check_and_distinct_deadlines():
     rows2 = [dict(rows[0], deadline="2026-06-30"), dict(rows[1], deadline="2026-07-31")]
     vecs2 = {"a": [1.0, 0.0], "b": [1.0, 0.0]}
     assert ao.dedupe_groups(rows2, vecs2, lambda r: "") == []
+
+
+# --- recount_mentions / derived_salience (Task 8) ---------------------------
+
+def test_recount_mentions_uses_the_email_count_basis(env):
+    with env["store"]._connect(write=True) as db:
+        db.execute("INSERT INTO entities(id, name, type, mentions, origin) "
+                   "VALUES ('org-n', 'Northgate Trust', 'org', 9, 'org')")
+        db.execute("INSERT INTO email_entities(message_id, entity_id, role) "
+                   "VALUES (?, 'org-n', 'x')", (M1,))
+    assert _main(env, "--yes", "--skip-snapshot-for-tests") == 0
+    p1, topic = _row(env, "entities", "id", "p1"), _row(env, "entities", "id", "t-topic")
+    # p1: M1 live; M2 (draft) derived; GONE_MSG counted, then taken back by
+    # source_gone. Same as email_count.
+    assert (p1["mentions"], p1["email_count"]) == (1, 1)
+    assert topic["mentions"] == 0                 # its only link is a digest
+    assert _row(env, "entities", "id", "p2")["mentions"] == 0
+    assert _row(env, "entities", "id", "org-n")["mentions"] == 9    # org: curator's
+    with env["store"]._connect() as db:
+        logged = {json.loads(r[0])["id"] for r in db.execute(
+            "SELECT row_key FROM cleanup_log WHERE step='recount_mentions'")}
+    assert logged == {"p1", "t-topic"}
+
+
+def _scored(db, doc_id, meta, salience):
+    _chunk(db, doc_id, meta)
+    db.execute("UPDATE chunks SET salience=? WHERE doc_id=?", (salience, doc_id))
+
+
+def test_derived_salience_unboosts_only_what_the_pre_m6_rule_boosted(env):
+    sess = {"source": "note", "tags": "session", "title": "Session x 2026-09-01"}
+    with env["store"]._connect(write=True) as db:
+        _scored(db, "note-" + "d" * 32 + "-0", {**sess, "note_id": "note-" + "d" * 32,
+                                                "sender_is_owner": True}, 2.0)
+        _scored(db, "note-core-identity-seed", {**sess, "sender_is_owner": True}, 6.5)
+        _scored(db, "gmail-" + "e" * 16 + "-body-0",          # evidence, owner-sent
+                {"source_type": "gmail", "message_id": "e" * 16, "thread_id": "t-e",
+                 "labels": "SENT", "sender": OWNER}, 4.5)
+        _scored(db, "gmail-" + "f" * 16 + "-body-0",          # a draft: never boosted
+                {"source_type": "gmail", "message_id": "f" * 16, "thread_id": "t-f",
+                 "labels": "DRAFT", "sender": OWNER}, 4.5)
+        _scored(db, "gmail-" + "9" * 16 + "-body-0",          # brief, unscored
+                {"source_type": "gmail", "message_id": "9" * 16, "thread_id": "t-9",
+                 "labels": "SENT", "subject": "Brief — Tue", "sender": OWNER,
+                 "to": OWNER}, 0.0)
+    path = env["store"].path
+    before = _dump(path)
+    assert _main(env, "--yes", "--skip-snapshot-for-tests",
+                 "--steps", "derived_salience") == 0
+    sal = lambda d: _state(env, d)["salience"]                # noqa: E731
+    assert sal(f"gmail-{M4}-body-0") == 3.0                   # brief: 4.5 - 1.5
+    assert sal("note-" + "d" * 32 + "-0") == 1.0              # floor
+    assert sal(f"{NOTE_A}-0") == 3.0                          # no owner signal
+    assert sal("note-core-identity-seed") == 6.5
+    assert sal("gmail-" + "e" * 16 + "-body-0") == 4.5        # evidence
+    assert sal("gmail-" + "f" * 16 + "-body-0") == 4.5        # draft label
+    assert sal("gmail-" + "9" * 16 + "-body-0") == 0.0        # unscored
+    once = _dump(path)
+    # A rerun never cuts twice.
+    assert _main(env, "--yes", "--skip-snapshot-for-tests",
+                 "--steps", "derived_salience") == 0
+    assert _dump(path) == once
+    assert _main(env, "--yes", "--skip-snapshot-for-tests",
+                 "--undo", "derived_salience") == 0
+    assert _dump(path) == before

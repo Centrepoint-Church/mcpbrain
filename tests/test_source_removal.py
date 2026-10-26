@@ -243,16 +243,32 @@ def test_source_key_removal_is_index_backed(tmp_path):
     assert "SEARCH" in plan and "idx_relation_sources_key" in plan, plan
 
 
-def test_removal_decrements_meeting_mentions_and_revive_does_not_inflate(tmp_path):
-    """M7: a meeting-series 'about' link counted a mention; removal takes the
-    mention back, so remove -> re-link -> remove cycles do not inflate it."""
+def test_removal_decrements_mentions_for_every_type_and_revive_does_not_inflate(tmp_path):
+    """M7: every new primary link counted a mention (graph_write.apply);
+    removal takes it back for every entity type, so remove -> re-link ->
+    remove cycles do not inflate it."""
     from mcpbrain import graph_write as gw
     s = _s(tmp_path)
-    s.upsert_entity("meeting-x", "Weekly", "meeting", "", "2026-01-01", bump_mentions=False)
-    for cycle in range(3):
-        new = s.link_email_entity("m-1", "meeting-x", role="about")
-        assert new
-        gw._bump_email_count(s, "meeting-x", mentions=True)
-        assert s.get_entity("meeting-x")["mentions"] == 1, cycle
-        s.invalidate_sources_for_docs([], source_ids=["m-1"], reason="source_gone")
-        assert s.get_entity("meeting-x")["mentions"] == 0, cycle
+    for eid, typ, role in (("meeting-x", "meeting", "about"),
+                           ("dana-okafor", "person", "sender"),
+                           ("topic-budget", "topic", "about")):
+        s.upsert_entity(eid, eid, typ, "", "2026-01-01", bump_mentions=False)
+        for cycle in range(3):
+            new = s.link_email_entity("m-1", eid, role=role)
+            assert new
+            gw._bump_email_count(s, eid)
+            e = s.get_entity(eid)
+            assert (e["mentions"], e["email_count"]) == (1, 1), (eid, cycle)
+            s.invalidate_sources_for_docs([], source_ids=["m-1"], reason="source_gone")
+            e = s.get_entity(eid)
+            assert (e["mentions"], e["email_count"]) == (0, 0), (eid, cycle)
+
+
+def test_removal_never_takes_mentions_below_zero(tmp_path):
+    """A link written before mentions counted every type: removal floors at 0."""
+    s = _s(tmp_path)
+    s.upsert_entity("dana-okafor", "Dana Okafor", "person", "", "2026-01-01",
+                    bump_mentions=False)
+    assert s.link_email_entity("m-1", "dana-okafor", role="sender")
+    s.invalidate_sources_for_docs([], source_ids=["m-1"], reason="source_gone")
+    assert s.get_entity("dana-okafor")["mentions"] == 0

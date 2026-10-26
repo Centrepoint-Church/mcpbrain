@@ -74,13 +74,26 @@ dedupe could keep a derived copy and archive the real one.
                       strength / observed_count := distinct evidence sources for
                       rows that have one (rows without keep theirs — legacy), and
                       entity email_count := non-derived email_entities rows
-                      (local entities). `mentions` is left as is: no row records
-                      what was mentioned where, so there is no honest recount.
+                      (local entities).
+  recount_mentions    local entities of every type: mentions := non-derived
+                      email_entities rows, the email_count basis (graph_write
+                      now counts a mention with every new primary link and
+                      removal takes it back; before, only meetings counted).
   source_gone         archive open email actions every identifier of which names
                       a source no longer in the store; orphan links -> derived
                       (store invalidate_sources_for_docs' link step).
   owner_aliases       open actions: owner aliases -> config owner_name;
                       "claude"/"assistant" -> "unclear" (prior in prior_owner).
+  derived_salience    derived-class chunks (session / brief / draft /
+                      consolidated / digest) the pre-M6 owner rule boosted
+                      (importance.owner_signals: owner flag, owner sender or
+                      SENT label, never a draft label): salience := max(1.0,
+                      salience - 1.5). Unscored (0.0) chunks, evidence chunks
+                      and note-core-identity-seed are untouched; a chunk whose
+                      cut is still logged is never cut twice.
+
+A `done` install whose marker predates a step in ADDED_STEPS (recount_mentions,
+derived_salience) runs just those, once, under the same gates (run_migration).
 
 Every changed value is written to `cleanup_log` (step, table, row key, column,
 old and new value as JSON) in the same transaction as the change, one
@@ -126,7 +139,8 @@ OWNER_REPAIR_STEP = action_owner.LOG_STEP
 STEPS = ("source_session", "rekey_notes", "source_brief", "source_draft",
          "source_consolidated", "source_digest", "derived_links",
          "derived_observations", "dedup_embed", "legacy_strength",
-         "sources_backfill", "source_gone", "owner_aliases")
+         "sources_backfill", "recount_mentions", "source_gone", "owner_aliases",
+         "derived_salience")
 
 _CLASS_STEPS = {"source_brief": SC.BRIEF, "source_draft": SC.DRAFT,
                 "source_consolidated": SC.CONSOLIDATED, "source_digest": SC.DIGEST}
@@ -833,6 +847,60 @@ def step_sources_backfill(ctx, tx):
             tx.counts["entities:email_count"] += 1
 
 
+def step_recount_mentions(ctx, tx):
+    """mentions := non-derived email_entities rows, for every LOCAL entity of
+    every type — the email_count basis. graph_write.apply now bumps mentions
+    with email_count on every new primary link (it used to bump it only for
+    meetings), and removal takes both back, so this puts every existing row on
+    the same footing."""
+    for r in tx.db.execute(
+            "SELECT e.id, e.mentions, "
+            "(SELECT COUNT(*) FROM email_entities ee WHERE ee.entity_id=e.id "
+            " AND COALESCE(ee.derived,0)=0) AS n "
+            "FROM entities e WHERE COALESCE(e.origin,'local')='local'").fetchall():
+        if tx.update("entities", {"id": r["id"]}, {"mentions": r["mentions"]},
+                     {"mentions": r["n"]}):
+            tx.counts["entities:mentions"] += 1
+
+
+# memory_tier writes this one at a fixed salience; never re-score it here.
+_IDENTITY_SEED_DOC_ID = "note-core-identity-seed"
+
+
+def step_derived_salience(ctx, tx):
+    """Take back the owner boost (N7) from derived-class chunks the pre-M6
+    rule gave it: salience := max(1.0, salience - OWNER_BOOST) for a derived
+    chunk whose metadata carries the owner signals (importance.owner_signals,
+    which excludes drafts). Unscored chunks (0.0), evidence chunks and the
+    identity seed are untouched. A chunk this step already lowered (its
+    cleanup_log row still present) is skipped, so a rerun never subtracts
+    twice; a chunk scored after M6 shipped got no boost, and lowering it too
+    is the accepted cost (ruling 2)."""
+    from mcpbrain import importance
+    owner_email = config.owner_email(ctx.home) or ""
+    done = set()
+    for r in tx.db.execute(
+            "SELECT row_key FROM cleanup_log WHERE step=? AND table_name='chunks' "
+            "AND column_name='salience'", (tx.step,)):
+        done.add(json.loads(r[0]).get("doc_id"))
+    for r in tx.db.execute("SELECT doc_id, metadata, salience FROM chunks "
+                           "WHERE salience > 0").fetchall():
+        d, old = r["doc_id"], r["salience"]
+        hit = ctx.res.doc.get(d)
+        if (hit is None or hit[0] not in _DERIVED or d in done
+                or d == _IDENTITY_SEED_DOC_ID):
+            continue
+        try:
+            meta = json.loads(r["metadata"] or "{}") or {}
+        except (TypeError, ValueError):
+            continue
+        if not importance.owner_signals(meta, owner_email):
+            continue
+        new = min(old, max(importance._MIN, round(old - importance.OWNER_BOOST, 2)))
+        if tx.update("chunks", {"doc_id": d}, {"salience": old}, {"salience": new}):
+            tx.counts[f"chunks_salience:{hit[0]}"] += 1
+
+
 def _gone(ctx, ident) -> bool:
     return bool(ident) and bool(_KNOWN_SHAPE.match(ident)) and not ctx.res.exists(ident)
 
@@ -863,7 +931,7 @@ def step_source_gone(ctx, tx):
                 "AND COALESCE(derived,0)=0", part).fetchone()[0]
         return
     lcols = ("derived", "derived_reason")
-    ecols = ("email_count", "mentions")    # removal takes a meeting mention back (M7)
+    ecols = ("email_count", "mentions")    # removal takes the mention back too (M7)
 
     def links():
         out = {}
@@ -923,8 +991,10 @@ _STEP_FNS = {
     "dedup_embed": step_dedup_embed,
     "legacy_strength": step_legacy_strength,
     "sources_backfill": step_sources_backfill,
+    "recount_mentions": step_recount_mentions,
     "source_gone": step_source_gone,
     "owner_aliases": step_owner_aliases,
+    "derived_salience": step_derived_salience,
 }
 
 
@@ -1028,6 +1098,11 @@ FLEET_FLAG = "ingestion_cleanup_enabled"
 CLI_CLAIM_TTL_S = 2 * 3600.0
 # embedder_factory may return this to ask for lexical dedupe (no model).
 LEXICAL = object()
+# Steps added after the clean-up first shipped. A `done` marker accounts for
+# every other step (run, skipped, or deliberately undone by an attended run),
+# so on a done install run_migration runs only the ones of these its marker
+# does not name. Append a future step here as well as to STEPS.
+ADDED_STEPS = ("recount_mentions", "derived_salience")
 
 
 def read_marker(store) -> dict:
@@ -1077,12 +1152,75 @@ def cli_claim_stale(rec: dict, now: float | None = None) -> bool:
             > CLI_CLAIM_TTL_S)
 
 
+def pending_added_steps(rec: dict) -> list[str]:
+    """ADDED_STEPS a `done` marker has not run yet (STEPS order); [] for any
+    other state, and for the `done` an attended `--undo` writes on a store the
+    clean-up never ran on (marker `undo`): that operator took the clean-up out
+    of the daemon's hands, added steps included."""
+    if rec.get("state") != "done" or rec.get("undo"):
+        return []
+    seen = set(rec.get("steps") or ()) | set(rec.get("skipped") or ())
+    return [s for s in STEPS if s in ADDED_STEPS and s not in seen]
+
+
+def _backup_fresh(home, last_backup, now) -> tuple[bool, float | None]:
+    if last_backup is None:
+        from mcpbrain.probes import last_restore_point
+        last_backup = last_restore_point(home)
+    return (last_backup is not None and now - last_backup <= BACKUP_MAX_AGE_S,
+            last_backup)
+
+
+def _run_added_steps(store, home, rec, pending, last_backup, now) -> dict:
+    """Run the steps added since this install's clean-up was marked done,
+    under the same gates as the first run (fleet flag, a restore point < 24 h,
+    Store.init first). The marker stays `done` throughout: while a gate is
+    closed (or the run is under way) it carries `pending_steps`, retried on
+    the next call. Each start counts in `pending_attempts`; past MAX_ATTEMPTS
+    (a run that keeps dying) it is `failed`, as is any error or a failed
+    integrity_check — never retried automatically."""
+    waiting = {**rec, "pending_steps": pending}
+    if not config.fleet_flag(home, FLEET_FLAG, True):
+        return _write_marker(store, {**waiting, "pending_reason": "disabled"})
+    fresh, last_backup = _backup_fresh(home, last_backup, now)
+    if not fresh:
+        return _write_marker(store, {**waiting, "pending_reason": "no_backup",
+                                     "last_backup": last_backup})
+    attempts = int(rec.get("pending_attempts") or 0) + 1
+    if attempts > MAX_ATTEMPTS:
+        return _write_marker(store, {**waiting, "state": "failed",
+                                     "error": f"added steps {', '.join(pending)} "
+                                              f"interrupted {attempts - 1} time(s)"})
+    _write_marker(store, {**waiting, "pending_reason": "running",
+                          "pending_attempts": attempts})
+    try:
+        store.init()
+        results = run(store, home, pending, dry=False, embedder=LEXICAL)
+        ok = _integrity(store)
+    except Exception as exc:  # noqa: BLE001 — recorded, never retried in a loop
+        return _write_marker(store, {**waiting, "state": "failed",
+                                     "pending_attempts": attempts,
+                                     "error": f"{type(exc).__name__}: {exc}"})
+    counts = {**(rec.get("counts") or {}), **_counts_json(results)}
+    if ok != "ok":
+        return _write_marker(store, {**waiting, "state": "failed", "counts": counts,
+                                     "pending_attempts": attempts,
+                                     "error": f"integrity_check: {ok}"})
+    done = {k: v for k, v in rec.items()
+            if k not in ("pending_steps", "pending_reason", "pending_attempts")}
+    ran = set(rec.get("steps") or ()) | set(pending)
+    return _write_marker(store, {**done, "steps": [s for s in STEPS if s in ran],
+                                 "counts": counts})
+
+
 def run_migration(store, home, *, embedder_factory=None, last_backup=None,
                   clock=time.time) -> dict:
     """The daemon's one-shot clean-up (ruling I13). Call with the daemon's
     bulk lock held. Returns the marker it leaves.
 
-    No-op once `done` or `failed` (by either entry point), and while an
+    No-op once `failed`, or `done` (by either entry point) with every
+    ADDED_STEPS step run — a done install whose marker lacks one runs just
+    those (_run_added_steps, same gates, marker stays done) — and while an
     attended CLI run holds a fresh `running` claim (CLI_CLAIM_TTL_S; an older
     claim is a crashed run and is taken over). Otherwise, gated in order: the
     fleet kill switch `ingestion_cleanup_enabled` (default ON) -> `disabled`;
@@ -1101,7 +1239,12 @@ def run_migration(store, home, *, embedder_factory=None, last_backup=None,
     a failed check or any other error records `failed` with the reason and
     is never retried automatically."""
     rec = read_marker(store)
-    if rec.get("state") in ("done", "failed"):
+    if rec.get("state") == "done":
+        pending = pending_added_steps(rec)
+        if not pending:
+            return rec
+        return _run_added_steps(store, home, rec, pending, last_backup, clock())
+    if rec.get("state") == "failed":
         return rec
     now = clock()
     if (rec.get("state") == "running" and rec.get("by") == "cli"
@@ -1109,10 +1252,8 @@ def run_migration(store, home, *, embedder_factory=None, last_backup=None,
         return rec
     if not config.fleet_flag(home, FLEET_FLAG, True):
         return _write_marker(store, {**rec, "state": "disabled"})
-    if last_backup is None:
-        from mcpbrain.probes import last_restore_point
-        last_backup = last_restore_point(home)
-    if last_backup is None or now - last_backup > BACKUP_MAX_AGE_S:
+    fresh, last_backup = _backup_fresh(home, last_backup, now)
+    if not fresh:
         return _write_marker(store, {**rec, "state": "deferred_no_backup",
                                      "last_backup": last_backup})
     attempts = int(rec.get("attempts") or 0) + 1
@@ -1162,6 +1303,11 @@ def summary_line(st: dict) -> str:
         n = sum(v for c in (st.get("counts") or {}).values()
                 for k, v in c.items() if k.startswith("actions:"))
         skip = f"; skipped {', '.join(st['skipped'])}" if st.get("skipped") else ""
+        if st.get("pending_steps"):
+            why = {"no_backup": "waiting for a restore point captured in the last 24 h",
+                   "disabled": f"held by the `{FLEET_FLAG}` flag",
+                   "running": "running"}.get(st.get("pending_reason"), "due")
+            skip += f"; added step(s) {', '.join(st['pending_steps'])} {why}"
         return (f"done by {st.get('by', '?')} at {st.get('at', '?')} "
                 f"({n} open action(s) archived or re-owned{skip})")
     if state == "failed":

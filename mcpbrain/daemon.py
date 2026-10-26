@@ -4102,11 +4102,14 @@ class Daemon:
         if not self._is_due("_ingestion_cleanup_interval_s", "_last_ingestion_cleanup"):
             return None
         from mcpbrain import ingestion_cleanup
-        before = ingestion_cleanup.read_marker(self._store).get("state")
-        if before in ("done", "failed"):
+        marker = ingestion_cleanup.read_marker(self._store)
+        before = marker.get("state")
+        added = ingestion_cleanup.pending_added_steps(marker)
+        if before == "failed" or (before == "done" and not added):
             self._last_ingestion_cleanup = self._clock()
             return {"ingestion_cleanup": before}
-        if getattr(self, "_embedder_factory", None) is None:
+        if added or getattr(self, "_embedder_factory", None) is None:
+            # Steps added to a done install never dedupe: no model needed.
             emb = ingestion_cleanup.LEXICAL
         else:
             try:
@@ -4137,7 +4140,7 @@ class Daemon:
         line = ingestion_cleanup.summary_line(rec)
         if state == "failed":
             log.error("ingestion_cleanup: %s", line)
-        elif state != before:
+        elif state != before or (added and not rec.get("pending_steps")):
             log.info("ingestion_cleanup: %s", line)
         return {"ingestion_cleanup": state}
 

@@ -1671,15 +1671,15 @@ def apply(store, extraction, *, doc_ids, identity=None,
     linked: set = set()
     name_to_id: dict = {}
 
-    def _link(entity_id, role, *, mentions=False):
-        """Link entity_id to the lead message; count it (email_count, and
-        mentions when asked) only for a NEW primary-source link row."""
+    def _link(entity_id, role):
+        """Link entity_id to the lead message; count it (email_count and
+        mentions) only for a NEW primary-source link row."""
         if _digest:
             return False
         new = store.link_email_entity(lead_msg_id, entity_id, role=role,
                                       derived=_derived)
         if new and not _derived:
-            _bump_email_count(store, entity_id, mentions=mentions)
+            _bump_email_count(store, entity_id)
         return new
 
     # Link + role for the sender. email_count is driven off the link insert so
@@ -1756,7 +1756,7 @@ def apply(store, extraction, *, doc_ids, identity=None,
                                 bump_mentions=False)
             name_to_id[ename] = eid
             if eid not in linked:
-                _link(eid, "about", mentions=True)
+                _link(eid, "about")
                 linked.add(eid)
                 entities_created += 1
             occ_date = _parse_date_iso(ent.get("occurrence_date") or "") or lead_date_iso or today
@@ -2469,20 +2469,22 @@ def _meeting_series_id(series_name: str, org: str) -> str:
     return slugify(f"meeting-{org}-{series_name}")
 
 
-def _bump_email_count(store, entity_id: str, *, mentions: bool = False) -> None:
-    """Increment an entity's email_count (and, with mentions=True, mentions)
-    by one.
+def _bump_email_count(store, entity_id: str) -> None:
+    """Increment an entity's email_count and mentions by one, for every
+    entity type.
 
     Called from apply() only when a NEW, non-derived (message_id, entity_id)
     link row was created, so both count distinct primary messages and stay
     stable when a thread is re-applied or a derived source mentions the
-    entity (spec 2026-10-22 §3).
+    entity (spec 2026-10-22 §3). Source removal takes both back
+    (Store._invalidate_sources_in); the clean-up's recount_mentions step
+    recounts mentions on the same basis.
     """
     with store._connect(write=True) as conn:
         conn.execute(
             "UPDATE entities SET email_count = email_count + 1, "
-            "mentions = COALESCE(mentions, 0) + ? WHERE id = ?",
-            (1 if mentions else 0, entity_id))
+            "mentions = COALESCE(mentions, 0) + 1 WHERE id = ?",
+            (entity_id,))
 
 
 def _ensure_works_at(conn, entity_id: str, org: str, *, derived: bool = False) -> None:

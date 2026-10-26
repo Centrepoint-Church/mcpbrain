@@ -37,6 +37,8 @@ _NOREPLY_RE = re.compile(r"\bno.?reply\b|\bnoreply\b|\bmailer.daemon\b|\bautomat
 _BASELINE = 3.0
 _MAX = 10.0
 _MIN = 1.0
+# What an owner-authored chunk adds to its structural score.
+OWNER_BOOST = 1.5
 
 
 _AGE_DATE_KEYS = ("date", "date_iso", "start", "modified", "modifiedTime")
@@ -118,6 +120,16 @@ def _is_owner_authored(metadata: dict, owner_email: str, *, doc_id: str = "",
     cls = sc.classify(doc_id, metadata, rules)
     if not (sc.is_evidence(cls) or cls is sc.SourceClass.DUPLICATE):
         return False
+    return owner_signals(metadata, owner_email)
+
+
+def owner_signals(metadata: dict, owner_email: str) -> bool:
+    """The owner-authorship signals alone, blind to source class: never a
+    draft-labelled chunk; else an explicit sender_is_owner / from_owner flag,
+    the owner's address in the sender, or a Gmail 'SENT' label. This is the
+    whole rule as it stood before M6 — the ingestion clean-up's
+    derived_salience step uses it to find derived chunks the old rule
+    boosted."""
     raw = metadata.get("labels") or []
     if isinstance(raw, str):
         labels = [p.strip().lower() for p in raw.split(",")]
@@ -153,7 +165,7 @@ def score_structural(metadata: dict, *, owner_email: str = "", doc_id: str = "",
 
     # Owner sent/replied
     if _is_owner_authored(metadata, owner_email, doc_id=doc_id, rules=rules):
-        score += 1.5
+        score += OWNER_BOOST
 
     # Explicit user signals
     labels = metadata.get("labels") or []

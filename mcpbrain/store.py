@@ -3230,20 +3230,19 @@ class Store:
                     (reason, at, *params)).rowcount
             if links:
                 live = db.execute(
-                    f"SELECT message_id, entity_id, role FROM email_entities "
+                    f"SELECT message_id, entity_id FROM email_entities "
                     f"WHERE message_id IN ({qs}) AND COALESCE(derived,0)=0",
                     part).fetchall()
                 for r in live:
-                    # A meeting-series 'about' link is the one link that also
-                    # counted a mention (graph_write.apply); take it back too,
-                    # or each remove/revive cycle inflates mentions (M7).
+                    # Every new primary link counted a mention with its
+                    # email_count (graph_write.apply); take both back, or each
+                    # remove/revive cycle inflates mentions (M7).
                     db.execute(
                         "UPDATE entities SET email_count = "
                         "MAX(0, COALESCE(email_count,0) - 1), "
-                        "mentions = CASE WHEN ? AND type='meeting' "
-                        "THEN MAX(0, COALESCE(mentions,0) - 1) ELSE mentions END "
+                        "mentions = MAX(0, COALESCE(mentions,0) - 1) "
                         "WHERE id=?",
-                        (1 if r["role"] == "about" else 0, r["entity_id"]))
+                        (r["entity_id"],))
                 db.execute(
                     f"UPDATE email_entities SET derived=1, derived_reason=? "
                     f"WHERE message_id IN ({qs}) AND COALESCE(derived,0)=0",

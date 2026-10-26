@@ -214,8 +214,9 @@ def test_daemon_pass_runs_migration_once(env, monkeypatch):
 
     def fake(store, home, *, embedder_factory=None, **k):
         calls.append(embedder_factory())
-        store.set_meta(ic.MARKER_KEY, json.dumps({"state": "done", "by": "daemon"}))
-        return {"state": "done", "by": "daemon"}
+        rec = {"state": "done", "by": "daemon", "steps": list(ic.STEPS)}
+        store.set_meta(ic.MARKER_KEY, json.dumps(rec))
+        return rec
 
     monkeypatch.setattr(ic, "run_migration", fake)
     dm = _bare_daemon(env)
@@ -392,3 +393,144 @@ def test_n3_daemon_loads_embedder_before_taking_bulk_lock(env, monkeypatch):
     assert dm._run_ingestion_cleanup() == {"ingestion_cleanup": "done"}
     assert order == [("embedder", False), ("run", True, "EMB")]
     assert not dm._bulk_lock.locked()
+
+
+# ---------------------------------------------------------------------------
+# Steps added after an install's clean-up was done (Task 8)
+# ---------------------------------------------------------------------------
+
+BASE_STEPS = [s for s in ic.STEPS if s not in ic.ADDED_STEPS]
+
+
+def _old_done(env, **extra):
+    rec = {"state": "done", "by": "daemon", "steps": BASE_STEPS, "skipped": [],
+           "counts": {"source_session": {"actions:session": 1}},
+           "at": "2026-10-23T01:54:00+00:00", **extra}
+    env["store"].set_meta(ic.MARKER_KEY, json.dumps(rec))
+    return rec
+
+
+def test_base_steps_are_the_thirteen_that_shipped():
+    assert len(BASE_STEPS) == 13 and len(ic.STEPS) == 15
+    assert ic.STEPS.index("recount_mentions") == ic.STEPS.index("sources_backfill") + 1
+    assert ic.OWNER_REPAIR_STEP not in ic.STEPS + ic.ADDED_STEPS
+
+
+def test_fresh_install_runs_all_steps_once(env):
+    rec = _mig(env)
+    assert rec["state"] == "done" and rec["steps"] == list(ic.STEPS)
+    assert "pending_steps" not in rec and ic.pending_added_steps(rec) == []
+
+
+def test_done_install_runs_only_the_added_steps_once(env, monkeypatch):
+    _old_done(env)
+    ran = []
+    real_run = ic.run
+    monkeypatch.setattr(ic, "run", lambda store, home, steps, **kw:
+                        ran.append(list(steps)) or real_run(store, home, steps, **kw))
+    rec = _mig(env)
+    assert ran == [list(ic.ADDED_STEPS)]
+    assert rec["state"] == "done" and rec["by"] == "daemon"
+    assert rec["steps"] == list(ic.STEPS) and "pending_steps" not in rec
+    assert rec["counts"]["source_session"] == {"actions:session": 1}    # merged
+    assert rec["counts"]["recount_mentions"]["entities:mentions"] >= 1
+    assert rec["counts"]["derived_salience"]["chunks_salience:brief"] == 1
+    assert _act(env, "session")["status"] == "open"     # the old steps did not rerun
+    once = _dump(env["store"].path)
+    rec2 = _mig(env)                                      # second call: no-op
+    assert ran == [list(ic.ADDED_STEPS)] and rec2["at"] == rec["at"]
+    assert _dump(env["store"].path) == once
+
+
+def test_done_install_waits_for_backup_and_stays_done(env):
+    _old_done(env)
+    before = _dump(env["store"].path)
+    rec = _mig(env, last_backup=STALE)
+    assert rec["state"] == "done" and rec["steps"] == BASE_STEPS
+    assert rec["pending_steps"] == list(ic.ADDED_STEPS)
+    assert rec["pending_reason"] == "no_backup"
+    assert "waiting for a restore point" in ic.summary_line(rec)
+    assert _dump(env["store"].path) == before
+    rec = _mig(env)                                       # retried next call
+    assert rec["state"] == "done" and rec["steps"] == list(ic.STEPS)
+    assert "pending_steps" not in rec and "pending_reason" not in rec
+
+
+def test_done_install_honours_kill_switch(env):
+    _old_done(env)
+    cfg = json.loads((env["home"] / "config.json").read_text())
+    cfg["ingestion_cleanup_enabled"] = False
+    (env["home"] / "config.json").write_text(json.dumps(cfg))
+    before = _dump(env["store"].path)
+    rec = _mig(env)
+    assert (rec["state"], rec["pending_reason"]) == ("done", "disabled")
+    assert _dump(env["store"].path) == before
+
+
+def test_done_install_skipped_brief_is_not_rerun(env, monkeypatch):
+    _old_done(env, steps=[s for s in BASE_STEPS if s != "source_brief"],
+              skipped=["source_brief"])
+    ran = []
+    monkeypatch.setattr(ic, "run", lambda store, home, steps, **kw:
+                        ran.append(list(steps)) or {})
+    _mig(env)
+    assert ran == [list(ic.ADDED_STEPS)]
+
+
+def test_cli_undo_marker_runs_nothing(env, monkeypatch):
+    """The done an attended --undo writes on a store the clean-up never ran on
+    keeps the daemon out entirely, added steps included."""
+    _old_done(env, steps=["owner_aliases"], undo=True)
+    monkeypatch.setattr(ic, "run", lambda *a, **k: (_ for _ in ()).throw(AssertionError))
+    assert ic.pending_added_steps(ic.read_marker(env["store"])) == []
+    assert _mig(env)["state"] == "done"
+
+
+def test_cli_undo_after_a_full_run_keeps_added_steps_due(env):
+    """An --undo after the clean-up ran keeps the prior marker (steps intact):
+    added steps are still due."""
+    _old_done(env)
+    assert _main(env, "--yes", "--skip-snapshot-for-tests", "--undo", "owner_aliases") == 0
+    rec = ic.read_marker(env["store"])
+    assert rec["state"] == "done" and ic.pending_added_steps(rec) == list(ic.ADDED_STEPS)
+
+
+def test_failed_stays_failed_with_added_steps(env, monkeypatch):
+    env["store"].set_meta(ic.MARKER_KEY, json.dumps(
+        {"state": "failed", "steps": BASE_STEPS, "error": "x"}))
+    monkeypatch.setattr(ic, "run", lambda *a, **k: (_ for _ in ()).throw(AssertionError))
+    assert _mig(env)["state"] == "failed"
+
+
+def test_added_step_error_records_failed_once(env, monkeypatch):
+    _old_done(env)
+    calls = []
+
+    def boom(*a, **k):
+        calls.append(1)
+        raise RuntimeError("disk full")
+
+    monkeypatch.setattr(ic, "run", boom)
+    rec = _mig(env)
+    assert rec["state"] == "failed" and "disk full" in rec["error"]
+    assert _mig(env)["state"] == "failed" and len(calls) == 1
+
+
+def test_added_steps_interrupted_give_up(env, monkeypatch):
+    _old_done(env, pending_steps=list(ic.ADDED_STEPS), pending_reason="running",
+              pending_attempts=ic.MAX_ATTEMPTS)
+    monkeypatch.setattr(ic, "run", lambda *a, **k: (_ for _ in ()).throw(AssertionError))
+    rec = _mig(env)
+    assert rec["state"] == "failed" and "interrupted" in rec["error"]
+
+
+def test_daemon_pass_runs_added_steps_without_a_model(env, monkeypatch):
+    _old_done(env)
+    seen = []
+    monkeypatch.setattr(ic, "run_migration",
+                        lambda store, home, *, embedder_factory=None, **k:
+                        seen.append(embedder_factory()) or {"state": "done"})
+    dm = _bare_daemon(env)
+    dm._embedder_bounded = lambda timeout=None: (_ for _ in ()).throw(AssertionError)
+    assert dm._run_ingestion_cleanup() == {"ingestion_cleanup": "done"}
+    assert seen == [ic.LEXICAL]
