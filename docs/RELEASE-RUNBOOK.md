@@ -869,8 +869,8 @@ Spec: `docs/superpowers/specs/2026-10-22-ingestion-integrity-design.md`. Archive
 open actions and marks links that came from the brain's own output (session notes,
 briefs, drafts, consolidated notes, digests), marks observations of entities known
 only from that output, dedupes actions by meaning, and recounts relation strength
-from distinct evidence sources (15 steps; the last added are `derived_salience` and
-`recount_mentions`). Nothing is deleted: every change is logged in
+from distinct evidence sources (15 steps; two were added later: `recount_mentions` and
+`derived_salience`). Nothing is deleted: every change is logged in
 `cleanup_log` and `--undo STEP` reverses it.
 
 **Every install runs it by itself, once** (ruling I13). The code lives in the
@@ -940,8 +940,8 @@ Attended use (this machine, or to inspect / undo):
    `mcpbrain clean-ingestion --undo owner_repair --yes` (drift is judged per action
    row and column group).
 
-**Added steps on an install that is already `done`** (15 steps now; the 14th and 15th,
-`derived_salience` and `recount_mentions`, were added after the first release of this
+**Added steps on an install that is already `done`** (15 steps now; `recount_mentions` (12th, after
+`sources_backfill`) and `derived_salience` (15th, last) were added after the first release of this
 clean-up). The daemon runs ADDED steps once under the same gates (kill switch, restore
 point < 24 h, bulk lock, integrity check). The marker stays `done`; `pending_steps` shows
 in `/api/status` while gated; a failure records `added_error`, is never retried, and

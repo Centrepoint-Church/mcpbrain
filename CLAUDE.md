@@ -490,7 +490,7 @@ counted re-extractions, not sources.
   store has no `cleanup_log` until the new-schema daemon or a first `--yes` runs
   `Store.init`. Procedure: `docs/RELEASE-RUNBOOK.md` §9.
 
-- **Parked minors CLOSED (2026-10-26).** Owner repair backs off a failing embedder (60 s
+- **Parked minors CLOSED (2026-10-26, source-only).** Owner repair backs off a failing embedder (60 s
   doubling to 3,600 s, hygiene due at retry time), logs to `cleanup_log` step `owner_repair`
   (`--undo owner_repair --yes`, drift judged per action row per column group); canonicalise
   runs without a model; `/api/recall` answers before writing exposure rows (N5); new step
