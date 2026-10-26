@@ -21,6 +21,7 @@ It states this honestly. Recreating tasks is therefore always a guided step
 """
 from __future__ import annotations
 
+import json
 import shutil
 import sys
 from datetime import datetime, timezone
@@ -497,10 +498,19 @@ def run_doctor(home, *, conns=None, repairs=None, reprobe=None, platform=None,
         text = f"{oversize} chunk(s) longer than one window"
         if not oversize:
             lines.append(f"✅ {'Chunk window':<16} {text}")
-        elif store.get_meta("oversize_heal"):
-            lines.append(f"✅ {'Chunk window':<16} {text}, embedded across windows")
         else:
-            lines.append(f"⚠️ {'Chunk window':<16} {text} — re-embed pending")
+            # ✅ only once the heal is done AND nothing over the window is
+            # still waiting for its (windowed) embedding.
+            left = store.count_unembedded_longer_than(2000)
+            try:
+                heal = json.loads(store.get_meta("oversize_heal") or "{}")
+            except ValueError:
+                heal = {}
+            if isinstance(heal, dict) and heal.get("state") == "done" and not left:
+                lines.append(f"✅ {'Chunk window':<16} {text}, embedded across windows")
+            else:
+                tail = f" ({left} left)" if left else ""
+                lines.append(f"⚠️ {'Chunk window':<16} {text} — re-embed pending{tail}")
     except Exception as exc:  # noqa: BLE001 — never fatal
         lines.append(f"➖ {'Chunk window':<16} skipped ({exc})")
 

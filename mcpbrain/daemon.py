@@ -4275,43 +4275,80 @@ class Daemon:
     def _oversize_heal_once(self, home, workable: set[str]) -> None:
         """One-shot heal of chunks written before the oversize/CSS fixes, run
         inside the reflow seed AFTER its gates (kill switch, halt, backup
-        < 24 h), so it rewrites nothing the seed itself could not.
+        < 24 h). Never raises: a failure is logged and the marker is left as
+        it was, so the seed itself carries on and the heal retries next tick.
 
-        Enqueues a reflow for each target owner (Store.oversize_heal_targets:
-        CSS-polluted Gmail bodies, over-window Drive tables) of a WORKABLE
-        source -- a source this install cannot work would only have its rows
-        freed by the next seed -- and resets embedded=0 on every chunk whose
-        embed passage exceeds one window, target owners included (a reflow
-        that ends `source_gone` keeps its old chunks), so index_pending
-        re-embeds them across windows. Then writes the `oversize_heal` meta
-        marker; once it is done this costs one meta read per seed tick.
+        State lives in the `oversize_heal` meta marker:
+          absent      -> first open tick: compute the targets ONCE
+                         (Store.oversize_heal_targets: CSS-polluted Gmail
+                         bodies, over-window Drive tables), reset embedded=0 on
+                         every chunk whose embed passage exceeds one window
+                         (target owners included: a reflow that ends
+                         `source_gone` keeps its old chunks), and record
+                         state "enqueuing" with the owners still to enqueue;
+          "enqueuing" -> each open tick enqueues at most the seed's free room
+                         (REFLOW_WINDOW less the due rows), so the heal never
+                         runs further ahead of a backup than the seed may;
+          "done"      -> nothing left; one meta read per tick, no scans.
+        Owners of a source not in `workable` (this install cannot work it;
+        the next seed would only free its rows) are dropped from the remainder
+        and counted in `skipped`, so such a source cannot hold the heal open
+        forever. The windowed re-embed still covers their chunks."""
+        try:
+            self._oversize_heal_step(home, workable)
+        except Exception as exc:  # noqa: BLE001 — must never stop the seed
+            log.warning("oversize_heal failed (will retry next tick): %s", exc)
 
-        Raises to the seed's handler on failure: the marker stays unwritten
-        and the next open tick retries (every step is idempotent)."""
-        if self._store.get_meta("oversize_heal"):
-            return
+    def _oversize_heal_step(self, home, workable: set[str]) -> None:
         import datetime as _dt
         from mcpbrain.index import EMBED_WINDOW_CHARS
-        targets = self._store.oversize_heal_targets(window=EMBED_WINDOW_CHARS)
-        queued = {}
-        for src, owners in targets.items():
+        raw = self._store.get_meta("oversize_heal")
+        rec = json.loads(raw) if raw else None
+        if rec is not None and rec.get("state") == "done":
+            return
+        if rec is None:
+            targets = self._store.oversize_heal_targets(window=EMBED_WINDOW_CHARS)
+            reembed = self._store.reset_embedding_for_oversize(
+                EMBED_WINDOW_CHARS, use_prefix=config.contextual_retrieval_enabled(home),
+                bulk_section=self._cycle_bulk_section)
+            rec = {"state": "enqueuing", "gmail": 0, "drive": 0, "skipped": 0,
+                   "reembed": reembed, "remaining": targets}
+            log.info("oversize_heal: %d gmail / %d drive owner(s) to reflow, "
+                     "reset %d chunk(s) for windowed re-embed",
+                     len(targets.get("reflow:gmail", [])),
+                     len(targets.get("reflow:drive", [])), reembed)
+        remaining: dict[str, list[str]] = rec.get("remaining") or {}
+        for src in list(remaining):
             if src not in workable:
-                owners = []
-            queued[src] = self._store.enqueue_items(
+                rec["skipped"] = rec.get("skipped", 0) + len(remaining.pop(src))
+        room = REFLOW_WINDOW - self._store.reflow_due_count()
+        inserted = 0
+        for src in sorted(remaining):
+            if room <= 0:
+                break
+            take, remaining[src] = remaining[src][:room], remaining[src][room:]
+            room -= len(take)
+            n = self._store.enqueue_items(
                 [{"ref_id": o, "event": "reflow", "modified_at": "1970-01-01T00:00:00"}
-                 for o in owners], source=src)
-        if any(queued.values()):
+                 for o in take], source=src)
+            key = src.split(":", 1)[1]
+            rec[key] = rec.get(key, 0) + n
+            inserted += n
+            if not remaining[src]:
+                del remaining[src]
+        if inserted:
             # New reflow work: the backlog's end must be integrity-checked again.
             self._store.set_cursor("reflow:integrity_checked", "")
-        reembed = self._store.reset_embedding_for_oversize(
-            EMBED_WINDOW_CHARS, use_prefix=config.contextual_retrieval_enabled(home))
-        rec = {"state": "done", "at": _dt.datetime.now(_dt.timezone.utc).isoformat(),
-               "gmail": queued.get("reflow:gmail", 0),
-               "drive": queued.get("reflow:drive", 0), "reembed": reembed}
+        rec["at"] = _dt.datetime.now(_dt.timezone.utc).isoformat()
+        if remaining:
+            rec["remaining"] = remaining
+        else:
+            rec.pop("remaining", None)
+            rec["state"] = "done"
+            log.info("oversize_heal: done (%d gmail / %d drive queued, %d skipped, "
+                     "%d re-embed)", rec.get("gmail", 0), rec.get("drive", 0),
+                     rec.get("skipped", 0), rec.get("reembed", 0))
         self._store.set_meta("oversize_heal", json.dumps(rec))
-        log.info("oversize_heal: queued %d gmail / %d drive reflow(s), "
-                 "reset %d chunk(s) for windowed re-embed",
-                 rec["gmail"], rec["drive"], reembed)
 
     def _reflow_backlog_empty(self):
         """Once per completion: run integrity_check and record the result.

@@ -3,7 +3,7 @@ import json
 import re
 import sqlite3
 import threading
-from contextlib import closing, contextmanager
+from contextlib import closing, contextmanager, nullcontext
 from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
 from typing import Iterator
@@ -3362,7 +3362,8 @@ class Store:
                     (stype, *args, stype))]
         return out
 
-    def reset_embedding_for_oversize(self, window: int, *, use_prefix: bool = True) -> int:
+    def reset_embedding_for_oversize(self, window: int, *, use_prefix: bool = True,
+                                     bulk_section=None, batch: int = 2000) -> int:
         """Set embedded=0 on every embedded chunk whose embed passage is longer
         than `window`, so index_pending re-embeds it across windows instead of
         keeping the vector of its truncated head. Returns the number reset.
@@ -3371,8 +3372,12 @@ class Store:
         (what index_pending embeds), else the raw text. The prefix is built
         from metadata values plus under 64 chars of fixed labels, so
         `length(text) + length(metadata) + 64` bounds the passage from above
-        and serves as the SQL prefilter; the exact check runs in Python.
-        One write transaction for the whole reset."""
+        and serves as the SQL prefilter; the exact check runs in Python. A row
+        whose metadata is not valid JSON is skipped (it cannot be embedded
+        with a prefix anyway).
+
+        Writes in transactions of at most `batch` rows, each inside
+        `bulk_section()` when given (the daemon's chunk-mutating section)."""
         from mcpbrain.embed import contextual_prefix
         bound = "length(text) + length(metadata) + 64" if use_prefix else "length(text)"
         hits: list[tuple[int]] = []
@@ -3380,14 +3385,30 @@ class Store:
             for r in db.execute(
                     f"SELECT rowid, length(text) AS n, metadata FROM chunks "
                     f"WHERE embedded=1 AND {bound} > ?", (int(window),)):
-                plen = len(contextual_prefix(json.loads(r["metadata"] or "{}"))) \
-                    if use_prefix else 0
+                plen = 0
+                if use_prefix:
+                    try:
+                        md = json.loads(r["metadata"] or "{}")
+                    except ValueError:
+                        continue
+                    plen = len(contextual_prefix(md if isinstance(md, dict) else {}))
                 if r["n"] + plen > window:
                     hits.append((r["rowid"],))
-        if hits:
-            with self._connect(write=True) as db:
-                db.executemany("UPDATE chunks SET embedded=0 WHERE rowid=?", hits)
+        section = bulk_section or nullcontext
+        for i in range(0, len(hits), max(1, int(batch))):
+            with section():
+                with self._connect(write=True) as db:
+                    db.executemany("UPDATE chunks SET embedded=0 WHERE rowid=?",
+                                   hits[i:i + batch])
         return len(hits)
+
+    def count_unembedded_longer_than(self, n: int) -> int:
+        """Chunks longer than n characters still waiting for an embedding
+        (embedded=0) -- served by the partial index on unembedded rows."""
+        with self._connect() as db:
+            return db.execute(
+                "SELECT COUNT(*) FROM chunks WHERE embedded=0 AND length(text) > ?",
+                (int(n),)).fetchone()[0]
 
     def unembedded_chunks(self, limit: int | None = None) -> list[dict]:
         """Chunks awaiting embedding. `limit` bounds one cycle's slice of work.
