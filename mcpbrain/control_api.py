@@ -414,11 +414,18 @@ class ControlServer:
                 limit = max(1, min(int(body.get("limit") or 5), 10))
                 expand = bool(body.get("expand"))
                 results = d.search(q, limit, expand=expand) if q else []
-                # Log exposure events for injected chunks (S2 feedback signal).
+                # Answer FIRST. The exposure INSERT waits on SQLite's single
+                # write lock, which a long bulk write can hold for longer than
+                # the hook's timeout. h_json writes the whole response (headers
+                # + Content-Length body) to the unbuffered socket file before
+                # returning, so the client has its answer; the exposure log
+                # (S2 feedback signal) then runs on this handler thread. Errors
+                # are swallowed inside _log_recall_exposures.
+                h_json(h, 200, {"results": results})
                 if results and self.store is not None:
                     session_id = (body.get("session_id") or "").strip()
                     _log_recall_exposures(self.store, results, session_id)
-                return h_json(h, 200, {"results": results})
+                return
             if h.path == "/api/tool":
                 # Execute a Store-touching MCP tool in THIS process (the thin
                 # adapter's daemon half). Argument validation happens at the MCP

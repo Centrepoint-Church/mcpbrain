@@ -610,3 +610,37 @@ def test_session_ingest_skips_maintenance_and_sidechain(tmp_path):
         status, body = _session_ingest(tmp_path, {"title": "S", **extra})
         assert status == 200 and body["queued"] is False and body["skipped"]
     assert not (tmp_path / "capture_inbox").exists() or not _spooled(tmp_path)
+
+
+def test_recall_answers_before_logging_exposures(tmp_path):
+    """The response must reach the client while the exposure write is still
+    blocked on the store's write lock; releasing it then records the rows."""
+    import threading
+
+    started, release, done = threading.Event(), threading.Event(), threading.Event()
+    rows = []
+
+    class BlockingStore:
+        def record_recall_feedback_batch(self, batch):
+            started.set()
+            release.wait(10)
+            rows.extend(batch)
+            done.set()
+
+    d = FakeDaemon()
+    srv = ControlServer(d, home=str(tmp_path), store=BlockingStore())
+    srv.start()
+    try:
+        base = f"http://127.0.0.1:{srv.port}"
+        r = _post(base + "/api/recall", srv.token,
+                  {"query": "launch team", "session_id": "s1"})
+        data = json.loads(r.read())
+        assert data["results"][0]["doc_id"] == "d1"
+        assert started.wait(5)
+        assert not done.is_set()  # write still blocked after the full response
+        release.set()
+        assert done.wait(5)
+        assert [(x[0], x[1], x[2]) for x in rows] == [("d1", "s1", "exposure")]
+    finally:
+        release.set()
+        srv.stop()
