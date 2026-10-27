@@ -333,7 +333,7 @@ list of the rest (`reference/*`, `MEMORY.md`, `CLAUDE.md`, `memory.md`) to fetch
 tool and `resources/list`, so they cannot disagree. Both instruction texts now
 say "call brain_owner_context". **28 tools** after release (was 27).
 
-## Incremental backup (2026-10-19, source-only, NOT released)
+## Incremental backup (2026-10-19, RELEASED in 0.7.144)
 
 Spec `docs/superpowers/specs/2026-10-19-incremental-backup-design.md`; operator
 notes in `docs/RELEASE-RUNBOOK.md` ("Backup and restore").
@@ -400,7 +400,7 @@ upload for the first time. `bin/optimise_store.py` still uses
 
 **Live verification (2026-10-21, this machine, installed from the working tree via bootout → reinstall → clear __pycache__ → bootstrap):** first base 921 MB / 42 files captured and uploaded in 11 min 13 s and committed; the stale 790 MB `snapshot.enc` was removed after the commit; Drive layout `<backup drive>/<email>/chain-20261021-5d5299/` (42 base files + records + manifest, 923 MB); prune's `name contains 'base-'` query matched 42 of 42 on real Drive. A second `mcpbrain backup` 10 minutes later produced a 4.1 MB delta and finished in 43 s. A resumable upload stopped at 32 MiB of 40 MiB resumed from a fresh transport using only the saved session and verified by md5 on real Drive. `mcpbrain restore --check` picks the new chain; the 16 June 2026 legacy file is now the LAST fallback. A scratch restore rebuilt the store from base + delta in 2 min 50 s: `integrity_check` ok, 255,149 chunks / 33,025 entities, sha256 equal to the capture's `db_sha256`, records + config restored, staging cleaned up. Still to measure: the 24-hour delta size (sets `base_threshold`, now 2.0).
 
-## Ingestion integrity (2026-10-22, source-only, NOT released)
+## Ingestion integrity (2026-10-22, RELEASED in 0.7.144)
 
 **LIVE on this machine (2026-10-23, installed from the working tree, NOT released).**
 The one-shot clean-up ran by the DAEMON at 01:54Z, not the attended CLI: a scheduled
@@ -501,7 +501,7 @@ counted re-extractions, not sources.
   (marker stays done; `pending_steps` while gated; `added_error` if they fail, never retried,
   doctor warns). The CLI full run on a done install names the pending steps; the daemon runs them.
 
-## Oversized chunks, CSS leak and the held owner (2026-10-26, source-only, NOT released)
+## Oversized chunks, CSS leak and the held owner (2026-10-26, RELEASED in 0.7.144)
 
 Found by auditing why chunks exceeded the embed window and why one owner stayed held.
 
@@ -550,6 +550,24 @@ Found by auditing why chunks exceeded the embed window and why one owner stayed 
 
 ## Shipping caveats
 
+- **Current state (2026-10-27): the four version files (+ `uv.lock`) are at
+  `0.7.144`, RELEASED** — source `46b39883`, gh-pages `50cd0a6c`, plugin `9871f2c`;
+  index serves only `mcpbrain-0.7.144-py3-none-any.whl`, `install.ps1` 200; fleet
+  resolves mcp/mcp-types 2.3.0, **fastembed 0.9.1** (drifted from 0.9.0; embeddings
+  verified BIT-IDENTICAL, max diff 0.0), google-auth 2.62.0, pymupdf 1.28.2, httplib2
+  0.32.0; full suite under exactly that set **5198 passed, 0 failed**; ruff clean;
+  tenant check passed; live gold 0.900 / 0.601. Wheel contents asserted (heal,
+  windowed embed, `drop_emptied_native`, the `<head>`/`<body` rule, 15-step clean-up,
+  backup modules, `action_owner`, `source_class`, tenant files; no gold set, no
+  `tenant_people.json`). Installed from the published index (bootout → reinstall →
+  clear `__pycache__` → bootstrap); `/api/status` 0.7.144, `stalled: None`; doctor
+  integrity ok, 0 need action. **0.7.144 ships four bodies of work** (sections above):
+  incremental backup, the backup drive excluded from ingestion, ingestion integrity +
+  owner identity + the parked minors, and the oversized-chunk / CSS-leak / held-owner
+  heal. **Fleet effects on upgrade:** a full first backup base (~1 GB here; other
+  staff's FIRST backups ever), the one-shot 15-step clean-up (communities reshape),
+  a windowed re-embed of over-window chunks, reflow of CSS-polluted mail and wide
+  sheets. **The Windows HARDWARE QA GATE remains OPEN.**
 - **Current state (2026-09-29): the four version files (+ `uv.lock`) are at
   `0.7.134`, RELEASED** — source `be855d3d`, gh-pages `315c3ef8`, plugin `b29c282`;
   index serves only `mcpbrain-0.7.134-py3-none-any.whl`, `install.ps1` 200. Full
