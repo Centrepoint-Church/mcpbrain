@@ -1090,6 +1090,18 @@ def owner_email(home) -> str:
     return read_config(home).get("owner_email", "") or ""
 
 
+def start_at_login(home) -> bool:
+    """Whether the daemon's login agent starts mcpbrain at login. Default True.
+
+    Written only by system_ops.set_start_at_login (which also rewrites the
+    launch agent); /api/settings does not accept this key. Anything other than
+    a real boolean reads as the default, so a hand-edited typo never switches
+    the daemon off at login.
+    """
+    val = read_config(home).get("start_at_login", True)
+    return val if isinstance(val, bool) else True
+
+
 def _ingest_list(home, key: str) -> list[str]:
     block = read_config(home).get("ingest") or {}
     vals = block.get(key) if isinstance(block, dict) else None

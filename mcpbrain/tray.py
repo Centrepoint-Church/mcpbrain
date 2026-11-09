@@ -17,6 +17,8 @@ Two layers, so pystray stays out of the test path:
 
 from __future__ import annotations
 
+import sys
+import threading
 import webbrowser
 from typing import TYPE_CHECKING
 
@@ -34,8 +36,10 @@ class TrayController:
     drives both. No pystray import here.
     """
 
-    def __init__(self, client: "ControlClient") -> None:
+    def __init__(self, client: "ControlClient", *, start_daemon=None) -> None:
         self._client = client
+        # Injectable for tests; the default goes through the login agent.
+        self._start_daemon = start_daemon or _start_daemon_via_agent
         self._last: dict | None = None
         self._available = False
         self._quit = False
@@ -131,6 +135,15 @@ class TrayController:
         if url:
             webbrowser.open(url)
 
+    def on_start_daemon(self) -> None:
+        """Start the daemon through its login agent (shown only while it is down).
+
+        For when the daemon is not running, e.g. "Start when I log in" is off.
+        Runs off the menu thread: the agent call can take a few seconds.
+        """
+        threading.Thread(target=self._start_daemon, name="mcpbrain-start",
+                         daemon=True).start()
+
     def on_quit(self) -> None:
         """Close the tray icon. Does NOT stop the daemon (login agent owns it)."""
         self._quit = True
@@ -146,14 +159,15 @@ class TrayController:
     def menu_items(self) -> list[tuple[str, object, bool]]:
         """Return a plain (label, handler, enabled) description of the menu.
 
-        Layout: Indexed/Enriched counts (or a "not running" line when the daemon
-        is down) → Open Dashboard → conditional Reconnect Google → version →
+        Layout: Indexed/Enriched counts (or a "not running" line and "Start
+        mcpbrain" when the daemon is down) → Open Dashboard → conditional Reconnect Google → version →
         Quit. Pause/Resume and Open-setup have moved off the tray: setup now
         lives behind the dashboard's settings cog.
         """
         items: list[tuple[str, object, bool]] = []
         if not self._available or self._last is None:
             items.append(("Daemon not running", None, False))
+            items.append(("Start mcpbrain", self.on_start_daemon, True))
         else:
             items.append((f"Indexed: {self.indexed_count():,}", None, False))
             items.append((f"Enriched: {self.enriched_count():,}", None, False))
@@ -164,6 +178,19 @@ class TrayController:
         items.append((f"Up to date · v{ver}" if ver else "mcpbrain", None, False))
         items.append(("Quit", self.on_quit, True))
         return items
+
+
+def _start_daemon_via_agent() -> None:
+    """Default "Start mcpbrain" action: agents.restart_agent for this platform.
+
+    Never raises: a failure leaves the menu showing "Daemon not running".
+    """
+    from mcpbrain import agents
+    try:
+        agents.restart_agent(sys.platform)
+    except Exception:  # noqa: BLE001
+        import logging
+        logging.getLogger(__name__).exception("tray: starting the daemon failed")
 
 
 # ---------------------------------------------------------------------------

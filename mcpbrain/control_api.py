@@ -60,6 +60,12 @@ def h_json(h, code, obj):
     h.send_header("Content-Length", str(len(b))); h.end_headers(); h.wfile.write(b)
 
 
+def h_text(h, code, text):
+    b = text.encode("utf-8")
+    h.send_response(code); h.send_header("Content-Type", "text/plain; charset=utf-8")
+    h.send_header("Content-Length", str(len(b))); h.end_headers(); h.wfile.write(b)
+
+
 class RestoreHoldRefused(RuntimeError):
     """Daemon.call_tool refused a store-writing tool during the restore hold."""
 
@@ -68,6 +74,8 @@ class ControlServer:
         self.daemon = daemon; self.home = Path(home)
         self.store = store  # may be None if dashboard not enabled
         self.token = secrets.token_urlsafe(32); self._httpd = None; self.port = None
+        from mcpbrain import system_ops
+        self.diagnostics = system_ops.Diagnostics()   # one background doctor run
 
     def start(self):
         server = self
@@ -179,6 +187,30 @@ class ControlServer:
                 if self.path == "/api/settings":
                     from mcpbrain import settings_api
                     return h_json(self, 200, settings_api.get_settings(server.home))
+                if self.path == "/api/system":
+                    from mcpbrain import system_ops
+                    return h_json(self, 200, system_ops.system_info(server.daemon, server.home))
+                if self.path == "/api/update/check":
+                    from mcpbrain import system_ops
+                    return h_json(self, 200, system_ops.check_update())
+                if self.path == "/api/diagnostics":
+                    return h_json(self, 200, server.diagnostics.result())
+                m = re.match(r"^/api/logs/([a-z]+)$", self.path.split("?")[0])
+                if m:
+                    from mcpbrain import system_ops
+                    try:
+                        return h_text(self, 200, system_ops.tail_log(server.home, m.group(1)))
+                    except ValueError:
+                        return h_json(self, 404, {"error": "unknown log"})
+                if self.path == "/api/support/report":
+                    from mcpbrain import system_ops
+                    try:
+                        st = server.daemon.status()
+                    except Exception:  # noqa: BLE001 — a report must still come out
+                        log.exception("support report: status failed")
+                        st = {}
+                    return h_text(self, 200, system_ops.support_report(
+                        server.home, st, diagnostics=server.diagnostics))
                 if self.path.split("?")[0] in _CHUNK_LIST_ROUTES:
                     if server.store is None:
                         return h_json(self, 503, {"error": "dashboard not available"})
@@ -506,6 +538,33 @@ class ControlServer:
                     return h_json(h, 409, {"error": f"{source} is switched off"})
                 d.sync_now(source)
                 return h_json(h, 200, {"woken": True, "source": source})
+            if h.path == "/api/restart":
+                # Reply first: the restart stops this server along with the
+                # daemon, and the new one listens on a new port and token.
+                from mcpbrain import system_ops
+                h_json(h, 202, {"restarting": True})
+                system_ops.request_restart(d)
+                return None
+            if h.path == "/api/system/login":
+                on = body.get("on")
+                if not isinstance(on, bool):
+                    return h_json(h, 400, {"error": "on must be true or false"})
+                from mcpbrain import system_ops
+                return h_json(h, 200, system_ops.set_start_at_login(self.home, on))
+            if h.path == "/api/update/apply":
+                from mcpbrain import system_ops
+                try:
+                    system_ops.apply_update(d)
+                except system_ops.UpToDate:
+                    return h_json(h, 409, {"error": "already up to date"})
+                return h_json(h, 202, {"updating": True, "version": d._pending_update})
+            if h.path == "/api/diagnostics/run":
+                try:
+                    st = d.status()
+                except Exception:  # noqa: BLE001 — doctor reports the daemon side itself
+                    st = {}
+                started = self.diagnostics.start(self.home, st)
+                return h_json(h, 202, {"started": started, "running": True})
             if h.path == "/api/model/ensure":
                 d.ensure_model(); return h_json(h, 202, {"started": True})
             if h.path == "/api/connect-desktop":

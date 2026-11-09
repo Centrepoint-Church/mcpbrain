@@ -198,3 +198,33 @@ def test_tray_title_within_windows_tooltip_limit():
     src = pathlib.Path("mcpbrain/tray.py").read_text(encoding="utf-8")
     m = re.search(r'title\s*=\s*"([^"]*)"', src)
     assert m and len(m.group(1)) <= 127
+
+
+def test_menu_offers_start_when_daemon_down():
+    started = []
+    c = TrayController(FakeClient(up=False),
+                       start_daemon=lambda: started.append("start"))
+    c.refresh()
+    items = c.menu_items()
+    start = [(lab, h, e) for (lab, h, e) in items if lab == "Start mcpbrain"]
+    assert len(start) == 1 and start[0][2] is True
+    start[0][1]()
+    assert started == ["start"]
+
+
+def test_menu_hides_start_when_daemon_up():
+    labels = [lab for (lab, _, _) in _ctrl().menu_items()]
+    assert "Start mcpbrain" not in labels
+
+
+def test_default_start_calls_restart_agent(monkeypatch):
+    import threading
+    from mcpbrain import agents
+    done = threading.Event()
+    seen = []
+    monkeypatch.setattr(agents, "restart_agent",
+                        lambda platform: (seen.append(platform), done.set()))
+    c = TrayController(FakeClient(up=False))
+    c.on_start_daemon()
+    assert done.wait(5)
+    assert seen == [sys.platform]

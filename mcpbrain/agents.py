@@ -43,15 +43,20 @@ _WAITING_SHIM_MARKER = "WScript.Quit"
 # Pure generators
 # ---------------------------------------------------------------------------
 
-def _launchd_plist(*, label: str, subcommand: str, mcpbrain_bin: str, home: str, keep_alive) -> str:
+def _launchd_plist(*, label: str, subcommand: str, mcpbrain_bin: str, home: str, keep_alive,
+                   run_at_load: bool = True) -> str:
     # keep_alive: True -> always relaunch; False -> never; "crashonly" -> relaunch
     # only on an abnormal (non-zero) exit. "crashonly" is for the tray: a clean
     # Quit (exit 0) must stay quit, but a crash should bring the icon back.
+    # run_at_load=False only means "not at login" when keep_alive is False too:
+    # launchd.plist(5) says any KeepAlive (including a SuccessfulExit dict)
+    # implies RunAtLoad.
     if keep_alive == "crashonly":
         keep_xml = ("<dict>\n        <key>SuccessfulExit</key>\n"
                     "        <false/>\n    </dict>")
     else:
         keep_xml = "<true/>" if keep_alive else "<false/>"
+    run_xml = "<true/>" if run_at_load else "<false/>"
     # Log paths under MCPBRAIN_HOME so crashes are debuggable. Without these,
     # launchd discards stdout/stderr and a daemon that exits non-zero leaves
     # no trace beyond `last exit code` in `launchctl print`.
@@ -76,7 +81,7 @@ def _launchd_plist(*, label: str, subcommand: str, mcpbrain_bin: str, home: str,
         <string>{home}</string>
     </dict>
     <key>RunAtLoad</key>
-    <true/>
+    {run_xml}
     <key>KeepAlive</key>
     {keep_xml}
     <key>StandardOutPath</key>
@@ -88,10 +93,21 @@ def _launchd_plist(*, label: str, subcommand: str, mcpbrain_bin: str, home: str,
 """
 
 
-def launchd_plist(*, mcpbrain_bin: str, home: str) -> str:
-    """Return a macOS launchd plist that runs ``mcpbrain daemon`` at login."""
+def launchd_plist(*, mcpbrain_bin: str, home: str, start_at_login: bool = True) -> str:
+    """Return a macOS launchd plist that runs ``mcpbrain daemon``.
+
+    start_at_login=True (the default): RunAtLoad and KeepAlive true, so the
+    daemon starts at login and launchd relaunches it on any exit.
+
+    start_at_login=False: RunAtLoad and KeepAlive both false. KeepAlive has to
+    go too, because launchd treats any KeepAlive, even the crash-only
+    {SuccessfulExit: false} dict, as implying RunAtLoad (launchd.plist(5)).
+    The job stays loaded, so the tray's "Start mcpbrain" (launchctl kickstart)
+    still starts it on demand; nothing relaunches it after an exit.
+    """
     return _launchd_plist(label=_LABEL, subcommand="daemon", mcpbrain_bin=mcpbrain_bin,
-                          home=home, keep_alive=True)
+                          home=home, keep_alive=bool(start_at_login),
+                          run_at_load=bool(start_at_login))
 
 
 def launchd_tray_plist(*, mcpbrain_bin: str, home: str) -> str:
@@ -335,12 +351,57 @@ def restart_agent(platform: str) -> None:
         raise ValueError(f"Unsupported platform: {platform!r}")
 
 
+def set_login_start(platform: str, *, home: str, on: bool, run=None,
+                    plist_path: Path | None = None) -> bool:
+    """Point the daemon's login agent at the owner's "Start when I log in" choice.
+
+    Takes effect at the next login and leaves the running daemon alone:
+    - darwin rewrites the installed plist (RunAtLoad/KeepAlive, see
+      launchd_plist) without reloading it; launchd reads it again at login.
+      The installed binary and MCPBRAIN_HOME are carried over from the plist.
+    - win32 runs `schtasks /change /tn mcpbrain /enable|/disable`.
+
+    Returns True when an installed agent definition was changed, False when
+    there is none to change (agent not installed, or the Windows Startup-folder
+    fallback, which has no task to switch). `run` and `plist_path` are
+    injectable for tests.
+    """
+    run = run or subprocess.run
+    if platform == "darwin":
+        import plistlib
+        path = Path(plist_path) if plist_path is not None else _LAUNCHD_PATH
+        if not path.exists():
+            log.info("start-at-login: no daemon plist at %s; config only", path)
+            return False
+        try:
+            cur = plistlib.loads(path.read_bytes())
+            mcpbrain_bin = cur["ProgramArguments"][0]
+            agent_home = (cur.get("EnvironmentVariables") or {}).get("MCPBRAIN_HOME") or str(home)
+        except Exception as exc:  # noqa: BLE001 — unreadable plist: rebuild from what we know
+            log.warning("start-at-login: could not parse %s (%s); rebuilding", path, exc)
+            from mcpbrain import setup as _setup
+            mcpbrain_bin, agent_home = _setup._mcpbrain_bin(), str(home)
+        path.write_text(launchd_plist(mcpbrain_bin=mcpbrain_bin, home=agent_home,
+                                      start_at_login=on))
+        log.info("start-at-login %s: rewrote %s (applies at next login)",
+                 "on" if on else "off", path)
+        return True
+    if platform == "win32":
+        res = run(["schtasks", "/change", "/tn", _TASK_NAME, "/enable" if on else "/disable"],
+                  check=False)
+        return getattr(res, "returncode", 1) == 0
+    raise ValueError(f"Unsupported platform: {platform!r}")
+
+
 # ---------------------------------------------------------------------------
 # macOS helpers
 # ---------------------------------------------------------------------------
 
-def _install_launchd(*, mcpbrain_bin: str, home: str) -> None:  # pragma: no cover
-    plist = launchd_plist(mcpbrain_bin=mcpbrain_bin, home=home)
+def _install_launchd(*, mcpbrain_bin: str, home: str) -> None:
+    # A reinstall or update keeps the owner's "Start when I log in" choice.
+    from mcpbrain import config
+    plist = launchd_plist(mcpbrain_bin=mcpbrain_bin, home=home,
+                          start_at_login=config.start_at_login(home))
     _LAUNCHD_PATH.parent.mkdir(parents=True, exist_ok=True)
     _LAUNCHD_PATH.write_text(plist)
     log.info("wrote %s", _LAUNCHD_PATH)
@@ -408,6 +469,10 @@ def _install_schtasks(*, mcpbrain_bin: str, home: str) -> None:  # pragma: no co
                                                    subcommand="daemon", wait=True))
             _register_schtasks_xml(task_name=_TASK_NAME, shim_path=shim_path)
             log.info("Windows scheduled task '%s' created (RestartOnFailure)", _TASK_NAME)
+            # A reinstall or update keeps the owner's "Start when I log in" choice.
+            from mcpbrain import config
+            if not config.start_at_login(home):
+                set_login_start("win32", home=home, on=False)
         except Exception:
             # Malformed/rejected XML must not abort the whole install (the previous
             # behaviour, via check=True) -- fall back to the plain /TR registration
@@ -426,6 +491,9 @@ def _install_schtasks(*, mcpbrain_bin: str, home: str) -> None:  # pragma: no co
                                                    subcommand="daemon", wait=False))
             subprocess.run(schtasks_args(mcpbrain_bin=mcpbrain_bin, home=home), check=True)
             log.info("Windows scheduled task '%s' created via CLI fallback", _TASK_NAME)
+            from mcpbrain import config
+            if not config.start_at_login(home):
+                set_login_start("win32", home=home, on=False)
     else:
         _install_startup_shortcut(_TASK_NAME, shim_path=shim_path)
         log.info("Task Scheduler blocked; installed Startup-folder shortcut for '%s'", _TASK_NAME)
