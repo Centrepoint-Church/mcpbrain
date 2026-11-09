@@ -151,6 +151,24 @@ class ControlServer:
                     except Exception as exc:
                         log.exception("dashboard stats failed")
                         return h_json(self, 500, {"error": str(exc)})
+                if self.path.split("?")[0] in ("/api/changes", "/api/changes/added"):
+                    if server.store is None:
+                        return h_json(self, 503, {"error": "dashboard not available"})
+                    from mcpbrain import change_undo
+                    q = urllib.parse.parse_qs(urllib.parse.urlparse(self.path).query)
+                    try:
+                        hours = max(1, int(q.get("hours", ["24"])[0]))
+                    except (TypeError, ValueError):
+                        return h_json(self, 400, {"error": "hours must be an integer"})
+                    try:
+                        if self.path.split("?")[0] == "/api/changes":
+                            items = change_undo.feed(server.store, hours=hours)
+                        else:
+                            items = change_undo.added_since(server.store, hours=hours)
+                        return h_json(self, 200, {"items": items})
+                    except Exception as exc:
+                        log.exception("changes feed failed")
+                        return h_json(self, 500, {"error": str(exc)})
                 if self.path.split("?")[0] == "/api/graph/canvas":
                     if server.store is None:
                         return h_json(self, 503, {"error": "dashboard not available"})
@@ -525,6 +543,30 @@ class ControlServer:
                     # already closed) is a 404, not a success-shaped 200.
                     return h_json(h, 404, {"error": "action not found or not open"})
                 return h_json(h, 200, {"snoozed": True})
+
+            m = re.match(r"^/api/changes/(\d+)/undo$", h.path)
+            if m:
+                if self.store is None:
+                    return h_json(h, 503, {"error": "dashboard not available"})
+                from mcpbrain import change_undo
+                out = change_undo.undo(self.store, str(self.home), int(m.group(1)))
+                if out["ok"]:
+                    return h_json(h, 200, {"ok": True})
+                code = 404 if out["reason"] == change_undo.NOT_FOUND else 409
+                return h_json(h, code, out)
+
+            m = re.match(r"^/api/circles/(\d+)/title$", h.path)
+            if m:
+                if self.store is None:
+                    return h_json(h, 503, {"error": "dashboard not available"})
+                title = body.get("title")
+                if not isinstance(title, str) or not title.strip():
+                    return h_json(h, 400, {"error": "title must be a non-empty string"})
+                from mcpbrain.community_synth import set_community_title
+                if not set_community_title(self.store, int(m.group(1)), title.strip()[:200],
+                                           source="dashboard"):
+                    return h_json(h, 404, {"error": "circle not found"})
+                return h_json(h, 200, {"ok": True})
 
             m = re.match(r"^/api/corrections/(\d+)/(apply|decline)$", h.path)
             if m:

@@ -162,9 +162,11 @@ def _build_prompt(cluster: list[dict]) -> str:
 # Write consolidated note
 # ---------------------------------------------------------------------------
 
-def _write_note(store, cluster: list[dict], summary: str) -> str | None:
+def _write_note(store, cluster: list[dict], summary: str, *,
+                written: list | None = None) -> str | None:
     """Write a consolidated semantic note, bounded like every other
-    multi-chunk source. Returns the FIRST doc_id written, or None.
+    multi-chunk source. Returns the FIRST doc_id written, or None. Every
+    doc_id written is appended to `written` when given (undo deletes them).
 
     The consolidation prompt already asks for "a concise durable semantic
     note (3-6 sentences)" -- and 1,151 existing notes still averaged 18K
@@ -207,6 +209,8 @@ def _write_note(store, cluster: list[dict], summary: str) -> str | None:
         # so it is never re-extracted — and, because top_core_candidates
         # requires enrich_state != 'cold', never promoted into core either.
         store.set_enrich_state([doc_id], "cold")
+        if written is not None:
+            written.append(doc_id)
         return doc_id
 
     first_doc_id = None
@@ -232,6 +236,8 @@ def _write_note(store, cluster: list[dict], summary: str) -> str | None:
         store.set_chunk_type(doc_id, "semantic")
         store.set_chunk_tier(doc_id, "hot")
         store.set_enrich_state([doc_id], "cold")    # never evidence; see above
+        if written is not None:
+            written.append(doc_id)
     return first_doc_id
 
 
@@ -275,7 +281,8 @@ def _infer_memory_type(cluster: list[dict], summary: str) -> str:
     return "project"
 
 
-def _graduate_note(store, home: str, cluster: list[dict], summary: str) -> bool:
+def _graduate_note(store, home: str, cluster: list[dict], summary: str, *,
+                   graduated: list | None = None) -> bool:
     """Promote a high-confidence consolidated note to a durable memory/*.md file.
 
     Graduation criteria (both must pass):
@@ -284,7 +291,9 @@ def _graduate_note(store, home: str, cluster: list[dict], summary: str) -> bool:
 
     Calls records_write.write_memory() which is no-clobber and commits. Wrapped in
     try/except so a missing records repo (no git) never breaks the consolidation run.
-    Returns True if a memory file was written.
+    Returns True if a memory file was written. When the file is new (not a
+    pre-existing one write_memory left alone), its repo-relative path is
+    appended to `graduated` so undo can take it back.
     """
     from mcpbrain import config
     from mcpbrain import records_write
@@ -309,6 +318,9 @@ def _graduate_note(store, home: str, cluster: list[dict], summary: str) -> bool:
     memory_type = _infer_memory_type(cluster, summary)
     records_repo = config.records_dir(home)
 
+    from pathlib import Path
+    rel = f"memory/{slug}.md"
+    existed = (Path(records_repo) / rel).exists()
     try:
         written = records_write.write_memory(
             records_repo,
@@ -317,6 +329,8 @@ def _graduate_note(store, home: str, cluster: list[dict], summary: str) -> bool:
             body=summary,
             memory_type=memory_type,
         )
+        if written and not existed and graduated is not None:
+            graduated.append(rel)
         if written:
             log.info(
                 "consolidation: graduated note → memory/%s.md "
@@ -424,6 +438,18 @@ def _cluster(chunks: list[dict], embedder=None) -> list[list[dict]]:
     return _cluster_chunks(chunks)
 
 
+def _promote_sources(store, cluster: list[dict], prior_tiers: dict[str, str]) -> None:
+    """Set each source chunk's tier to 'hot', reading its prior tier on the
+    same connection first (first sighting wins, so a chunk in two clusters
+    keeps its true original tier)."""
+    with store._connect(write=True) as db:
+        for c in cluster:
+            row = db.execute("SELECT memory_tier FROM chunks WHERE doc_id=?",
+                             (c["doc_id"],)).fetchone()
+            prior_tiers.setdefault(c["doc_id"], (row["memory_tier"] or "") if row else "")
+            db.execute("UPDATE chunks SET memory_tier='hot' WHERE doc_id=?", (c["doc_id"],))
+
+
 def consolidate(store, home: str, *, cap: int = _CONSOLIDATION_CAP,
                 threshold: float = CONSOLIDATION_THRESHOLD, embedder=None) -> dict:
     """Run one consolidation pass.
@@ -451,25 +477,37 @@ def consolidate(store, home: str, *, cap: int = _CONSOLIDATION_CAP,
              "embedding" if embedder is not None else "lexical")
 
     written = 0
+    # What this pass changes, for undo: the note chunks it adds, each source
+    # chunk's tier before promotion, and any memory file it graduates.
+    notes: list[str] = []
+    prior_tiers: dict[str, str] = {}
+    graduated: list[str] = []
     for cluster in clusters[:cap]:
         prompt = _build_prompt(cluster)
         summary = _call_claude(prompt)
         if not summary:
             continue
-        doc_id = _write_note(store, cluster, summary)
+        doc_id = _write_note(store, cluster, summary, written=notes)
         if doc_id:
             written += 1
             # Mark source chunks as consolidated (promote to hot tier so they
             # aren't re-clustered next pass).
-            for c in cluster:
-                store.set_chunk_tier(c["doc_id"], "hot")
+            _promote_sources(store, cluster, prior_tiers)
             log.info("consolidation: wrote semantic note %s from %d sources",
                      doc_id, len(cluster))
-            _graduate_note(store, home, cluster, summary)
+            _graduate_note(store, home, cluster, summary, graduated=graduated)
 
+    revert_ref = ""
+    if notes:
+        from mcpbrain.change_undo import revert_json
+        revert_ref = revert_json(
+            {"notes": notes, "tiers": prior_tiers, "graduated": graduated},
+            {"notes": notes, "tiers": {d: "hot" for d in prior_tiers},
+             "graduated": graduated})
     store.record_change(
         "consolidation_pass",
         summary=f"Consolidated {written} semantic notes from {len(clusters)} clusters",
         source="consolidation",
+        revert_ref=revert_ref,
     )
     return {"clusters_found": len(clusters), "notes_written": written, "skipped": 0}

@@ -102,6 +102,29 @@ def _fetch_relations(store, entity_id: str) -> list[str]:
     return [f"{r['entity_a']} {r['relation']} {r['entity_b']}" for r in rows]
 
 
+def write_profile(store, eid: str, profile: str, updated_at: str, *,
+                  source: str) -> bool:
+    """Set one entity's profile and record an undoable `profile_updated` change
+    holding the prior profile, in one transaction. Returns False when the
+    entity does not exist."""
+    from mcpbrain.change_undo import revert_json
+    with store._connect(write=True) as db:
+        prior = db.execute("SELECT profile, profile_updated_at FROM entities WHERE id=?",
+                           (eid,)).fetchone()
+        if prior is None:
+            return False
+        db.execute("UPDATE entities SET profile=?, profile_updated_at=? WHERE id=?",
+                   (profile, updated_at, eid))
+        store.record_change_tx(
+            db, "profile_updated", ref_id=str(eid),
+            summary=f"Profile written for entity {eid}", source=source,
+            revert_ref=revert_json(
+                {"profile": prior["profile"] or "",
+                 "profile_updated_at": prior["profile_updated_at"] or ""},
+                {"profile": profile, "profile_updated_at": updated_at}))
+    return True
+
+
 def drain_profiles(store, inbox_obj: dict) -> dict:
     """Write profiles from a profile_synthesis inbox block.
 
@@ -128,21 +151,10 @@ def drain_profiles(store, inbox_obj: dict) -> dict:
         if not eid or not profile_text or not profile_text.strip():
             continue
 
-        with store._connect(write=True) as db:
-            cur = db.execute(
-                "UPDATE entities SET profile=?, profile_updated_at=? WHERE id=?",
-                (profile_text.strip(), now_iso, eid),
-            )
-            if cur.rowcount == 0:
-                log.debug("profile_synthesis: entity_id %r not found; skipping", eid)
-                continue
-
-        store.record_change(
-            "profile_updated",
-            ref_id=str(eid),
-            summary=f"Profile written for entity {eid}",
-            source="profile_synthesis",
-        )
+        if not write_profile(store, eid, profile_text.strip(), now_iso,
+                             source="profile_synthesis"):
+            log.debug("profile_synthesis: entity_id %r not found; skipping", eid)
+            continue
         written += 1
 
     return {"profiles_written": written}

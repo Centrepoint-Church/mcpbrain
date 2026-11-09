@@ -985,11 +985,10 @@ def drain_captures(store, *, home=None, budget=None, bulk_section=None) -> int:
                     changed = store.set_action_status(
                         env["action_id"], env["status"],
                         resolved_by=f"capture:{env.get('source', 'mcp')}",
-                        only_if_open=(env["status"] == "done"))
+                        only_if_open=(env["status"] == "done"),
+                        change={"change_type": "capture_action_update",
+                                "summary": f"Action {env['action_id']} -> {env['status']}"})
                     if changed:
-                        store.record_change(
-                            "capture_action_update", ref_id=str(env["action_id"]),
-                            summary=f"Action {env['action_id']} -> {env['status']}")
                         applied += 1
                     else:
                         log.info("capture: action_update %s no-op (not open / not found)",

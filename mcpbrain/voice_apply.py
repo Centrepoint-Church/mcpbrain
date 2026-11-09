@@ -88,7 +88,8 @@ def apply_suggestions(store, home: str,
         return {"applied": 0, "skipped": 0, "blocked": None}
 
     voice_path = _voice_path(home)
-    existing = voice_path.read_text() if voice_path.exists() else ""
+    existed = voice_path.exists()
+    existing = voice_path.read_text() if existed else ""
 
     additions: list[str] = []
     for s in pending:
@@ -124,10 +125,13 @@ def apply_suggestions(store, home: str,
         store.mark_voice_suggestion_applied(s["id"])
 
     store.set_voice_analyser_state("last_applied_at", _now_iso())
+    from mcpbrain.change_undo import revert_json
     store.record_change(
         "voice_apply",
         summary=f"Applied {len(pending)} voice suggestions to voice.md",
         source="voice_apply",
+        revert_ref=revert_json({"content": existing if existed else None},
+                               {"content": new_content}),
     )
 
     # Commit voice.md to the records git repo (git is the safety net for auto-apply).

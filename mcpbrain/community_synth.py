@@ -67,6 +67,29 @@ def build_community_requests(store, *, cap: int = 10, member_sample: int = 40) -
     return results
 
 
+def set_community_title(store, cid, title: str, summary: str | None = None, *,
+                        source: str) -> bool:
+    """Set a circle's title (and summary; None keeps the current one) and record
+    an undoable `community_titled` change holding the prior pair, in one
+    transaction. Returns False when the community does not exist."""
+    from mcpbrain.change_undo import revert_json
+    with store._connect(write=True) as db:
+        prior = db.execute("SELECT title, summary FROM community_summaries "
+                           "WHERE community_id=? ORDER BY level LIMIT 1", (cid,)).fetchone()
+        if prior is None:
+            return False
+        new_summary = (prior["summary"] or "") if summary is None else summary
+        db.execute("UPDATE community_summaries SET title=?, summary=? WHERE community_id=?",
+                   (title, new_summary, cid))
+        store.record_change_tx(
+            db, "community_titled", ref_id=str(cid),
+            summary=f"Title set for community {cid}: {title}", source=source,
+            revert_ref=revert_json(
+                {"title": prior["title"] or "", "summary": prior["summary"] or ""},
+                {"title": title, "summary": new_summary}))
+    return True
+
+
 def drain_communities(store, inbox_obj: dict) -> dict:
     """Write LLM-generated titles/summaries back to community_summaries.
 
@@ -88,22 +111,9 @@ def drain_communities(store, inbox_obj: dict) -> dict:
             log.debug("community_synthesis: skipping community_id=%s (no title)", cid)
             continue
 
-        with store._connect(write=True) as db:
-            cur = db.execute(
-                "UPDATE community_summaries SET title=?, summary=? WHERE community_id=?",
-                (title, summary, cid),
-            )
-
-        if cur.rowcount == 0:
+        if not set_community_title(store, cid, title, summary, source="community_synthesis"):
             log.debug("community_synthesis: community_id=%s not found, skipping", cid)
             continue
-
-        store.record_change(
-            "community_titled",
-            ref_id=str(cid),
-            summary=f"Title set for community {cid}: {title}",
-            source="community_synthesis",
-        )
         written += 1
 
     return {"communities_written": written}

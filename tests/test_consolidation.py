@@ -394,7 +394,7 @@ def test_consolidate_triggers_graduation(store, home_consolidation, monkeypatch)
 
     graduated = []
 
-    def _tracking_graduate(store, home, cluster, summary):
+    def _tracking_graduate(store, home, cluster, summary, **_kw):
         graduated.append({"n": len(cluster), "summary": summary})
         return False  # skip real git I/O; return value doesn't matter for consolidate
 

@@ -292,6 +292,11 @@ class _FakeStore:
         text = self._chunks.get(doc_id)
         return {"doc_id": doc_id, "text": text} if text is not None else None
 
+    def record_change(self, *a, **kw):
+        # brain_gardener_apply records each committed write as an undoable change.
+        self.changes = getattr(self, "changes", []) + [(a, kw)]
+        return len(self.changes)
+
 
 def _tool_with_home(tmp_path, monkeypatch, store=None):
     """Make the gardener_apply tool resolve to a fresh fake records repo."""

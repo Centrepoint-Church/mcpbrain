@@ -245,3 +245,39 @@ def write_memory(repo: str, *, slug: str, description: str, body: str,
         return False
     _git(repo, "commit", "-m", f"memory: add {slug}")
     return True
+
+
+def restore_file(repo: str, relpath: str, content: str | None, message: str) -> bool:
+    """Put one records-repo file back to `content` (None removes it) and commit
+    it by name as its own commit. Used by change_undo to reverse a voice or
+    gardener write. Returns True if a commit was made."""
+    p = Path(repo) / relpath
+    if content is None:
+        if p.exists():
+            p.unlink()
+    else:
+        p.parent.mkdir(parents=True, exist_ok=True)
+        p.write_text(content)
+    return _commit_file(repo, relpath, message)
+
+
+def remove_memory(repo: str, slug: str, message: str) -> bool:
+    """Remove memory/<slug>.md and its MEMORY.md pointer, committing both by
+    name. The reverse of write_memory, used by change_undo to take back a
+    consolidation graduation. Returns True if a commit was made."""
+    rel = f"memory/{slug}.md"
+    mp = Path(repo) / rel
+    if mp.exists():
+        mp.unlink()
+    index = Path(repo) / "MEMORY.md"
+    if index.exists():
+        path_ref = f"](memory/{slug}.md)"
+        lines = index.read_text().splitlines(keepends=True)
+        kept = [ln for ln in lines if path_ref not in ln]
+        if len(kept) != len(lines):
+            index.write_text("".join(kept))
+    _git(repo, "add", "--", rel, "MEMORY.md")
+    if not _has_staged(repo, rel) and not _has_staged(repo, "MEMORY.md"):
+        return False
+    _git(repo, "commit", "-m", message)
+    return True

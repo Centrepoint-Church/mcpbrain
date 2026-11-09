@@ -897,10 +897,17 @@ def make_brain_gardener_apply(store):
         Returns {"applied": bool, "committed": bool} or {"applied": False, "error": ...}.
         """
         import subprocess
+        from pathlib import Path
         from mcpbrain import records_write, config as _cfg
         home = str(config.app_dir())
         repo = _cfg.records_dir(home)
         cap = _cfg.gardener_max_changed_lines(home)
+        rel = f"{lane}/{filename}"
+        target = Path(repo) / rel
+        # Read before the write so the change row can carry what it replaced.
+        # The writers reject a non-basename filename, so nothing outside the
+        # lane dir is ever recorded.
+        before = target.read_text() if target.is_file() else None
         try:
             if lane == "reference":
                 committed = records_write.write_gardener_reference(
@@ -920,6 +927,13 @@ def make_brain_gardener_apply(store):
             else:
                 return {"applied": False, "error": f"unknown lane {lane!r} "
                         "(expected 'reference' or 'context')"}
+            if committed:
+                from mcpbrain.change_undo import revert_json
+                store.record_change(
+                    "gardener_write", ref_id=rel, summary=f"Gardener updated {rel}",
+                    source="gardener",
+                    revert_ref=revert_json({"path": rel, "content": before},
+                                           {"path": rel, "content": target.read_text()}))
             return {"applied": True, "committed": committed}
         except (ValueError, FileNotFoundError, OSError) as exc:
             return {"applied": False, "error": str(exc)}

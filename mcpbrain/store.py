@@ -130,6 +130,26 @@ def _field_is_locked(db, entity_id: str, field: str) -> bool:
                       (entity_id, field)).fetchone() is not None
 
 
+def _log_change_tx(db, change_type: str, *, ref_id: str = "", summary: str = "",
+                   detail: str = "", revert_ref: str = "", source: str = "") -> int:
+    """Insert one change_log row on the caller's open connection, so a writer
+    can record a change in the same transaction as the write itself."""
+    return db.execute(
+        "INSERT INTO change_log(change_type, ref_id, summary, detail, revert_ref, source) "
+        "VALUES(?,?,?,?,?,?)",
+        (change_type, ref_id, summary, detail, revert_ref, source)).lastrowid
+
+
+def _log_recorded_change(db, change: dict, ref_id, before, after) -> int:
+    """Record an undoable change described by `change` ({change_type, summary?,
+    detail?, source?, ref_id?}) with a JSON {before, after} revert_ref."""
+    from mcpbrain.change_undo import revert_json
+    return _log_change_tx(
+        db, change["change_type"], ref_id=str(change.get("ref_id", ref_id)),
+        summary=change.get("summary", ""), detail=change.get("detail", ""),
+        revert_ref=revert_json(before, after), source=change.get("source", ""))
+
+
 _MERGE_TOUCHED_COLS = ("name", "type", "org", "aliases", "email_addr", "notes")
 
 
@@ -2318,16 +2338,27 @@ class Store:
             return [dict(r) for r in rows]
 
     def update_entity_org(self, entity_id: str, org: str, org_valid_from: str = "",
-                          *, user: bool = False) -> bool:
+                          *, user: bool = False, change: dict | None = None) -> bool:
         """Set the org (and optionally org_valid_from) on one entity. Returns True if a
         row was actually updated. A user-locked org is left alone unless user=True:
-        that single check covers org_backfill and both review appliers."""
+        that single check covers org_backfill and both review appliers.
+
+        change: when given ({change_type, summary, source}), the prior org is read
+        on this connection and an undoable change_log row is written in the same
+        transaction."""
         with self._connect(write=True) as db:
             if not user and _field_is_locked(db, entity_id, "org"):
                 return False
+            prior = db.execute("SELECT org, org_valid_from FROM entities WHERE id=?",
+                               (entity_id,)).fetchone() if change is not None else None
             cur = db.execute(
                 "UPDATE entities SET org=?, org_valid_from=? WHERE id=?",  # lock-exempt: guarded by _field_is_locked above
                 (org, org_valid_from, entity_id))
+            if cur.rowcount > 0 and prior is not None:
+                _log_recorded_change(
+                    db, change, entity_id,
+                    {"org": prior["org"] or "", "org_valid_from": prior["org_valid_from"] or ""},
+                    {"org": org, "org_valid_from": org_valid_from})
             return cur.rowcount > 0
 
     def rename_entity(self, entity_id: str, new_name: str, *, user: bool = False) -> bool:
@@ -2373,16 +2404,27 @@ class Store:
                              (notes or "", entity_id))
             return cur.rowcount > 0
 
-    def rewrite_org_field(self, variant_org: str, canonical_org: str) -> int:
+    def rewrite_org_field(self, variant_org: str, canonical_org: str, *,
+                          change: dict | None = None) -> int:
         """Bulk-correct the org field: relabel every entity currently tagged
         with variant_org to canonical_org. Returns the number of rows updated
         (0 means no entity currently carries variant_org — a stale finding).
-        Entities with a user-locked org field are excluded."""
+        Entities with a user-locked org field are excluded.
+
+        change: when given, the relabelled entity ids are read on this
+        connection and an undoable change_log row is written with the write."""
+        unlocked = ("org=? AND id NOT IN "
+                    "(SELECT entity_id FROM entity_field_locks WHERE field='org')")
         with self._connect(write=True) as db:
-            cur = db.execute(
-                "UPDATE entities SET org=? WHERE org=? AND id NOT IN "
-                "(SELECT entity_id FROM entity_field_locks WHERE field='org')",
-                (canonical_org, variant_org))
+            ids = [r[0] for r in db.execute(
+                f"SELECT id FROM entities WHERE {unlocked}", (variant_org,))
+            ] if change is not None else []
+            cur = db.execute(f"UPDATE entities SET org=? WHERE {unlocked}",  # lock-exempt: {unlocked} excludes entity_field_locks
+                             (canonical_org, variant_org))
+            if cur.rowcount > 0 and change is not None:
+                _log_recorded_change(db, change, variant_org,
+                                     {"org": variant_org, "entity_ids": ids},
+                                     {"org": canonical_org})
             return cur.rowcount
 
     def update_entity_org_if_empty(self, entity_id: str, org: str) -> bool:
@@ -5569,7 +5611,7 @@ class Store:
             return rev.rowcount > 0
 
     def merge_entities(self, loser_id, winner_id, *, canonical_name=None,
-                       method="deterministic") -> dict | None:
+                       method="deterministic", change: dict | None = None) -> dict | None:
         """Fold loser into winner, keeping the winner's id stable.
 
         The winner id is never re-slugged: relations reference ids, so changing
@@ -5589,8 +5631,16 @@ class Store:
         if loser_id == winner_id:
             return None  # no-op without taking the write lock, as before
         with self._connect(write=True) as db:
-            return _merge_entities_tx(db, loser_id, winner_id,
+            snap = _merge_entities_tx(db, loser_id, winner_id,
                                       canonical_name=canonical_name, method=method)
+            if snap is not None and change is not None:
+                # The snapshot is what _unmerge_tx reverses; its merge_log_id
+                # tells undo whether the merge still stands.
+                _log_recorded_change(
+                    db, change, winner_id, {"snapshot": snap},
+                    {"winner_id": winner_id, "loser_id": loser_id,
+                     "merge_log_id": snap["merge_log_id"]})
+            return snap
 
     # --- unified actions table (Task 1.7) ---------------------------------
 
@@ -5639,7 +5689,7 @@ class Store:
 
     def set_action_status(self, action_id: int, status: str,
                           resolved_by: str = "", *, thread_id: str | None = None,
-                          only_if_open: bool = False) -> int:
+                          only_if_open: bool = False, change: dict | None = None) -> int:
         """Close or reopen a unified action. Returns the number of rows changed.
 
         Ported from knowledge_db/memory_db.update_action_status (memory_db.py:1346-1375),
@@ -5651,6 +5701,9 @@ class Store:
         resolved_action_id should only close an OPEN action belonging to the
         thread that raised it, never an arbitrary or already-closed row. The
         rowcount lets the caller log a miss instead of silently re-stamping.
+
+        change: when given, the prior status is read on this connection and an
+        undoable change_log row is written with the write (only on a hit).
         """
         resolved_at = "" if status == "open" else datetime.now(timezone.utc).strftime(
             "%Y-%m-%dT%H:%M:%SZ")
@@ -5664,9 +5717,19 @@ class Store:
             where.append("thread_id = ?")
             params.append(thread_id)
         with self._connect(write=True) as db:
+            prior = db.execute(
+                "SELECT status, resolved_by, resolved_at FROM actions WHERE id = ?",
+                (action_id,)).fetchone() if change is not None else None
             cur = db.execute(
                 f"UPDATE actions SET status = ?, resolved_by = ?, resolved_at = ?, "
                 f"updated_at = ? WHERE {' AND '.join(where)}", params)
+            if cur.rowcount > 0 and prior is not None:
+                _log_recorded_change(
+                    db, change, action_id,
+                    {"status": prior["status"] or "", "resolved_by": prior["resolved_by"] or "",
+                     "resolved_at": prior["resolved_at"] or ""},
+                    {"status": status, "resolved_by": resolved_by,
+                     "resolved_at": resolved_at})
             return cur.rowcount
 
     def archive_stale_actions(self, *, cutoff_days: int = 120,
@@ -5784,18 +5847,30 @@ class Store:
                 {"stamp": stamp})
             return {"archived": len(ids)}
 
-    def assign_action_owner(self, action_id: int, owner: str, owner_entity_id: str = "") -> bool:
+    def assign_action_owner(self, action_id: int, owner: str, owner_entity_id: str = "",
+                            *, change: dict | None = None) -> bool:
         """Set owner/owner_entity_id on one action. Returns True if a row was actually updated.
 
         Used by the ownerless-action review applier (Session-4, Task 3.1): a
         rowcount check so a stale/nonexistent action_id (e.g. resolved or
         deleted between detection and verdict) is reported as a no-op miss
         rather than a phantom success.
+
+        change: when given, the prior owner is read on this connection and an
+        undoable change_log row is written with the write.
         """
         with self._connect(write=True) as db:
+            prior = db.execute("SELECT owner, owner_entity_id FROM actions WHERE id=?",
+                               (action_id,)).fetchone() if change is not None else None
             cur = db.execute(
                 "UPDATE actions SET owner=?, owner_entity_id=? WHERE id=?",
                 (owner, owner_entity_id, action_id))
+            if cur.rowcount > 0 and prior is not None:
+                _log_recorded_change(
+                    db, change, action_id,
+                    {"owner": prior["owner"] or "",
+                     "owner_entity_id": prior["owner_entity_id"] or ""},
+                    {"owner": owner, "owner_entity_id": owner_entity_id})
             return cur.rowcount > 0
 
     def snooze_action(self, action_id: int, until_iso: str) -> bool:
@@ -6916,11 +6991,15 @@ class Store:
                       detail: str = "", revert_ref: str = "", source: str = "") -> int:
         """Append one row to the change digest's audit trail."""
         with self._connect(write=True) as db:
-            cur = db.execute(
-                "INSERT INTO change_log(change_type, ref_id, summary, detail, revert_ref, source) "
-                "VALUES(?,?,?,?,?,?)",
-                (change_type, ref_id, summary, detail, revert_ref, source))
-            return cur.lastrowid
+            return _log_change_tx(db, change_type, ref_id=ref_id, summary=summary,
+                                  detail=detail, revert_ref=revert_ref, source=source)
+
+    def record_change_tx(self, db, change_type: str, *, ref_id: str = "", summary: str = "",
+                         detail: str = "", revert_ref: str = "", source: str = "") -> int:
+        """record_change on the caller's open write connection, so the change
+        row commits (or rolls back) with the write it describes."""
+        return _log_change_tx(db, change_type, ref_id=ref_id, summary=summary,
+                              detail=detail, revert_ref=revert_ref, source=source)
 
     def recent_changes(self, limit: int = 20) -> list[dict]:
         with self._connect() as db:
@@ -6928,15 +7007,24 @@ class Store:
                 "SELECT * FROM change_log ORDER BY id DESC LIMIT ?", (limit,)).fetchall()
             return [dict(r) for r in rows]
 
-    def prune_change_log(self, keep: int = 500) -> int:
-        """Delete old change_log rows, keeping the most recent `keep`. Returns count deleted."""
+    def prune_change_log(self, keep: int = 500, *, undo_days: int = 30) -> int:
+        """Delete old change_log rows, keeping the most recent `keep`. Returns count deleted.
+
+        An undoable row (non-empty revert_ref) and its change_undone marker are
+        also kept for `undo_days`, so a burst of plain rows (ingest skips) can't
+        push a recent change out of reach of undo."""
+        cutoff = (datetime.now(timezone.utc) - timedelta(days=undo_days)
+                  ).strftime("%Y-%m-%d %H:%M:%S")
         with self._connect(write=True) as db:
             row = db.execute(
                 "SELECT id FROM change_log ORDER BY id DESC LIMIT 1 OFFSET ?",
                 (keep - 1,)).fetchone()
             if row is None:
                 return 0
-            cur = db.execute("DELETE FROM change_log WHERE id < ?", (row["id"],))
+            cur = db.execute(
+                "DELETE FROM change_log WHERE id < ? AND NOT ("
+                "(revert_ref != '' OR change_type = 'change_undone') AND created_at >= ?)",
+                (row["id"], cutoff))
             return cur.rowcount
 
     def open_findings_count(self) -> int:
@@ -6984,23 +7072,35 @@ class Store:
 
     # --- Session-4, Task 2.1: reversible entity suppression ------------------
 
-    def suppress_entity(self, entity_id: str, reason: str = "") -> bool:
+    def suppress_entity(self, entity_id: str, reason: str = "", *,
+                        change: dict | None = None) -> bool:
         """Suppress an entity by inserting a row into entity_suppressions.
 
         Purely additive/reversible: the entities row is validated to exist but
         never touched (no column added, no delete). Returns False (no-op) if
         entity_id isn't a real entity. Reverse with unsuppress_entity.
+
+        change: when given, any prior suppression row is read on this
+        connection and an undoable change_log row is written with the write.
         """
         with self._connect(write=True) as db:
             row = db.execute("SELECT id FROM entities WHERE id=?", (entity_id,)).fetchone()
             if not row:
                 return False
+            prior = db.execute(
+                "SELECT reason, suppressed_at FROM entity_suppressions WHERE entity_id=?",
+                (entity_id,)).fetchone() if change is not None else None
             now = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
             db.execute(
                 "INSERT OR REPLACE INTO entity_suppressions(entity_id, reason, suppressed_at) "
                 "VALUES(?, ?, ?)",
                 (entity_id, reason, now),
             )
+            if change is not None:
+                _log_recorded_change(
+                    db, change, entity_id,
+                    {"suppressed": dict(prior) if prior else None},
+                    {"suppressed": {"reason": reason, "suppressed_at": now}})
             return True
 
     def unsuppress_entity(self, entity_id: str) -> bool:

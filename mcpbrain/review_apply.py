@@ -50,7 +50,9 @@ def apply_orphan_verdicts(store, verdicts: list[dict], *, cap: int) -> dict:
             if result["suppressed"] >= cap:
                 result["capped"] += 1
                 continue
-            if store.suppress_entity(ref_id, reason=verdict.get("reason", "")):
+            if store.suppress_entity(ref_id, reason=verdict.get("reason", ""), change={
+                    "change_type": "tidy_suppress", "source": "review_orphan",
+                    "summary": f"Hid orphan entity {ref_id}"}):
                 store.resolve_finding(finding_id, verdict="suppress")
                 result["suppressed"] += 1
             else:
@@ -112,7 +114,9 @@ def apply_missing_org_verdicts(
             if result["assigned"] >= cap:
                 result["capped"] += 1
                 continue
-            if store.update_entity_org(ref_id, org):
+            if store.update_entity_org(ref_id, org, change={
+                    "change_type": "tidy_org", "source": "review_missing_org",
+                    "summary": f"Set org of {ref_id} to {org}"}):
                 store.resolve_finding(finding_id, verdict="assign")
                 result["assigned"] += 1
             else:
@@ -173,7 +177,10 @@ def apply_ownerless_verdicts(store, verdicts: list[dict], *, cap: int) -> dict:
             if result["owner_assigned"] >= cap:
                 result["capped"] += 1
                 continue
-            if store.assign_action_owner(ref_id, owner, owner_entity_id=verdict.get("owner_entity_id", "")):
+            if store.assign_action_owner(
+                    ref_id, owner, owner_entity_id=verdict.get("owner_entity_id", ""),
+                    change={"change_type": "tidy_owner", "source": "review_ownerless",
+                            "summary": f"Set owner of action {ref_id} to {owner}"}):
                 store.resolve_finding(finding_id, verdict="owner")
                 result["owner_assigned"] += 1
             else:
@@ -281,7 +288,9 @@ def apply_org_verdicts(
             if _budget_used() >= cap:
                 result["capped"] += 1
                 continue
-            if store.update_entity_org(ref_id, canonical_org):
+            if store.update_entity_org(ref_id, canonical_org, change={
+                    "change_type": "tidy_org", "source": "review_org",
+                    "summary": f"Set org of {ref_id} to {canonical_org}"}):
                 store.resolve_finding(finding_id, verdict="canonicalize")
                 result["canonicalized"] += 1
             else:
@@ -291,7 +300,9 @@ def apply_org_verdicts(
             if _budget_used() >= cap:
                 result["capped"] += 1
                 continue
-            updated = store.rewrite_org_field(ref_id, canonical_org)
+            updated = store.rewrite_org_field(ref_id, canonical_org, change={
+                "change_type": "tidy_org_rewrite", "source": "review_org",
+                "summary": f"Relabelled org {ref_id} as {canonical_org}"})
             if updated > 0:
                 store.resolve_finding(finding_id, verdict="canonicalize")
                 result["canonicalized"] += 1
@@ -409,7 +420,9 @@ def apply_duplicate_verdicts(store, answers: list[dict], *, cap: int) -> dict:
         try:
             store.merge_entities(loser["id"], winner["id"],
                                  canonical_name=ans.get("canonical") or None,
-                                 method="llm")
+                                 method="llm", change={
+                                     "change_type": "tidy_merge", "source": "merge_review",
+                                     "summary": f"Merged {loser['id']} into {winner['id']}"})
         except Exception as exc:
             log.error("review_apply: merge failed for %s <- %s: %s",
                       winner["id"], loser["id"], exc)

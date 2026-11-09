@@ -463,7 +463,9 @@ def _apply_merge_verdicts(store, verdicts, *, cap) -> dict:
             continue
         winner, loser = _pick_winner(a, b)
         store.merge_entities(loser["id"], winner["id"],
-                             canonical_name=v.get("canonical") or None, method="curator")
+                             canonical_name=v.get("canonical") or None, method="curator",
+                             change={"change_type": "tidy_merge", "source": "org_merge_review",
+                                     "summary": f"Merged {loser['id']} into {winner['id']}"})
         result["merged"] += 1
     return result
 

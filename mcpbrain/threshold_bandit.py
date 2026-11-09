@@ -169,6 +169,22 @@ def step(store, arm_value: float, *, outcome: str) -> None:
 # Advisory report
 # ---------------------------------------------------------------------------
 
+def _record_applied(store, current: float, recommended: float) -> None:
+    """Record the auto-apply as an undoable `bandit_applied` change. Never
+    raises: the threshold is already written, and bookkeeping must not turn
+    that into a reported failure."""
+    try:
+        from mcpbrain.change_undo import revert_json
+        store.record_change(
+            "bandit_applied", ref_id="recall_max_distance",
+            summary=f"Recall threshold {current:.2f} -> {recommended:.2f}",
+            source="threshold_bandit",
+            revert_ref=revert_json({"recall_max_distance": current},
+                                   {"recall_max_distance": recommended}))
+    except Exception as exc:  # noqa: BLE001
+        log.warning("bandit: could not record auto-apply: %s", exc)
+
+
 def advisory_report(store, home: str) -> dict:
     """Generate an advisory report on the current bandit state.
 
@@ -239,6 +255,7 @@ def advisory_report(store, home: str) -> dict:
         if auto_apply:
             try:
                 config.write_config(home, {"recall_max_distance": recommended})
+                _record_applied(store, current, recommended)
                 log.info("bandit: auto-applied threshold %.2f → %.2f", current, recommended)
                 advisory += f" [AUTO-APPLIED: {current:.2f} → {recommended:.2f}]"
             except Exception as exc:
