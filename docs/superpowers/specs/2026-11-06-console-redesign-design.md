@@ -209,6 +209,16 @@ Section order, with a jump list under the page heading: Profile, Appearance, Sou
 
 Later phases, not built in the prototype: Schedule (the `cadences` block: sync frequency, daily passes, the hourly enrichment task's last run) and Data and privacy (forget a document, thread or person everywhere; storage used). The ~40 internal feature switches stay out of the main page; Advanced may list them read-only.
 
+### 10. Plan-time decisions (2026-11-09)
+
+Mapping the code for the plan changed five things. These override earlier sections where they disagree.
+
+1. **Undo storage.** Nothing reads `revert_ref` today, and `prune_change_log` keeps only the newest 500 rows each cycle. Undoable changes store `{"before": …, "after": …}` JSON in `revert_ref`; the prune keeps any row with a non-empty `revert_ref` for 30 days. Undo refuses with a plain reason when the item has changed again since (`after` no longer matches).
+2. **Graph tidy-up is an automatic change.** The daily review (orphans hidden, missing organisations set, owners assigned, duplicates merged) applies AI verdicts with no change record and no switch. It gets its own row in Automatic changes (Apply, Ask me first, Off), and "Most changes applied in one pass" (`review_max_apply_per_run`, 50) sits under it, not as a general cap.
+3. **Catch-up enrichment is removed, not built.** `/api/enrich-backfill/start|cancel` import a module deleted in an earlier commit, and the backlog is already queued; the limit is the hourly task's drain rate. The two endpoints and the Settings row are removed.
+4. **Keep-out wording matches behaviour.** Subject starts and Drive folders keep today's behaviour: indexed and searchable, kept out of the graph. Sender and Gmail-label exclusions are new and skip indexing entirely, each skip recorded. Settings says which is which.
+5. **Restart and start-at-login.** The daemon picks a new port and token on every start, so the open page cannot follow a restart; the Restart control says so and points at the menu bar. Start at login rewrites the daemon's launch agent and takes effect at next login; the menu bar app gains "Start mcpbrain" for when the daemon is not running. Settings writes go through a new allowlisted `/api/settings` that deep-merges nested blocks (today's `/api/config` replaces a nested block wholesale and accepts any key).
+
 ## Delivery order
 
 **Scope rule (owner decision, 2026-11-09):** everything the prototype shows works end to end as part of this spec. Every "new backend" item in sections 6, 7 and 9 is in scope, not deferred. No control ships without the server behaviour behind it: a control's backend lands in the same phase as the control or an earlier one, and the "Needs backend" chips exist only in the prototype. The only items out of scope are the two named later phases in section 9 (Schedule, and Data and privacy), which the prototype does not show.
