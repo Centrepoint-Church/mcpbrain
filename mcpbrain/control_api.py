@@ -129,7 +129,9 @@ class ControlServer:
                 if self.path.startswith("/img/"):
                     m = re.match(r"^/img/([A-Za-z0-9._-]+\.png)$", self.path)
                     return server._serve_image(self, m.group(1) if m else "")
-                if self.path == "/graph": return server._serve_graph(self)
+                # The graph page's state lives in its query string
+                # (?type=, ?entity=, ?show=unlinked, ?view=circles, ?since=, ?rel=).
+                if self.path.split("?")[0] == "/graph": return server._serve_graph(self)
                 if self.path.startswith("/vendor/"):
                     m = re.match(r"^/vendor/([A-Za-z0-9._-]+\.js)$", self.path)
                     return server._serve_vendor(self, m.group(1) if m else "")
@@ -279,6 +281,8 @@ class ControlServer:
                             types=q.get("type", []),
                             recency_days=_int("recency_days", 0),
                             max_links=_int("max_links", 5000),
+                            unlinked=q.get("unlinked", [""])[0] in ("1", "true"),
+                            since_hours=max(0, _int("since_hours", 0)),
                         )
                         if isinstance(result, dict) and result.get("error") == "too_large":
                             return h_json(self, 413, result)
@@ -286,6 +290,12 @@ class ControlServer:
                     except Exception as exc:
                         log.exception("graph canvas failed")
                         return h_json(self, 500, {"error": str(exc)})
+                if self.path.split("?")[0] == "/api/graph/types":
+                    if server.store is None:
+                        return h_json(self, 503, {"error": "dashboard not available"})
+                    from mcpbrain import contract, graph_view
+                    return h_json(self, 200, {"types": graph_view.graph_types(server.store),
+                                              "classified": sorted(contract.ENTITY_TYPES)})
                 if self.path.split("?")[0] == "/api/graph/suppressed":
                     if server.store is None:
                         return h_json(self, 503, {"error": "dashboard not available"})
@@ -352,7 +362,8 @@ class ControlServer:
                         hops = int(q.get("hops", ["1"])[0])
                     except (TypeError, ValueError):
                         hops = 1
-                    result = graph_view.graph_ego(server.store, eid, hops=hops)
+                    result = graph_view.graph_ego(server.store, eid, hops=hops,
+                                                  relation=q.get("relation", [""])[0])
                     if result is None:
                         return h_json(self, 404, {"error": "not found"})
                     return h_json(self, 200, result)
@@ -1021,6 +1032,17 @@ class ControlServer:
                     log.exception("backup/auto failed")
                     return h_json(h, 500, {"error": str(exc)})
 
+            m = re.match(r"^/api/graph/entity/([^/?]+)/facts$", h.path)
+            if m:
+                if self.store is None: return h_json(h, 503, {"error": "dashboard not available"})
+                from mcpbrain import graph_view
+                out = graph_view.add_fact(self.store, urllib.parse.unquote(m.group(1)),
+                                          body.get("attribute"), body.get("value"))
+                if out.get("ok"):
+                    return h_json(h, 200, out)
+                if out.get("error") == "not_found":
+                    return h_json(h, 404, {"ok": False, "reason": "No such entity"})
+                return h_json(h, 400, {"ok": False, "reason": out.get("reason") or "Not saved"})
             m = re.match(r"^/api/graph/entity/([^/?]+)/restore$", h.path)
             if m:
                 if self.store is None: return h_json(h, 503, {"error": "dashboard not available"})

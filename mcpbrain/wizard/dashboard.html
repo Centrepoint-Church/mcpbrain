@@ -459,11 +459,12 @@ const TYPE_LABEL = {
   entity_merged: ["entity merged", "entities merged"],
   entity_suppressed: ["entity hidden", "entities hidden"],
   entity_unsuppressed: ["entity restored to the graph", "entities restored to the graph"],
+  fact_added: ["fact added", "facts added"],
 };
 // Changes whose ref_id is an entity id: they open in the graph by it.
 const ENTITY_TYPES = new Set(["profile_updated", "tidy_suppress", "tidy_org", "tidy_org_rewrite",
   "tidy_owner", "tidy_merge", "entity_edited", "entity_merged", "entity_suppressed",
-  "entity_unsuppressed"]);
+  "entity_unsuppressed", "fact_added"]);
 
 function circleTitle(c){
   const m = /^Title set for community \d+: ([\s\S]*)$/.exec(c.summary || "");
@@ -597,7 +598,7 @@ function groupLi(rows){
     const out = el("p", {class: "said", role: "status", hidden: true});
     const {acts, form} = rowActions(c, name, out);
     if (ENTITY_TYPES.has(c.change_type) && c.ref_id)
-      entityName(c.ref_id).then(n => { if (n) name.textContent = rowText(c) + ": " + n; });
+      entityName(c.ref_id).then(n => { if (n && !rowText(c).includes(n)) name.textContent = rowText(c) + ": " + n; });
     return el("li", {class: c.undone ? "is-undone" : null}, time, name,
       acts.length || form ? el("div", {class: "acts"}, acts, form) : null, out);
   }
@@ -673,7 +674,8 @@ $("added-btn").addEventListener("click", async (ev) => {
       : "Nothing new reached the graph in the last 24 h.");
     fill($("added-list"), items.slice(0, 80).map(i => el("li", {},
       el("a", {class: "link", href: "/graph?entity=" + encodeURIComponent(i.entity_id), text: i.name}))),
-      items.length > 80 ? el("li", {class: "muted", text: "and " + fmt(items.length - 80) + " more in the graph"}) : null);
+      items.length > 80 ? el("li", {class: "muted", text: "and " + fmt(items.length - 80) + " more"}) : null,
+      items.length ? el("li", {}, el("a", {class: "link", href: "/graph?since=24h", text: "See them together in the graph"})) : null);
   } catch (e) {
     said($("added-said"), "Could not load it. " + errText(e), "bad");
   }

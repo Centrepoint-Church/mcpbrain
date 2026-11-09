@@ -397,6 +397,26 @@ def _undo_entity_unsuppressed(store, home, row):
     _graph_changed()
 
 
+def _undo_fact_added(store, home, row):
+    """Remove the fact the owner added, if it still reads as it was written:
+    same entity, attribute and value, still current and not invalidated."""
+    p = _need_payload(row)
+    wrote = p["after"].get("fact") or {}
+    oid = wrote.get("id")
+    if not oid:
+        raise Refused(NOT_UNDOABLE)
+    with store._connect(write=True) as db:
+        cur = db.execute(
+            "SELECT entity_id, attribute, value, valid_to, invalidated_at "
+            "FROM entity_observations WHERE id=?", (oid,)).fetchone()
+        if (cur is None or cur["entity_id"] != row["ref_id"]
+                or (cur["attribute"], cur["value"]) != (wrote.get("attribute"), wrote.get("value"))
+                or cur["valid_to"] is not None or cur["invalidated_at"] is not None):
+            raise Refused(CHANGED_SINCE)
+        db.execute("DELETE FROM entity_observations WHERE id=?", (oid,))  # admin-delete-ok
+    _graph_changed()
+
+
 def _undo_finding_dismissed(store, home, row):
     """Reopen the findings a dismiss closed, if they are still closed by it."""
     p = _need_payload(row)
@@ -437,6 +457,7 @@ UNDO: dict[str, Callable] = {
     "capture_action_update": _undo_action_status,
     "finding_dismissed": _undo_finding_dismissed,
     "entity_unsuppressed": _undo_entity_unsuppressed,
+    "fact_added": _undo_fact_added,
     # legacy revert_ref forms
     "action_snoozed": _undo_snooze,
     "role_corrected": _undo_role,
@@ -533,21 +554,32 @@ def feed(store, *, hours: int = 24, now=None, limit: int = 500) -> list[dict]:
     return out
 
 
+# Ids of entities that gained a relation or observation from a source first
+# seen at or after :cutoff. Shared by added_since and the graph's "added in the
+# last N hours" filter (graph_view.graph_canvas(since_hours=)), so both agree.
+ADDED_SINCE_IDS_SQL = (
+    "SELECT r.entity_a FROM relation_sources rs "
+    "  JOIN entity_relations r ON r.id = rs.relation_id WHERE rs.first_seen >= :cutoff "
+    "UNION SELECT r.entity_b FROM relation_sources rs "
+    "  JOIN entity_relations r ON r.id = rs.relation_id WHERE rs.first_seen >= :cutoff "
+    "UNION SELECT o.entity_id FROM observation_sources os "
+    "  JOIN entity_observations o ON o.id = os.observation_id WHERE os.first_seen >= :cutoff")
+
+
+def added_cutoff(hours: int) -> str:
+    """The first_seen cutoff for "added in the last `hours`" (UTC, ISO)."""
+    return (datetime.now(timezone.utc) - timedelta(hours=hours)).strftime(
+        "%Y-%m-%dT%H:%M:%SZ")
+
+
 def added_since(store, *, hours: int) -> list[dict]:
     """Entities that gained a relation or observation from a source first seen
     in the last `hours` (relation_sources / observation_sources.first_seen)."""
-    cutoff = (datetime.now(timezone.utc) - timedelta(hours=hours)).strftime(
-        "%Y-%m-%dT%H:%M:%SZ")
     with store._connect() as db:
         rows = db.execute(
-            "SELECT e.id AS entity_id, e.name, e.type FROM entities e WHERE e.id IN ("
-            " SELECT r.entity_a FROM relation_sources rs "
-            "   JOIN entity_relations r ON r.id = rs.relation_id WHERE rs.first_seen >= ?"
-            " UNION SELECT r.entity_b FROM relation_sources rs "
-            "   JOIN entity_relations r ON r.id = rs.relation_id WHERE rs.first_seen >= ?"
-            " UNION SELECT o.entity_id FROM observation_sources os "
-            "   JOIN entity_observations o ON o.id = os.observation_id WHERE os.first_seen >= ?)"
-            " AND e.id NOT IN (SELECT entity_id FROM entity_suppressions) "
+            f"SELECT e.id AS entity_id, e.name, e.type FROM entities e WHERE e.id IN ("
+            f"{ADDED_SINCE_IDS_SQL}) "
+            "AND e.id NOT IN (SELECT entity_id FROM entity_suppressions) "
             "ORDER BY e.name",
-            (cutoff, cutoff, cutoff)).fetchall()
+            {"cutoff": added_cutoff(hours)}).fetchall()
     return [{"entity_id": r["entity_id"], "name": r["name"], "type": r["type"]} for r in rows]

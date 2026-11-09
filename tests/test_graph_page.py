@@ -60,7 +60,8 @@ def test_graph_html_has_expected_hooks():
                    'id="f-hits"', 'id="f-type"', '/api/graph/ego',
                    'renderTypeChips', 'obsList',
                    '/api/graph/merge/preview', 'showMergePreview', 'setHitActive',
-                   'strengthWidth']:
+                   'strengthWidth', '/api/graph/types', '/api/graph/suppressed',
+                   '/facts', 'readPalette', 'refreshColours']:
         assert marker in html, f"missing: {marker}"
 
 
@@ -69,7 +70,7 @@ def test_graph_html_js_syntax():
     import shutil
     import subprocess
     html = (Path(__file__).resolve().parents[1] / "mcpbrain" / "wizard" / "graph.html").read_text()
-    scripts = re.findall(r"<script>(.*?)</script>", html, re.S)  # inline only (no src)
+    scripts = re.findall(r"<script(?![^>]*\bsrc=)[^>]*>(.*?)</script>", html, re.S)  # inline only
     assert scripts, "expected an inline <script>"
     if shutil.which("node"):
         for i, js in enumerate(scripts):
@@ -84,3 +85,96 @@ def test_dashboard_links_to_graph():
     assert "Open the graph" in html
     # the button is no longer a disabled "soon" teaser
     assert 'class="explore" disabled' not in html
+
+
+# --- Task 8: shell, kinds from the server, URL state, colours ------------------
+
+import json  # noqa: E402
+import re  # noqa: E402
+import shutil  # noqa: E402
+import subprocess  # noqa: E402
+
+import pytest  # noqa: E402
+
+_WIZ = Path(__file__).resolve().parents[1] / "mcpbrain" / "wizard"
+GRAPH = (_WIZ / "graph.html").read_text(encoding="utf-8")
+
+
+def test_graph_page_uses_the_shared_shell():
+    for marker in ('href="/static/console.css"', 'src="/static/console.js"',
+                   '<meta name="mcpbrain-token" content="__MCPBRAIN_TOKEN__">',
+                   '<a class="tab" href="/graph" aria-current="page">Graph</a>',
+                   'data-mode-toggle', 'id="health-chip"', 'id="offline"',
+                   'C.wireOffline(', 'class="gshell"', 'class="skip"'):
+        assert marker in GRAPH, marker
+    # One way to call the API: the shared helper (offline banner, token, errors).
+    assert "fetch(" not in GRAPH
+    assert "const TOKEN" not in GRAPH
+
+
+def test_graph_page_floor():
+    assert "innerHTML" not in GRAPH and "insertAdjacentHTML" not in GRAPH
+    assert "outerHTML" not in GRAPH
+    assert not re.search(r"#[0-9a-fA-F]{3,8}\b", GRAPH), "colour literal"
+    assert "oklch(" not in GRAPH and "rgba(" not in GRAPH
+    assert 'style="' not in GRAPH
+    assert "—" not in GRAPH, "em dash"
+    assert "window.confirm" not in GRAPH and "confirm(" not in GRAPH
+    assert "prefers-reduced-motion" in GRAPH
+
+
+def test_kinds_come_from_the_server():
+    assert "TYPE_ORDER" not in GRAPH
+    assert "/api/graph/types" in GRAPH and "Unclassified" in GRAPH
+    m = re.search(r"const OFF_BY_DEFAULT = new Set\(\[([^\]]*)\]\)", GRAPH)
+    assert m and set(re.findall(r'"(\w+)"', m.group(1))) == {"document", "thread"}
+
+
+def test_colours_are_read_again_on_a_mode_or_colour_change():
+    assert 'addEventListener("mcpconsole:mode"' in GRAPH
+    body = re.search(r"function refreshColours\(\)\{(.*?)\n\}", GRAPH, re.S)
+    assert body, "refreshColours missing"
+    for call in ("readPalette()", "fg.backgroundColor(", "fg.nodeColor(fg.nodeColor())",
+                 "fg.linkColor(fg.linkColor())", "renderLegend("):
+        assert call in body.group(1), call
+    css = (_WIZ / "console.css").read_text(encoding="utf-8")
+    for tok in ("--graph-ground", "--graph-link-idle", "--graph-link-hot", "--graph-ring"):
+        assert tok + ":" in css, tok
+
+
+def _url_state_js():
+    m = re.search(r"/\* url-state:start \*/(.*?)/\* url-state:end \*/", GRAPH, re.S)
+    assert m, "url-state block missing"
+    return m.group(1)
+
+
+@pytest.mark.skipif(shutil.which("node") is None, reason="node not installed")
+def test_url_state_round_trips(tmp_path):
+    js = _url_state_js() + r"""
+const out = {};
+for (const q of ["?type=person", "?type=document&type=thread", "?show=unlinked",
+                 "?entity=p-dana", "?view=circles", "?since=24h", "?entity=p-dana&rel=works_at",
+                 "", "?since=bogus"]) {
+  const s = readUrlState(q);
+  out[q] = {state: s, back: writeUrlState(s), canvas: canvasQuery(s, 7)};
+}
+console.log(JSON.stringify(out));
+"""
+    p = tmp_path / "u.js"; p.write_text(js)
+    r = subprocess.run(["node", str(p)], capture_output=True, text=True)
+    assert r.returncode == 0, r.stderr
+    o = json.loads(r.stdout)
+    assert o["?type=person"]["state"]["types"] == ["person"]
+    assert o["?type=person"]["back"] == "?type=person"
+    assert o["?type=document&type=thread"]["state"]["types"] == ["document", "thread"]
+    assert "unlinked=1" in o["?show=unlinked"]["canvas"]
+    assert o["?show=unlinked"]["back"] == "?show=unlinked"
+    assert o["?entity=p-dana"]["state"]["entity"] == "p-dana"
+    assert o["?view=circles"]["state"]["view"] == "circles"
+    assert o["?since=24h"]["state"]["sinceHours"] == 24
+    assert "since_hours=24" in o["?since=24h"]["canvas"]
+    assert "min_conn=0" in o["?since=24h"]["canvas"]
+    assert o["?entity=p-dana&rel=works_at"]["state"]["rel"] == "works_at"
+    assert o["?entity=p-dana&rel=works_at"]["back"] == "?entity=p-dana&rel=works_at"
+    assert o[""]["back"] == "" and "min_conn=7" in o[""]["canvas"]
+    assert o["?since=bogus"]["state"]["sinceHours"] == 0

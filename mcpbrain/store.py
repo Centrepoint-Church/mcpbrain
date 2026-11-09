@@ -7328,6 +7328,29 @@ class Store:
                                      {"suppressed": dict(prior)}, {"suppressed": None})
             return cur.rowcount > 0
 
+    def add_manual_observation(self, entity_id: str, attribute: str, value: str, *,
+                               change: dict | None = None) -> int | None:
+        """Write a fact the owner stated about an entity: a current observation
+        with source='manual' and high confidence, the same shape
+        graph_corrections._apply_set_field writes for a role. Returns the new
+        observation id, or None for an unknown entity.
+
+        change: when given, an undoable change_log row recording the
+        observation it wrote is logged on the same connection."""
+        today = datetime.now(timezone.utc).date().isoformat()
+        with self._connect(write=True) as db:
+            if db.execute("SELECT 1 FROM entities WHERE id=?", (entity_id,)).fetchone() is None:
+                return None
+            oid = db.execute(
+                "INSERT INTO entity_observations(entity_id, attribute, value, source, valid_from, "
+                "confidence_source, last_seen) VALUES(?, ?, ?, 'manual', ?, 'high', ?)",
+                (entity_id, attribute, value, today, today)).lastrowid
+            if change is not None:
+                _log_recorded_change(db, change, entity_id, {"fact": None},
+                                     {"fact": {"id": oid, "attribute": attribute,
+                                               "value": value}})
+            return oid
+
     # --- Graph corrections (read side) ----------------------------------------
 
     @staticmethod

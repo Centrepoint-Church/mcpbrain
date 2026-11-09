@@ -340,3 +340,210 @@ def test_list_suppressed_skips_a_suppression_whose_entity_is_gone(tmp_path):
     with s._connect(write=True) as db:   # what an org import's entity removal leaves behind
         db.execute("DELETE FROM entities WHERE id='o-gone'")  # admin-delete-ok
     assert [r["id"] for r in graph_view.list_suppressed(s)] == ["p-dana"]
+
+
+# --- Task 8: graph page filters, kinds, facts ----------------------------------
+
+def _graph_store(tmp_path):
+    """A real store: Dana works at Harbour Trust (live link); Sam had a link that
+    was invalidated; Lena and an unclassified stub have none."""
+    from mcpbrain import graph_write as gw
+    s = _real_store(tmp_path)
+    s.upsert_entity("p-dana", "Dana Okafor", "person")
+    s.upsert_entity("o-harbour", "Harbour Trust", "org")
+    s.upsert_entity("p-sam", "Sam Ito", "person")
+    s.upsert_entity("o-north", "Northgate Tools", "org")
+    s.upsert_entity("p-lena", "Lena Whitfield", "person")
+    s.upsert_entity("x-stub", "Loose end", "unknown")
+    s.upsert_entity("d-quote", "Fence quote", "document")
+    s.upsert_entity("f-shed", "Tool shed", "facility")
+    gw.upsert_relation(s, "p-dana", "works_at", "o-harbour", valid_from="2026-01-01")
+    gw.upsert_relation(s, "p-dana", "collaborates_with", "p-lena", valid_from="2026-01-01")
+    gw.upsert_relation(s, "d-quote", "mentioned_with", "o-north", valid_from="2026-01-01")
+    rid = gw.upsert_relation(s, "p-sam", "works_at", "o-north", valid_from="2026-01-01")
+    with s._connect(write=True) as db:
+        db.execute("UPDATE entity_relations SET invalidated_at='2026-02-01' WHERE id=?", (rid,))
+        db.execute("UPDATE entities SET degree=9")
+    return s
+
+
+def test_canvas_unlinked_returns_only_entities_with_no_live_link(tmp_path):
+    s = _graph_store(tmp_path)
+    srv = ControlServer(_Daemon(), str(tmp_path), store=s); srv.start()
+    try:
+        # min_conn is ignored: degree means nothing for an entity with no links.
+        code, body = _get(f"http://127.0.0.1:{srv.port}/api/graph/canvas?unlinked=1&min_conn=50",
+                          srv.token)
+        assert code == 200
+        assert {n["id"] for n in body["nodes"]} == {"p-sam", "x-stub", "f-shed"}
+        assert body["links"] == []
+        assert body["total"] == 3 and body["truncated"] is False
+        code, body = _get(f"http://127.0.0.1:{srv.port}/api/graph/canvas?unlinked=1&type=person",
+                          srv.token)
+        assert {n["id"] for n in body["nodes"]} == {"p-sam"}
+    finally:
+        srv.stop()
+
+
+def test_canvas_unlinked_caps_to_the_newest_and_says_so(tmp_path, monkeypatch):
+    from mcpbrain import graph_view
+    s = _graph_store(tmp_path)
+    with s._connect(write=True) as db:
+        db.execute("UPDATE entities SET last_seen='2026-03-01' WHERE id='x-stub'")
+        db.execute("UPDATE entities SET last_seen='2026-01-01' WHERE id IN ('p-sam','f-shed')")
+    monkeypatch.setattr(graph_view, "_UNLINKED_CAP", 1)
+    out = graph_view.graph_canvas(s, unlinked=True)
+    assert [n["id"] for n in out["nodes"]] == ["x-stub"]
+    assert out["total"] == 3 and out["truncated"] is True
+
+
+def test_canvas_since_hours_returns_only_recently_added(tmp_path):
+    from datetime import datetime, timedelta, timezone
+
+    from mcpbrain import change_undo, graph_view
+    s = _graph_store(tmp_path)
+    now = datetime.now(timezone.utc)
+    fresh = now.strftime("%Y-%m-%dT%H:%M:%SZ")
+    stale = (now - timedelta(days=3)).strftime("%Y-%m-%dT%H:%M:%SZ")
+    with s._connect(write=True) as db:
+        rid = db.execute("SELECT id FROM entity_relations WHERE entity_a='p-dana' "
+                         "AND entity_b='o-harbour'").fetchone()[0]
+        db.execute("INSERT INTO relation_sources(relation_id, source_key, source_class, "
+                   "first_seen) VALUES(?,?,?,?)", (rid, "msg-1", "email", fresh))
+        old = db.execute("SELECT id FROM entity_relations WHERE entity_a='d-quote'").fetchone()[0]
+        db.execute("INSERT INTO relation_sources(relation_id, source_key, source_class, "
+                   "first_seen) VALUES(?,?,?,?)", (old, "msg-2", "email", stale))
+        oid = db.execute("INSERT INTO entity_observations(entity_id, attribute, value, source, "
+                         "valid_from) VALUES('p-lena','role','Site lead','x','2026-01-01')"
+                         ).lastrowid
+        db.execute("INSERT INTO observation_sources(observation_id, source_key, source_class, "
+                   "first_seen) VALUES(?,?,?,?)", (oid, "msg-3", "email", fresh))
+    out = graph_view.graph_canvas(s, min_conn=0, since_hours=24)
+    ids = {n["id"] for n in out["nodes"]}
+    assert ids == {"p-dana", "o-harbour", "p-lena"}
+    assert ids == {r["entity_id"] for r in change_undo.added_since(s, hours=24)}
+    srv = ControlServer(_Daemon(), str(tmp_path), store=s); srv.start()
+    try:
+        code, body = _get(f"http://127.0.0.1:{srv.port}/api/graph/canvas?since_hours=24&min_conn=0",
+                          srv.token)
+        assert code == 200 and {n["id"] for n in body["nodes"]} == ids
+    finally:
+        srv.stop()
+
+
+def test_graph_types_match_graph_counts(tmp_path):
+    from mcpbrain import console_stats, contract, graph_view
+    from mcpbrain.dashboard import _open_ro
+    s = _graph_store(tmp_path)
+    types = graph_view.graph_types(s)
+    assert all(set(t) == {"type", "count"} for t in types)
+    assert {t["type"] for t in types} == {"person", "org", "unknown", "document", "facility"}
+    db = _open_ro(s.path)
+    try:
+        by_type = console_stats.graph_counts(db)["by_type"]
+    finally:
+        db.close()
+    folded = {}
+    for t in types:
+        key = t["type"] if t["type"] in by_type else "unknown"
+        folded[key] = folded.get(key, 0) + t["count"]
+    assert folded == {k: v for k, v in by_type.items() if v}
+    srv = ControlServer(_Daemon(), str(tmp_path), store=s); srv.start()
+    try:
+        code, body = _get(f"http://127.0.0.1:{srv.port}/api/graph/types", srv.token)
+        assert code == 200 and body["types"] == types
+        assert body["classified"] == sorted(contract.ENTITY_TYPES)
+    finally:
+        srv.stop()
+
+
+def test_ego_follows_one_relation(tmp_path):
+    from mcpbrain import graph_view
+    s = _graph_store(tmp_path)
+    out = graph_view.graph_ego(s, "p-dana", hops=1, relation="works_at")
+    assert {n["id"] for n in out["nodes"]} == {"p-dana", "o-harbour"}
+    assert {lk["relation"] for lk in out["links"]} == {"works_at"}
+    srv = ControlServer(_Daemon(), str(tmp_path), store=s); srv.start()
+    try:
+        code, body = _get(f"http://127.0.0.1:{srv.port}/api/graph/ego?id=p-dana&hops=1"
+                          "&relation=collaborates_with", srv.token)
+        assert code == 200 and {n["id"] for n in body["nodes"]} == {"p-dana", "p-lena"}
+    finally:
+        srv.stop()
+
+
+def test_add_a_fact_route_validates_and_is_undoable(tmp_path):
+    from mcpbrain import change_undo, graph_view
+    s = _graph_store(tmp_path)
+    srv = ControlServer(_Daemon(), str(tmp_path), store=s); srv.start()
+    base = f"http://127.0.0.1:{srv.port}/api/graph/entity"
+    try:
+        code, body = _post(base + "/p-dana/facts", srv.token,
+                           {"attribute": "role", "value": "x" * 81})
+        assert code == 400 and body["reason"]
+        code, body = _post(base + "/p-dana/facts", srv.token, {"attribute": "role", "value": " "})
+        assert code == 400
+        code, body = _post(base + "/p-dana/facts", srv.token, {"attribute": "", "value": "Lead"})
+        assert code == 400
+        code, body = _post(base + "/nobody/facts", srv.token, {"attribute": "role", "value": "Lead"})
+        assert code == 404
+
+        code, body = _post(base + "/p-dana/facts", srv.token,
+                           {"attribute": "role", "value": "Site lead"})
+        assert code == 200 and body["ok"] is True and body["change_id"]
+        obs = graph_view.entity_detail(s, "p-dana")["observations"]
+        assert any(o["attribute"] == "role" and o["value"] == "Site lead"
+                   and o["source"] == "manual" for o in obs)
+        assert any(o["value"] == "Site lead" for o in body["entity"]["observations"])
+        with s._connect() as db:
+            row = dict(db.execute("SELECT * FROM change_log WHERE id=?",
+                                  (body["change_id"],)).fetchone())
+            conf = db.execute("SELECT confidence_source FROM entity_observations "
+                              "WHERE value='Site lead'").fetchone()[0]
+        assert conf == "high"
+        assert row["change_type"] == "fact_added" and row["ref_id"] == "p-dana"
+        assert "Dana Okafor" in row["summary"] and row["revert_ref"]
+
+        assert change_undo.undo(s, str(tmp_path), row["id"])["ok"] is True
+        obs = graph_view.entity_detail(s, "p-dana")["observations"]
+        assert not any(o["value"] == "Site lead" for o in obs)
+        # A second undo is refused, not repeated.
+        assert change_undo.undo(s, str(tmp_path), row["id"])["ok"] is False
+    finally:
+        srv.stop()
+
+
+def test_fact_undo_refuses_once_the_fact_has_changed(tmp_path):
+    from mcpbrain import change_undo, graph_view
+    s = _graph_store(tmp_path)
+    out = graph_view.add_fact(s, "p-dana", "role", "Site lead")
+    with s._connect(write=True) as db:
+        db.execute("UPDATE entity_observations SET valid_to='2026-11-01' WHERE value='Site lead'")
+    res = change_undo.undo(s, str(tmp_path), out["change_id"])
+    assert res["ok"] is False and res["reason"] == change_undo.CHANGED_SINCE
+
+
+def test_hide_from_the_graph_returns_its_change_for_undo(tmp_path):
+    from mcpbrain import change_undo
+    s = _graph_store(tmp_path)
+    srv = ControlServer(_Daemon(), str(tmp_path), store=s); srv.start()
+    try:
+        code, body = _req(f"http://127.0.0.1:{srv.port}/api/graph/entity/p-lena",
+                          srv.token, "DELETE", None)
+        assert code == 200 and body["ok"] is True and body["change_id"]
+        assert change_undo.undo(s, str(tmp_path), body["change_id"])["ok"] is True
+        code, body = _get(f"http://127.0.0.1:{srv.port}/api/graph/suppressed", srv.token)
+        assert body["items"] == []
+    finally:
+        srv.stop()
+
+
+def test_graph_page_serves_with_a_query_string(tmp_path):
+    srv = ControlServer(_Daemon(), str(tmp_path), store=None); srv.start()
+    try:
+        for q in ("?type=person", "?show=unlinked", "?entity=p-dana", "?view=circles",
+                  "?since=24h", "?type=document&type=thread"):
+            with urllib.request.urlopen(f"http://127.0.0.1:{srv.port}/graph{q}", timeout=5) as r:
+                assert r.status == 200 and srv.token in r.read().decode()
+    finally:
+        srv.stop()

@@ -1,738 +1,1120 @@
 <!doctype html>
-<html lang="en">
+<html lang="en-AU">
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>Graph — mcpbrain</title>
-<style>
-  :root{
-    --ink:#12151b; --muted:#697280; --faint:#98a0ab; --line:#e6e8ee;
-    --paper:#f4f6f9; --card:#ffffff; --signal:#0b5cff; --graph:#6a4cff;
-    --mono:ui-monospace,"SF Mono","JetBrains Mono","Fira Mono","Consolas",monospace;
-    --sans:-apple-system,BlinkMacSystemFont,"Segoe UI",system-ui,sans-serif;
-    --graph-bg:#ffffff; --graph-label:#12151b; --graph-fade:#c9ced7;
-    --graph-link-idle:#dfe3ea; --graph-link-mute:#eef1f5; --graph-link-hot:#0b5cff;
-    --graph-ring:#cdbff5; --graph-ring-text:#697280; --graph-node-fallback:#7a828d;
-    --graph-person:#0b5cff; --graph-org:#6a4cff; --graph-project:#1f9d54;
-    --graph-document:#b7791f; --graph-topic:#0e7490; --graph-meeting:#db2777;
-    --graph-node-org:#5b7ea8;
-  }
-  *{box-sizing:border-box}
-  html,body{height:100%}
-  body{margin:0;background:var(--paper);color:var(--ink);font:15px/1.5 var(--sans);
-    -webkit-font-smoothing:antialiased;display:flex;flex-direction:column}
-  header{display:flex;align-items:center;gap:14px;padding:12px 18px;
-    border-bottom:1px solid var(--line);background:var(--card);flex:0 0 auto}
-  .wordmark{font-weight:680;letter-spacing:-.01em}
-  .eyebrow{font-size:11px;font-weight:700;text-transform:uppercase;letter-spacing:.11em;color:var(--faint)}
-  a.back{color:var(--muted);text-decoration:none;font-size:13px}
-  a.back:hover{color:var(--ink)}
-  .count{margin-left:auto;font-family:var(--mono);font-size:12.5px;color:var(--muted)}
-  .layout{flex:1 1 auto;display:flex;min-height:0}
-  .filters{flex:0 0 230px;border-right:1px solid var(--line);background:var(--card);
-    padding:16px;display:flex;flex-direction:column;gap:16px;overflow-y:auto}
-  .filters label{display:flex;flex-direction:column;gap:6px;font-size:11px;
-    text-transform:uppercase;letter-spacing:.07em;color:var(--muted)}
-  .filters input[type=range]{width:100%}
-  .filters select,.filters input[type=text]{font:inherit;font-size:14px;padding:6px 8px;
-    border:1px solid var(--line);border-radius:8px;background:#fff;text-transform:none;color:var(--ink)}
-  .deg-val{font-family:var(--mono);color:var(--ink)}
-  .f-searchwrap{position:relative}
-  .f-searchwrap input{width:100%;font:inherit;font-size:14px;padding:6px 8px;border:1px solid var(--line);border-radius:8px;background:#fff;color:var(--ink)}
-  #f-hits{position:absolute;left:0;right:0;top:calc(100% + 2px);z-index:20;background:#fff;
-    box-shadow:0 4px 14px rgba(20,24,29,.12)}
-  .chips{display:flex;flex-wrap:wrap;gap:6px}
-  .chips .chip{font:inherit;font-size:12px;text-transform:none;letter-spacing:0;padding:3px 10px;border:1px solid var(--line);
-    border-radius:999px;background:#fff;color:var(--muted);cursor:pointer;user-select:none}
-  .chips .chip[aria-pressed=true]{background:var(--signal);border-color:transparent;color:#fff}
-  .hint{font-size:11px;color:var(--faint);line-height:1.4;text-transform:none;letter-spacing:0}
-  #stage{flex:1 1 auto;position:relative;min-width:0;background:var(--graph-bg)}
-  #graph{position:absolute;inset:0}
-  #overlay{position:absolute;inset:0;display:flex;align-items:center;justify-content:center;
-    color:var(--muted);font-size:14px;background:var(--paper);z-index:5;text-align:center;padding:24px}
-  #overlay.hidden{display:none}
-  #legend{position:absolute;top:12px;right:12px;z-index:8;background:rgba(255,255,255,.92);
-    border:1px solid var(--line);border-radius:10px;padding:10px 12px;font-size:12px;
-    box-shadow:0 2px 8px rgba(20,24,29,.06)}
-  #legend h4{margin:0 0 7px;font-size:10.5px;text-transform:uppercase;letter-spacing:.08em;color:var(--faint);font-weight:700}
-  #legend .row{display:flex;align-items:center;gap:7px;padding:1.5px 0;color:var(--ink)}
-  #legend .sw{width:10px;height:10px;border-radius:3px;flex:0 0 auto}
-  .drawer{position:absolute;top:0;right:0;bottom:0;width:340px;z-index:9;background:var(--card);
-    border-left:1px solid var(--line);box-shadow:-4px 0 18px rgba(20,24,29,.06);
-    overflow-y:auto;padding:16px 18px;font-size:14px}
-  .drawer[hidden]{display:none}
-  .dw-x{position:absolute;top:10px;right:12px;border:0;background:none;font-size:20px;color:var(--muted);cursor:pointer}
-  .dw-x:hover{color:var(--ink)}
-  .dw-name{font-size:18px;font-weight:680;margin:2px 40px 2px 0}
-  .dw-meta{color:var(--muted);font-size:12.5px;margin-bottom:12px}
-  .dw-sec{margin-top:16px}
-  .dw-sec h4{font-size:10.5px;text-transform:uppercase;letter-spacing:.08em;color:var(--faint);margin:0 0 6px}
-  .dw-row{display:flex;gap:8px;padding:3px 0;font-size:13px;border-top:1px solid var(--line)}
-  .dw-row:first-of-type{border-top:0}
-  .dw-row .rel{color:var(--muted);flex:0 0 auto}
-  .dw-relgroup{margin:8px 0}
-  .dw-relhead{font-size:11px;color:var(--muted);margin-bottom:4px}
-  .dw-relcount{font-family:var(--mono);font-size:11px;color:var(--faint);margin-left:2px}
-  .dw-chips{display:flex;flex-wrap:wrap;gap:4px}
-  .dw-chip{font-size:12px;padding:2px 8px;border:1px solid var(--line);border-radius:999px;background:#fff;color:var(--ink)}
-  .dw-more{margin-top:4px}
-  .dw-more summary{font-size:11px;color:var(--muted);cursor:pointer}
-  .dw-more .dw-chips{margin-top:4px}
-  .dw-field{display:flex;flex-direction:column;gap:3px;margin:6px 0}
-  .dw-field label{font-size:11px;color:var(--muted)}
-  .dw-field input,.dw-field textarea{font:inherit;padding:6px 8px;border:1px solid var(--line);border-radius:8px}
-  .dw-actions{display:flex;flex-wrap:wrap;gap:8px;margin-top:14px}
-  .dw-actions button{font:inherit;font-weight:600;border-radius:8px;padding:7px 12px;cursor:pointer;border:1px solid var(--line);background:#fff}
-  .dw-actions .primary{background:var(--signal);color:#fff;border-color:transparent}
-  .dw-actions .danger{color:var(--err,#d64545);border-color:#f0c9c9}
-  .dw-search{position:relative}
-  .dw-search input{width:100%}
-  .dw-hits{list-style:none;margin:4px 0 0;padding:0;border:1px solid var(--line);border-radius:8px;max-height:160px;overflow:auto}
-  .dw-hits li{padding:6px 9px;cursor:pointer;font-size:13px}
-  .dw-hits li:hover{background:var(--idle-bg,#eef1f5)}
-  .dw-hits li.active{background:var(--signal);color:#fff}
-  .dw-hits li.active span{color:rgba(255,255,255,.85)!important}
-  .dw-err{color:var(--err,#d64545);font-size:12.5px;margin-top:8px}
-</style>
+<title>Graph, mcpbrain</title>
+<meta name="description" content="The people, organisations, projects, topics and meetings mcpbrain knows about, and how they link.">
+<meta name="mcpbrain-token" content="__MCPBRAIN_TOKEN__">
+<link rel="icon" href="data:,">
+<link rel="stylesheet" href="/static/console.css">
+<script src="/static/console.js"></script>
 </head>
 <body>
-  <header>
-    <a class="back" href="/dashboard">← Dashboard</a>
-    <span class="wordmark">mcpbrain</span>
-    <span class="eyebrow">Knowledge graph</span>
-    <span id="count" class="count"></span>
-  </header>
-  <div class="layout">
-    <aside class="filters">
-      <label for="f-search">Search</label>
-      <div class="f-searchwrap">
-        <input type="text" id="f-search" placeholder="name…" autocomplete="off">
-        <ul id="f-hits" class="dw-hits" hidden></ul>
-      </div>
-      <div id="search-status" class="hint"></div>
-      <label>Layout
-        <select id="f-layout">
-          <option value="emergent" selected>Emergent</option>
-          <option value="radial">Radial</option>
-        </select>
-      </label>
-      <label>Min connections <span class="deg-val" id="deg-val">7</span>
-        <input type="range" id="f-degree" min="1" max="50" value="7">
-      </label>
-      <label>Organisation
-        <select id="f-org"><option value="">All</option></select>
-      </label>
-      <div>
-        <div style="font-size:11px;text-transform:uppercase;letter-spacing:.07em;color:var(--muted);margin-bottom:6px">Type</div>
-        <div id="f-type" class="chips"></div>
-      </div>
-      <div class="hint">Drag to pan · scroll to zoom · drag a node to move it · hover for a name · click a node for details · right-click to focus its neighbourhood · double-click empty space to reset.</div>
-    </aside>
-    <div id="stage">
-      <div id="graph"></div>
-      <div id="legend"></div>
-      <div id="overlay">Loading graph…</div>
-      <aside id="drawer" class="drawer" hidden>
-        <button id="dw-close" class="dw-x" aria-label="Close">×</button>
-        <div id="dw-body"></div>
-      </aside>
+<a class="skip" href="#rail">Skip to the graph filters</a>
+
+<header class="bar">
+  <div class="bar__in">
+    <a class="wordmark" href="/dashboard" aria-label="mcpbrain overview">mcpbrain</a>
+    <nav class="tabs" aria-label="Console">
+      <a class="tab" href="/dashboard">Overview</a>
+      <a class="tab" href="/graph" aria-current="page">Graph</a>
+      <a class="tab" href="/settings">Settings</a>
+    </nav>
+    <div class="bar__end">
+      <span class="chip chip--quiet" id="health-chip" role="status">Checking</span>
+      <span class="asof">Updated <span id="asof">not yet</span></span>
+      <button class="btn btn--sm mode" type="button" data-mode-toggle aria-label="Switch between light and dark mode">
+        <svg class="sun" viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="12" r="4"/><path d="M12 2v2M12 20v2M4.93 4.93l1.41 1.41M17.66 17.66l1.41 1.41M2 12h2M20 12h2M4.93 19.07l1.41-1.41M17.66 6.34l1.41-1.41"/></svg>
+        <svg class="moon" viewBox="0 0 24 24" aria-hidden="true"><path d="M20.5 14.5A8.5 8.5 0 0 1 9.5 3.5a8.5 8.5 0 1 0 11 11z"/></svg>
+      </button>
     </div>
   </div>
+</header>
 
-  <script src="/vendor/d3.min.js"></script>
-  <script src="/vendor/force-graph.min.js"></script>
-  <script>
-    const TOKEN = "__MCPBRAIN_TOKEN__";
-    const H = { headers: { Authorization: "Bearer " + TOKEN } };
-    const reduce = window.matchMedia("(prefers-reduced-motion:reduce)").matches;
-    const $ = (id) => document.getElementById(id);
+<main id="main" class="gshell">
+  <aside class="rail" id="rail" aria-labelledby="graph-h">
+    <div>
+      <h1 id="graph-h">Knowledge graph</h1>
+      <p class="said" id="count" role="status">Loading the graph.</p>
+    </div>
+    <div class="banner banner--bad" id="offline" role="alert" hidden>
+      <span>mcpbrain is not responding. Start it from the menu bar, then try again.</span>
+      <button class="btn btn--sm" type="button" id="offline-retry">Try again</button>
+    </div>
+    <noscript><p class="banner">The graph draws with JavaScript. Turn it on for this page to see it.</p></noscript>
 
-    const TOP30_FRACTION = 0.30;  // links between two top-30%-connected nodes get flow particles
-    const INTRA_COMMUNITY_BOOST = 3;  // same-community links pull harder so clusters emerge
-    const DRAWER_W = 340;  // matches .drawer width — click-to-focus offsets so the node lands in the visible pane
-    const CURVATURE_MAX = 0.3;  // max bend for links that share a node-pair or self-loop; single edges stay straight
+    <div class="field findwrap">
+      <label for="f-search">Find an entity</label>
+      <input class="input" type="search" id="f-search" placeholder="A name or alias" autocomplete="off" spellcheck="false"
+             role="combobox" aria-autocomplete="list" aria-expanded="false" aria-controls="f-hits">
+      <ul id="f-hits" class="hits" role="listbox" aria-label="Matching entities" hidden></ul>
+      <span class="help" id="search-status" role="status"></span>
+    </div>
 
-    const TYPE_TOKEN = { person:"--graph-person", org:"--graph-org", project:"--graph-project",
-                         document:"--graph-document", topic:"--graph-topic", meeting:"--graph-meeting" };
-    const TYPE_ORDER = ["person","org","project","document","topic","meeting"];
-    function readVar(n, fb=""){ const v = getComputedStyle(document.documentElement).getPropertyValue(n).trim(); return v || fb; }
-    function readPalette(){
-      const byType = {}; for (const [k,t] of Object.entries(TYPE_TOKEN)) byType[k] = readVar(t);
-      return { bg:readVar("--graph-bg","#fff"), label:readVar("--graph-label","#12151b"),
-        fade:readVar("--graph-fade","#c9ced7"), linkIdle:readVar("--graph-link-idle","#dfe3ea"),
-        linkMute:readVar("--graph-link-mute","#eef1f5"), linkHot:readVar("--graph-link-hot","#0b5cff"),
-        ring:readVar("--graph-ring","#cdbff5"), ringText:readVar("--graph-ring-text","#697280"),
-        nodeFallback:readVar("--graph-node-fallback","#7a828d"),
-        orgOrigin:readVar("--graph-node-org","#5b7ea8"), byType };
-    }
-    const palette = readPalette();
+    <div class="banner" id="view-note" hidden>
+      <span id="view-text"></span>
+      <button class="linkbtn" type="button" id="view-clear">Show the whole graph</button>
+    </div>
 
-    // colour is by entity type, except org-baseline entities read as a
-    // distinct, consistent colour regardless of type (Phase D: origin surfacing).
-    function nodeColour(n){
-      if (n.origin === "org") return palette.orgOrigin;
-      return palette.byType[n.type] || palette.nodeFallback;
-    }
-    function nodeRadius(n){
-      const conn = n.connections || 0, scale = window.innerWidth <= 768 ? 1.4 : 1;
-      if (n.type === "org" || n.type === "project") return (8 + Math.min(conn*0.15, 12)) * scale;
-      return (3 + Math.min(conn*0.08, 8)) * scale;
-    }
+    <details class="filters" id="filters" open>
+    <summary>Filters</summary>
+    <div class="filters__in">
+    <fieldset class="types" id="f-type" aria-busy="true">
+      <legend>Kinds</legend>
+      <span class="skel skel--line"></span><span class="skel skel--line skel--short"></span>
+    </fieldset>
 
-    const state = { hoveredNodeId:null, selectedNodeId:null, mode:"map", egoNodeId:null,
-                    egoDepth:1, egoHops:{}, layout:"emergent", searchTerm:"", types:new Set() };
-    let CURRENT = { nodes:[], links:[], communities:{} };
-    let COMMUNITY = new Map(); // id -> community key (for link cohesion + intra/inter edges)
-    let TOP30 = new Set();     // ids of the top-30% most-connected nodes
-    let MAXDEG = 1;
-    let NEIGHBORS = new Map(); // id -> Set of directly-linked neighbour ids (hover ring)
-    let hoverRing = new Set(); // hovered node id + its neighbours, refreshed on hover
+    <fieldset class="types">
+      <legend>Show</legend>
+      <label class="type"><input type="checkbox" id="f-unlinked"><span></span><span>Only entities with no links</span><span></span></label>
+      <label class="type"><input type="checkbox" id="f-since"><span></span><span>Only what the last 24 hours added</span><span></span></label>
+    </fieldset>
 
-    function recomputeDerived(){
-      COMMUNITY = new Map(); let maxd = 0;
-      for (const n of CURRENT.nodes){
-        COMMUNITY.set(n.id, n.community == null ? "—" : String(n.community));
-        if ((n.connections||0) > maxd) maxd = n.connections||0;
-      }
-      MAXDEG = maxd || 1;
-      TOP30 = new Set();
-      const ranked = [...CURRENT.nodes].sort((a,b)=>(b.connections||0)-(a.connections||0));
-      const cut = Math.ceil(ranked.length * TOP30_FRACTION);
-      for (let i=0;i<cut;i++) TOP30.add(ranked[i].id);
-      NEIGHBORS = new Map();
-      for (const l of CURRENT.links){
-        const sid = typeof l.source==="object"?l.source.id:l.source, tid = typeof l.target==="object"?l.target.id:l.target;
-        (NEIGHBORS.get(sid) || NEIGHBORS.set(sid,new Set()).get(sid)).add(tid);
-        (NEIGHBORS.get(tid) || NEIGHBORS.set(tid,new Set()).get(tid)).add(sid);
-      }
-    }
+    <div class="field">
+      <label for="f-colour">Colour by</label>
+      <select class="input" id="f-colour">
+        <option value="kinds">Kind</option>
+        <option value="circles">Circle, groups that work together</option>
+      </select>
+    </div>
 
-    // ---- ego (right-click focus) ----
-    function computeEgoHops(nodes, links, focusId, depth){
-      const hops = { [focusId]:0 }, adj = new Map();
-      for (const l of links){ const s = typeof l.source==="object"?l.source.id:l.source, t = typeof l.target==="object"?l.target.id:l.target;
-        (adj.get(s)||adj.set(s,new Set()).get(s)).add(t); (adj.get(t)||adj.set(t,new Set()).get(t)).add(s); }
-      const q=[[focusId,0]];
-      while(q.length){ const [id,d]=q.shift(); if(d>=depth) continue;
-        for(const nb of adj.get(id)||[]) if(hops[nb]===undefined){ hops[nb]=d+1; q.push([nb,d+1]); } }
-      return hops;
-    }
+    <div class="field">
+      <label for="f-layout">Layout</label>
+      <select class="input" id="f-layout">
+        <option value="emergent" selected>Clustered by circle</option>
+        <option value="radial">Rings, most linked in the middle</option>
+      </select>
+    </div>
 
-    // ---- node colour (default force-graph rendering) + hover label + particles ----
-    function nodeColourState(n){
-      if (n.id === state.selectedNodeId) return palette.label;
-      if (state.searchTerm) return (n.name||"").toLowerCase().includes(state.searchTerm) ? nodeColour(n) : palette.fade;
-      return nodeColour(n);
-    }
-    // Names on hover only (force-graph's built-in nodeLabel). esc() (hoisted, below) guards XSS.
-    function nodeHoverLabel(n){
-      return '<div style="background:#1a1f27;color:#fff;border-radius:8px;padding:7px 10px;'
-        + 'font:12.5px/1.4 -apple-system,system-ui,sans-serif;max-width:260px">'
-        + '<b>' + esc(n.name) + '</b><br><span style="color:#c9ced7">'
-        + esc(n.type || "") + ' · ' + esc(n.org || "no org") + ' · '
-        + (n.connections || 0) + ' connections</span></div>';
-    }
-    // Flow particles: the selected node's links, OR links whose BOTH ends are top-30% connected.
-    function linkParticlesFor(l){
-      const sid = typeof l.source==="object"?l.source.id:l.source, tid = typeof l.target==="object"?l.target.id:l.target;
-      if (state.selectedNodeId && (sid===state.selectedNodeId || tid===state.selectedNodeId)) return 4;
-      return (TOP30.has(sid) && TOP30.has(tid)) ? 2 : 0;
-    }
-    // Deterministic 0..1 hash of a link's endpoints, used to desync particle start
-    // positions — else same-length links would all pulse in unison.
-    function linkKeyHash(l){
-      const sid = typeof l.source==="object"?l.source.id:l.source, tid = typeof l.target==="object"?l.target.id:l.target;
-      const s = String(sid) + "|" + String(tid) + "|" + (l.relation||"");
-      let h = 0; for (let i=0;i<s.length;i++) h = (h*31 + s.charCodeAt(i)) | 0;
-      return (h >>> 0) / 4294967295;
-    }
-    function linkParticleOffsetFor(l){ return linkKeyHash(l); }
-    // Curve only links that would otherwise overlap: multiple relations between the same
-    // two entities (either direction), or self-loops. Groups get evenly-spaced curvature
-    // (reversed-direction edges flipped to the opposite side); a lone edge stays straight.
-    function assignLinkCurvature(links){
-      const pairGroups = new Map(), selfGroups = new Map();
-      for (const l of links){
-        const sid = typeof l.source==="object"?l.source.id:l.source, tid = typeof l.target==="object"?l.target.id:l.target;
-        if (sid === tid){ (selfGroups.get(sid) || selfGroups.set(sid,[]).get(sid)).push(l); continue; }
-        const key = String(sid) < String(tid) ? sid+"|"+tid : tid+"|"+sid;
-        (pairGroups.get(key) || pairGroups.set(key,[]).get(key)).push(l);
-      }
-      for (const group of selfGroups.values())
-        group.forEach((l,i)=>{ l.curvature = CURVATURE_MAX * (i+1) / group.length; });
-      for (const group of pairGroups.values()){
-        if (group.length === 1){ group[0].curvature = 0; continue; }
-        const n = group.length, delta = 2*CURVATURE_MAX/(n-1);
-        const firstSid = typeof group[0].source==="object"?group[0].source.id:group[0].source;
-        group.forEach((l,i)=>{
-          const sid = typeof l.source==="object"?l.source.id:l.source;
-          let c = -CURVATURE_MAX + i*delta;
-          if (sid !== firstSid) c *= -1;   // flip reversed-direction edges off the same arc
-          l.curvature = c;
-        });
-      }
-    }
-    function sameCommunity(l){
-      const s = typeof l.source==="object"?l.source.id:l.source, t = typeof l.target==="object"?l.target.id:l.target;
-      return COMMUNITY.get(s) === COMMUNITY.get(t);
-    }
-    function linkColourFor(l){
-      const focus = state.hoveredNodeId || state.selectedNodeId;
-      const sid = typeof l.source==="object"?l.source.id:l.source, tid = typeof l.target==="object"?l.target.id:l.target;
-      if (focus) return (sid===focus||tid===focus) ? palette.linkHot : palette.linkMute;
-      if (state.searchTerm){ const sn=l.source?.name?.toLowerCase().includes(state.searchTerm), tn=l.target?.name?.toLowerCase().includes(state.searchTerm);
-        return (sn||tn) ? palette.linkHot : palette.linkMute; }
-      return sameCommunity(l) ? palette.linkMute : palette.linkIdle;   // cross-community links stay visible
-    }
-    // Edge thickness encodes relation strength (how many times it was observed),
-    // so a 30×-seen tie reads bolder than a one-off co-occurrence and dense hubs
-    // become legible: strong ties stand out, weak ones recede.
-    function strengthWidth(l){ return 0.3 + Math.min(1.4, Math.log2(Math.max(1, l.strength||1)) * 0.35); }
-    function linkWidthFor(l){
-      const focus = state.hoveredNodeId || state.selectedNodeId;
-      const sid = typeof l.source==="object"?l.source.id:l.source, tid = typeof l.target==="object"?l.target.id:l.target;
-      if (focus) return (sid===focus||tid===focus) ? 1.6 : 0.4;
-      const base = strengthWidth(l);
-      return sameCommunity(l) ? base * 0.6 : base;   // intra-community links thinner (they're dense)
-    }
-    // Hover spotlight: a ring on the hovered node, and a softer one on its direct neighbours.
-    function nodeRingMode(n){ return hoverRing.has(n.id) ? "before" : undefined; }
-    function drawNodeRing(n, ctx){
-      ctx.save();
-      ctx.beginPath(); ctx.arc(n.x, n.y, (n._r ?? nodeRadius(n)) * 1.5, 0, 2*Math.PI, false);
-      ctx.fillStyle = n.id === state.hoveredNodeId ? palette.linkHot : palette.ring;
-      ctx.globalAlpha = 0.35; ctx.fill();
-      ctx.restore();
-    }
-    function drawEgoRings(ctx){
-      if (state.mode !== "ego" || !state.egoNodeId) return;
-      const ringR = 90; ctx.save(); ctx.strokeStyle = palette.ring; ctx.lineWidth = 1;
-      for (let hop=1; hop<=state.egoDepth; hop++){ ctx.beginPath(); ctx.arc(0,0,hop*ringR,0,2*Math.PI); ctx.stroke();
-        ctx.fillStyle = palette.ringText; ctx.font = "11px "+getComputedStyle(document.body).fontFamily;
-        ctx.textAlign="center"; ctx.textBaseline="bottom"; ctx.fillText(`${hop} hop${hop>1?"s":""}`, 0, -hop*ringR-4); }
-      ctx.restore();
-    }
+    <div class="field">
+      <div class="rangehead"><label for="f-degree">Fewest links shown</label><span class="measured" id="deg-val">7</span></div>
+      <input type="range" id="f-degree" min="0" max="50" value="7" aria-describedby="deg-help">
+      <span class="help" id="deg-help">Entities with fewer links stay off the map until you find them.</span>
+    </div>
 
-    // ---- force-graph init ----
-    const container = $("graph");
-    const fg = new ForceGraph(container)
-      .backgroundColor(palette.bg).nodeId("id").linkSource("source").linkTarget("target")
-      .nodeRelSize(1).nodeVal((n)=>Math.pow(nodeRadius(n),2))
-      .nodeColor(nodeColourState).nodeLabel(nodeHoverLabel)
-      .nodeCanvasObjectMode(nodeRingMode).nodeCanvasObject(drawNodeRing)
-      .linkColor(linkColourFor).linkWidth(linkWidthFor).linkCurvature("curvature")
-      .linkDirectionalParticles(linkParticlesFor)
-      .linkDirectionalParticleWidth(2).linkDirectionalParticleColor(()=> palette.linkHot)
-      .linkDirectionalParticleSpeed(0.002).linkDirectionalParticleOffset(linkParticleOffsetFor)
-      .onRenderFramePost((ctx)=> drawEgoRings(ctx))
-      .onNodeHover((node)=>{
-        state.hoveredNodeId = node?node.id:null; container.style.cursor = node?"pointer":"default";
-        hoverRing = new Set();
-        if (node){ hoverRing.add(node.id); for (const nb of NEIGHBORS.get(node.id)||[]) hoverRing.add(nb); }
-      })
-      .onNodeClick((node)=>{
-        state.selectedNodeId = node.id; openDrawer(node.id);
-        fg.centerAt(node.x + (DRAWER_W/2)/fg.zoom(), node.y, 600);   // keep node clear of the drawer
-      })
-      .onNodeRightClick((node)=> enterEgo(node.id))
-      .onBackgroundClick(()=> onBg())
-      .minZoom(0.05).maxZoom(20)
-      // Calmer startup: run more layout ticks OFF-SCREEN (warmupTicks) so the
-      // graph is already largely settled on first paint, and stop the on-screen
-      // simulation sooner (cooldownTime) so it doesn't keep drifting.
-      .warmupTicks(reduce ? 150 : 120).cooldownTime(reduce ? 0 : 2000)
-      // Extra damping so nodes ease into place instead of overshooting/bouncing.
-      .d3VelocityDecay(0.6);
+    <div class="field">
+      <label for="f-org">Organisation</label>
+      <select class="input" id="f-org"><option value="">All organisations</option></select>
+    </div>
 
-    fg.d3Force("charge", d3.forceManyBody().strength(-60).distanceMax(360));
-    fg.d3Force("collide", d3.forceCollide().radius((n)=>(n._r ?? nodeRadius(n)) + 2));
-    const linkF = fg.d3Force("link");
-    if (linkF) linkF.distance(50).strength((l)=>{
-      const s=(l.source.connections)||1, t=(l.target.connections)||1, base = 0.1/Math.min(s,t);
-      return sameCommunity(l) ? base*INTRA_COMMUNITY_BOOST : base;   // communities coalesce organically
+    <hr>
+    <p class="small muted" id="hidden-note">Counting hidden entities.</p>
+    <p class="small muted">Drag to move around and scroll to zoom. Hover a dot for its name, click it for details, right-click it to see only its neighbourhood, and double-click empty space to come back.</p>
+    </div>
+    </details>
+  </aside>
+
+  <div class="stage" id="stage">
+    <div class="stage__canvas" id="graph" tabindex="0" role="img" aria-label="Map of entities and their links. Use Find an entity to open one with the keyboard."></div>
+    <section class="legend" id="legend" aria-labelledby="legend-h" hidden></section>
+    <div class="tip" id="tip" hidden></div>
+    <div class="stage__over" id="overlay" role="status"><div><p>Loading the graph.</p></div></div>
+  </div>
+
+  <aside id="drawer" class="drawer" aria-labelledby="dw-name" hidden>
+    <div class="drawer__head">
+      <h2 id="dw-name">Entity</h2>
+      <button id="dw-close" class="btn btn--sm" type="button" aria-label="Close the details">Close</button>
+    </div>
+    <div id="dw-body" class="stack-md"></div>
+  </aside>
+</main>
+
+<script src="/vendor/d3.min.js"></script>
+<script src="/vendor/force-graph.min.js"></script>
+<script>
+"use strict";
+const C = window.mcpConsole;
+const {api, el, fill, said, errText, words, fmt, plural, act, renderChip} = C;
+const $ = (id) => document.getElementById(id);
+const reduce = window.matchMedia("(prefers-reduced-motion: reduce)").matches;
+
+const TOP30_FRACTION = 0.30;  // links between two top-30%-connected nodes get flow particles
+const INTRA_COMMUNITY_BOOST = 3;  // same-community links pull harder so clusters emerge
+const CURVATURE_MAX = 0.3;  // max bend for links that share a node-pair or self-loop; single edges stay straight
+const CIRCLE_SLOTS = 6;  // circles that get their own colour in "Colour by circle"; the rest share grey
+
+// Kinds: the list itself comes from /api/graph/types. These are only the
+// words for the kinds mcpbrain classifies, plus the two bookkeeping kinds.
+const KIND_WORDS = {
+  person: ["Person", "People"], org: ["Organisation", "Organisations"],
+  project: ["Project", "Projects"], topic: ["Topic", "Topics"],
+  meeting: ["Meeting", "Meetings"], event: ["Event", "Events"],
+  document: ["Document", "Documents"], thread: ["Email thread", "Email threads"]
+};
+// Documents and threads are sources kept as bookkeeping: they crowd out
+// people and projects, so they start off. So does anything unclassified.
+const OFF_BY_DEFAULT = new Set(["document", "thread"]);
+const UNCLASSIFIED = "unclassified";
+
+/* url-state:start */
+// The page's state lives in its address, so Overview links and the Back
+// button land on the same view: ?type= (repeatable), ?entity=, ?rel=,
+// ?show=unlinked, ?view=circles, ?since=24h, ?circle=.
+function readUrlState(search){
+  const p = new URLSearchParams(search || "");
+  const since = /^(\d{1,3})h$/.exec(p.get("since") || "");
+  return {
+    types: p.getAll("type").filter(Boolean),
+    entity: p.get("entity") || "",
+    rel: p.get("rel") || "",
+    unlinked: p.get("show") === "unlinked",
+    view: p.get("view") === "circles" ? "circles" : "kinds",
+    sinceHours: since ? Math.min(720, Number(since[1])) : 0,
+    circle: /^\d+$/.test(p.get("circle") || "") ? p.get("circle") : ""
+  };
+}
+function writeUrlState(s){
+  const p = new URLSearchParams();
+  for (const t of s.types) p.append("type", t);
+  if (s.unlinked) p.set("show", "unlinked");
+  if (s.view === "circles") p.set("view", "circles");
+  if (s.sinceHours) p.set("since", s.sinceHours + "h");
+  if (s.circle) p.set("circle", s.circle);
+  if (s.entity) p.set("entity", s.entity);
+  if (s.rel) p.set("rel", s.rel);
+  const q = p.toString();
+  return q ? "?" + q : "";
+}
+// The canvas request for a state. Degree means nothing for entities with no
+// links, and something added today has had no time to gather links, so both
+// of those views ask for every degree.
+function canvasQuery(s, minConn, org){
+  const p = new URLSearchParams();
+  p.set("min_conn", String(s.unlinked || s.sinceHours ? 0 : minConn));
+  if (org) p.set("org", org);
+  for (const t of s.types) p.append("type", t);
+  if (s.unlinked) p.set("unlinked", "1");
+  if (s.sinceHours) p.set("since_hours", String(s.sinceHours));
+  if (s.circle) p.set("community", s.circle);
+  return p.toString();
+}
+/* url-state:end */
+
+let url = readUrlState(location.search);
+
+// ---- colours: read from console.css, and again on a mode or colour change.
+// A probe element resolves each token (var() and calc() included) to a colour
+// the canvas can paint with.
+const probe = el("span", {class: "probe", "aria-hidden": "true"});
+document.body.append(probe);
+function readVar(name){
+  probe.style.color = "";
+  probe.style.color = "var(" + name + ")";
+  return getComputedStyle(probe).color;
+}
+function readPalette(){
+  const byType = {};
+  for (const k of [...Object.keys(KIND_WORDS), "unknown"]) byType[k] = readVar("--type-" + k);
+  const circles = [];
+  for (let i = 1; i <= CIRCLE_SLOTS; i++) circles.push(readVar("--circle-" + i));
+  return { bg: readVar("--graph-ground"), label: readVar("--graph-label"), fade: readVar("--graph-fade"),
+    linkIdle: readVar("--graph-link-idle"), linkMute: readVar("--graph-link-mute"),
+    linkHot: readVar("--graph-link-hot"), ring: readVar("--graph-ring"),
+    ringText: readVar("--graph-ring-text"), nodeFallback: byType.unknown,
+    orgOrigin: readVar("--type-origin"), byType, circles };
+}
+let palette = readPalette();
+
+function kindKey(t){ return KIND_WORDS[t] ? t : "unknown"; }
+function kindWord(t){ return KIND_WORDS[t] ? KIND_WORDS[t][0] : "Unclassified"; }
+function relWords(r){ return String(r || "related").replace(/_/g, " "); }
+
+// Colour by kind; an entity from your organisation's shared graph reads as
+// one colour whatever its kind. In circle view, by circle.
+let CIRCLE_SLOT = new Map();   // community id -> colour slot 0..5, largest circles first
+function nodeColour(n){
+  if (url.view === "circles"){
+    const slot = CIRCLE_SLOT.get(String(n.community));
+    return slot === undefined ? palette.nodeFallback : palette.circles[slot];
+  }
+  if (n.origin === "org") return palette.orgOrigin;
+  return palette.byType[kindKey(n.type)] || palette.nodeFallback;
+}
+function nodeRadius(n){
+  const conn = n.connections || 0, scale = window.innerWidth <= 768 ? 1.4 : 1;
+  if (n.type === "org" || n.type === "project") return (8 + Math.min(conn*0.15, 12)) * scale;
+  return (3 + Math.min(conn*0.08, 8)) * scale;
+}
+
+const state = { hoveredNodeId:null, selectedNodeId:null, mode:"map", egoNodeId:null,
+                egoDepth:1, egoHops:{}, layout:"emergent", searchTerm:"" };
+let CURRENT = { nodes:[], links:[], communities:{} };
+let COMMUNITY = new Map(); // id -> community key (for link cohesion + intra/inter edges)
+let TOP30 = new Set();     // ids of the top-30% most-connected nodes
+let MAXDEG = 1;
+let NEIGHBORS = new Map(); // id -> Set of directly-linked neighbour ids (hover ring)
+let hoverRing = new Set(); // hovered node id + its neighbours, refreshed on hover
+
+const sidOf = (l) => typeof l.source === "object" ? l.source.id : l.source;
+const tidOf = (l) => typeof l.target === "object" ? l.target.id : l.target;
+
+function recomputeDerived(){
+  COMMUNITY = new Map(); let maxd = 0;
+  const sizes = new Map();
+  for (const n of CURRENT.nodes){
+    COMMUNITY.set(n.id, n.community == null ? "none" : String(n.community));
+    if (n.community != null) sizes.set(String(n.community), (sizes.get(String(n.community)) || 0) + 1);
+    if ((n.connections||0) > maxd) maxd = n.connections||0;
+  }
+  MAXDEG = maxd || 1;
+  CIRCLE_SLOT = new Map([...sizes.entries()].sort((a,b)=> b[1]-a[1]).slice(0, CIRCLE_SLOTS)
+    .map(([cid], i) => [cid, i]));
+  TOP30 = new Set();
+  const ranked = [...CURRENT.nodes].sort((a,b)=>(b.connections||0)-(a.connections||0));
+  const cut = Math.ceil(ranked.length * TOP30_FRACTION);
+  for (let i=0;i<cut;i++) TOP30.add(ranked[i].id);
+  NEIGHBORS = new Map();
+  for (const l of CURRENT.links){
+    const sid = sidOf(l), tid = tidOf(l);
+    (NEIGHBORS.get(sid) || NEIGHBORS.set(sid,new Set()).get(sid)).add(tid);
+    (NEIGHBORS.get(tid) || NEIGHBORS.set(tid,new Set()).get(tid)).add(sid);
+  }
+}
+
+// ---- ego (right-click focus) ----
+function computeEgoHops(nodes, links, focusId, depth){
+  const hops = { [focusId]:0 }, adj = new Map();
+  for (const l of links){ const s = sidOf(l), t = tidOf(l);
+    (adj.get(s)||adj.set(s,new Set()).get(s)).add(t); (adj.get(t)||adj.set(t,new Set()).get(t)).add(s); }
+  const q=[[focusId,0]];
+  while(q.length){ const [id,d]=q.shift(); if(d>=depth) continue;
+    for(const nb of adj.get(id)||[]) if(hops[nb]===undefined){ hops[nb]=d+1; q.push([nb,d+1]); } }
+  return hops;
+}
+
+// ---- node colour + particles ----
+function nodeColourState(n){
+  if (n.id === state.selectedNodeId) return palette.label;
+  if (state.searchTerm) return (n.name||"").toLowerCase().includes(state.searchTerm) ? nodeColour(n) : palette.fade;
+  return nodeColour(n);
+}
+// Flow particles: the selected node's links, or links whose both ends are
+// top-30% connected. None at all when reduced motion is asked for.
+function linkParticlesFor(l){
+  if (reduce) return 0;
+  const sid = sidOf(l), tid = tidOf(l);
+  if (state.selectedNodeId && (sid===state.selectedNodeId || tid===state.selectedNodeId)) return 4;
+  return (TOP30.has(sid) && TOP30.has(tid)) ? 2 : 0;
+}
+// Deterministic 0..1 hash of a link's endpoints, used to desync particle start
+// positions, else same-length links would all pulse in unison.
+function linkKeyHash(l){
+  const s = String(sidOf(l)) + "|" + String(tidOf(l)) + "|" + (l.relation||"");
+  let h = 0; for (let i=0;i<s.length;i++) h = (h*31 + s.charCodeAt(i)) | 0;
+  return (h >>> 0) / 4294967295;
+}
+function linkParticleOffsetFor(l){ return linkKeyHash(l); }
+// Curve only links that would otherwise overlap: multiple relations between the same
+// two entities (either direction), or self-loops. Groups get evenly-spaced curvature
+// (reversed-direction edges flipped to the opposite side); a lone edge stays straight.
+function assignLinkCurvature(links){
+  const pairGroups = new Map(), selfGroups = new Map();
+  for (const l of links){
+    const sid = sidOf(l), tid = tidOf(l);
+    if (sid === tid){ (selfGroups.get(sid) || selfGroups.set(sid,[]).get(sid)).push(l); continue; }
+    const key = String(sid) < String(tid) ? sid+"|"+tid : tid+"|"+sid;
+    (pairGroups.get(key) || pairGroups.set(key,[]).get(key)).push(l);
+  }
+  for (const group of selfGroups.values())
+    group.forEach((l,i)=>{ l.curvature = CURVATURE_MAX * (i+1) / group.length; });
+  for (const group of pairGroups.values()){
+    if (group.length === 1){ group[0].curvature = 0; continue; }
+    const n = group.length, delta = 2*CURVATURE_MAX/(n-1);
+    const firstSid = sidOf(group[0]);
+    group.forEach((l,i)=>{
+      let c = -CURVATURE_MAX + i*delta;
+      if (sidOf(l) !== firstSid) c *= -1;   // flip reversed-direction edges off the same arc
+      l.curvature = c;
     });
-    fg.d3AlphaDecay(0.04);   // cool the simulation down faster → shorter settle
+  }
+}
+function sameCommunity(l){ return COMMUNITY.get(sidOf(l)) === COMMUNITY.get(tidOf(l)); }
+function linkColourFor(l){
+  const focus = state.hoveredNodeId || state.selectedNodeId;
+  const sid = sidOf(l), tid = tidOf(l);
+  if (focus) return (sid===focus||tid===focus) ? palette.linkHot : palette.linkMute;
+  if (state.searchTerm){ const sn=l.source?.name?.toLowerCase().includes(state.searchTerm), tn=l.target?.name?.toLowerCase().includes(state.searchTerm);
+    return (sn||tn) ? palette.linkHot : palette.linkMute; }
+  return sameCommunity(l) ? palette.linkMute : palette.linkIdle;   // cross-community links stay visible
+}
+// Edge thickness encodes relation strength (how many sources saw it), so a
+// tie seen 30 times reads bolder than a one-off and dense hubs stay legible.
+function strengthWidth(l){ return 0.3 + Math.min(1.4, Math.log2(Math.max(1, l.strength||1)) * 0.35); }
+function linkWidthFor(l){
+  const focus = state.hoveredNodeId || state.selectedNodeId;
+  const sid = sidOf(l), tid = tidOf(l);
+  if (focus) return (sid===focus||tid===focus) ? 1.6 : 0.4;
+  const base = strengthWidth(l);
+  return sameCommunity(l) ? base * 0.6 : base;   // intra-community links thinner (they're dense)
+}
+// Hover spotlight: a ring on the hovered node, and a softer one on its direct neighbours.
+function nodeRingMode(n){ return hoverRing.has(n.id) ? "before" : undefined; }
+function drawNodeRing(n, ctx){
+  ctx.save();
+  ctx.beginPath(); ctx.arc(n.x, n.y, (n._r ?? nodeRadius(n)) * 1.5, 0, 2*Math.PI, false);
+  ctx.fillStyle = n.id === state.hoveredNodeId ? palette.linkHot : palette.ring;
+  ctx.globalAlpha = 0.35; ctx.fill();
+  ctx.restore();
+}
+function drawEgoRings(ctx){
+  if (state.mode !== "ego" || !state.egoNodeId) return;
+  const ringR = 90; ctx.save(); ctx.strokeStyle = palette.ring; ctx.lineWidth = 1;
+  for (let hop=1; hop<=state.egoDepth; hop++){ ctx.beginPath(); ctx.arc(0,0,hop*ringR,0,2*Math.PI); ctx.stroke();
+    ctx.fillStyle = palette.ringText; ctx.font = "11px "+getComputedStyle(document.body).fontFamily;
+    ctx.textAlign="center"; ctx.textBaseline="bottom"; ctx.fillText(hop === 1 ? "1 link away" : hop + " links away", 0, -hop*ringR-4); }
+  ctx.restore();
+}
 
-    // Emergent: charge + community-boosted links + a gentle centring pull (no positional grouping).
-    // Radial: pull each node to a ring by degree — hubs centre, leaves outer.
-    function radialRadius(n){ return 320 * (1 - Math.min(1, (n.connections||0) / MAXDEG)); }
-    function applyLayout(){
-      if (state.mode === "ego" && state.egoNodeId){ applyEgoForces(); return; }
-      fg.d3Force("x", null); fg.d3Force("y", null);
-      for (const n of CURRENT.nodes){ n.fx = undefined; n.fy = undefined; }
-      if (state.layout === "radial"){
-        fg.d3Force("center", null);
-        fg.d3Force("radial", d3.forceRadial((n)=> radialRadius(n), 0, 0).strength(0.7));
-      } else {
-        fg.d3Force("radial", null);
-        fg.d3Force("center", d3.forceCenter(0, 0).strength(0.04));
-      }
-    }
-    function applyEgoForces(){
-      fg.d3Force("center", null);
-      const f = CURRENT.nodes.find((n)=>n.id===state.egoNodeId); if (f){ f.fx=0; f.fy=0; }
-      for (const n of CURRENT.nodes) if (n.id!==state.egoNodeId){ n.fx=undefined; n.fy=undefined; }
-      fg.d3Force("radial", d3.forceRadial((n)=>(state.egoHops[n.id]||0)*90,0,0).strength(0.8));
-    }
-    function reframe(){ setTimeout(()=> fg.zoomToFit(400, 60), reduce ? 50 : 1200); }
-    function enterEgo(id){
-      state.mode="ego"; state.egoNodeId=id; state.selectedNodeId=id;
-      state.egoHops = computeEgoHops(CURRENT.nodes, CURRENT.links, id, state.egoDepth);
-      applyEgoForces(); fg.d3ReheatSimulation();
-    }
-    function exitEgo(){ if (state.mode!=="ego") return; state.mode="map"; state.egoNodeId=null; state.egoHops={}; applyLayout(); fg.d3ReheatSimulation(); }
-    function onBg(){ if (state.mode==="ego"){ exitEgo(); return; } state.selectedNodeId = null; }
-    container.addEventListener("dblclick", ()=>{ if(!state.hoveredNodeId) exitEgo(); });
+// ---- hover card: our own, built with textContent (force-graph's built-in
+// label would put the name in as HTML) ----
+const tip = $("tip");
+let pointer = {x: 0, y: 0};
+$("stage").addEventListener("pointermove", (e) => {
+  const r = $("stage").getBoundingClientRect();
+  pointer = {x: e.clientX - r.left, y: e.clientY - r.top};
+  if (!tip.hidden) placeTip();
+});
+function placeTip(){
+  const r = $("stage").getBoundingClientRect();
+  const x = Math.min(pointer.x + 14, r.width - tip.offsetWidth - 8);
+  const y = Math.min(pointer.y + 14, r.height - tip.offsetHeight - 8);
+  tip.style.transform = "translate(" + Math.max(8, x) + "px," + Math.max(8, y) + "px)";
+}
+function showTip(n){
+  if (!n){ tip.hidden = true; return; }
+  const bits = [kindWord(n.type), n.org || "no organisation", plural(n.connections || 0, "link")];
+  fill(tip, el("strong", {text: n.name}), bits.join(", "));
+  tip.hidden = false;
+  placeTip();
+}
 
-    // ---- legend (fixed entity-type colour key) ----
-    function renderLegend(){
-      const el = $("legend"); el.innerHTML = "<h4>Type</h4>";
-      for (const t of TYPE_ORDER){ const row=document.createElement("div"); row.className="row";
-        const sw=document.createElement("span"); sw.className="sw"; sw.style.background=palette.byType[t]||palette.nodeFallback;
-        const lb=document.createElement("span"); lb.textContent=t;
-        row.appendChild(sw); row.appendChild(lb); el.appendChild(row); }
-      const orgRow=document.createElement("div"); orgRow.className="row";
-      const orgSw=document.createElement("span"); orgSw.className="sw"; orgSw.style.background=palette.orgOrigin;
-      const orgLb=document.createElement("span"); orgLb.textContent="org baseline";
-      orgRow.appendChild(orgSw); orgRow.appendChild(orgLb); el.appendChild(orgRow);
-    }
-    renderLegend();
+// ---- force-graph init ----
+const container = $("graph");
+const fg = new ForceGraph(container)
+  .backgroundColor(palette.bg).nodeId("id").linkSource("source").linkTarget("target")
+  .nodeRelSize(1).nodeVal((n)=>Math.pow(nodeRadius(n),2))
+  .nodeColor(nodeColourState).nodeLabel(()=> "")
+  .nodeCanvasObjectMode(nodeRingMode).nodeCanvasObject(drawNodeRing)
+  .linkColor(linkColourFor).linkWidth(linkWidthFor).linkCurvature("curvature")
+  .linkDirectionalParticles(linkParticlesFor)
+  .linkDirectionalParticleWidth(2).linkDirectionalParticleColor(()=> palette.linkHot)
+  .linkDirectionalParticleSpeed(0.002).linkDirectionalParticleOffset(linkParticleOffsetFor)
+  .onRenderFramePost((ctx)=> drawEgoRings(ctx))
+  .onNodeHover((node)=>{
+    state.hoveredNodeId = node?node.id:null; container.style.cursor = node?"pointer":"default";
+    hoverRing = new Set();
+    if (node){ hoverRing.add(node.id); for (const nb of NEIGHBORS.get(node.id)||[]) hoverRing.add(nb); }
+    showTip(node);
+  })
+  .onNodeClick((node)=>{ openEntity(node.id); })
+  .onNodeRightClick((node)=> enterEgo(node.id))
+  .onBackgroundClick(()=> onBg())
+  .minZoom(0.05).maxZoom(20)
+  // Calmer startup: run more layout ticks off-screen (warmupTicks) so the
+  // graph is already largely settled on first paint, and stop the on-screen
+  // simulation sooner (cooldownTime) so it doesn't keep drifting.
+  .warmupTicks(reduce ? 150 : 120).cooldownTime(reduce ? 0 : 2000)
+  // Extra damping so nodes ease into place instead of overshooting.
+  .d3VelocityDecay(0.6);
 
-    // ---- sizing ----
-    function fit(){ const r=$("stage").getBoundingClientRect(); fg.width(r.width).height(r.height); }
-    fit(); new ResizeObserver(fit).observe($("stage"));
+fg.d3Force("charge", d3.forceManyBody().strength(-60).distanceMax(360));
+fg.d3Force("collide", d3.forceCollide().radius((n)=>(n._r ?? nodeRadius(n)) + 2));
+const linkF = fg.d3Force("link");
+if (linkF) linkF.distance(50).strength((l)=>{
+  const s=(l.source.connections)||1, t=(l.target.connections)||1, base = 0.1/Math.min(s,t);
+  return sameCommunity(l) ? base*INTRA_COMMUNITY_BOOST : base;   // communities coalesce organically
+});
+fg.d3AlphaDecay(0.04);   // cool the simulation down faster, shorter settle
 
-    // ---- filters + data ----
-    // Type filter is a fixed set of toggle-chips (multi-select): the backend's
-    // /api/graph/canvas accepts repeated `type=` params, so several can be on at
-    // once, or none for "all". Chips are the fixed TYPE_ORDER, not derived from
-    // the current payload — else filtering to one type would erase the others.
-    function renderTypeChips(){
-      const box = $("f-type"); box.innerHTML = "";
-      for (const t of TYPE_ORDER){
-        const b = document.createElement("button");
-        b.type = "button"; b.className = "chip"; b.textContent = t;
-        b.setAttribute("aria-pressed", state.types.has(t) ? "true" : "false");
-        b.onclick = ()=>{
-          state.types.has(t) ? state.types.delete(t) : state.types.add(t);
-          b.setAttribute("aria-pressed", state.types.has(t) ? "true" : "false");
-          load();
-        };
-        box.appendChild(b);
-      }
-    }
+// Clustered: charge + community-boosted links + a gentle centring pull.
+// Rings: pull each node to a ring by degree, hubs in the centre, leaves outside.
+function radialRadius(n){ return 320 * (1 - Math.min(1, (n.connections||0) / MAXDEG)); }
+function applyLayout(){
+  if (state.mode === "ego" && state.egoNodeId){ applyEgoForces(); return; }
+  fg.d3Force("x", null); fg.d3Force("y", null);
+  for (const n of CURRENT.nodes){ n.fx = undefined; n.fy = undefined; }
+  if (state.layout === "radial"){
+    fg.d3Force("center", null);
+    fg.d3Force("radial", d3.forceRadial((n)=> radialRadius(n), 0, 0).strength(0.7));
+  } else {
+    fg.d3Force("radial", null);
+    fg.d3Force("center", d3.forceCenter(0, 0).strength(0.04));
+  }
+}
+function applyEgoForces(){
+  fg.d3Force("center", null);
+  const f = CURRENT.nodes.find((n)=>n.id===state.egoNodeId); if (f){ f.fx=0; f.fy=0; }
+  for (const n of CURRENT.nodes) if (n.id!==state.egoNodeId){ n.fx=undefined; n.fy=undefined; }
+  fg.d3Force("radial", d3.forceRadial((n)=>(state.egoHops[n.id]||0)*90,0,0).strength(0.8));
+}
+function reframe(){ setTimeout(()=> fg.zoomToFit(reduce ? 0 : 400, 60), reduce ? 50 : 1200); }
+function enterEgo(id){
+  state.mode="ego"; state.egoNodeId=id; state.selectedNodeId=id;
+  state.egoHops = computeEgoHops(CURRENT.nodes, CURRENT.links, id, state.egoDepth);
+  applyEgoForces(); fg.d3ReheatSimulation();
+}
+function exitEgo(){ if (state.mode!=="ego") return; state.mode="map"; state.egoNodeId=null; state.egoHops={}; applyLayout(); fg.d3ReheatSimulation(); }
+function onBg(){ if (state.mode==="ego"){ exitEgo(); return; } state.selectedNodeId = null; }
+container.addEventListener("dblclick", ()=>{ if(!state.hoveredNodeId) exitEgo(); });
+
+// ---- colours again on a mode or main-colour change (this tab or another) ----
+function refreshColours(){
+  palette = readPalette();
+  fg.backgroundColor(palette.bg);
+  fg.nodeColor(fg.nodeColor());
+  fg.linkColor(fg.linkColor());
+  fg.linkDirectionalParticleColor(()=> palette.linkHot);
+  renderLegend();
+}
+document.addEventListener("mcpconsole:mode", refreshColours);
+if (window.matchMedia){
+  const mq = matchMedia("(prefers-color-scheme: dark)");
+  if (mq.addEventListener) mq.addEventListener("change", refreshColours);
+}
+
+// ---- kinds: the server's list, with counts ----
+let KINDS = [];          // [{type, count}] from /api/graph/types
+let CLASSIFIED = new Set();
+let ON = new Set();      // raw types switched on
+let TOTAL = 0;
+
+function rawTypesOf(key){
+  if (key !== UNCLASSIFIED) return [key];
+  return KINDS.filter(k => !CLASSIFIED.has(k.type) && !OFF_BY_DEFAULT.has(k.type)).map(k => k.type);
+}
+function kindRows(){
+  const rows = [];
+  for (const k of KINDS) if (CLASSIFIED.has(k.type)) rows.push({key: k.type, count: k.count});
+  for (const t of OFF_BY_DEFAULT){ const k = KINDS.find(x => x.type === t); if (k) rows.push({key: t, count: k.count}); }
+  const loose = rawTypesOf(UNCLASSIFIED);
+  if (loose.length) rows.push({key: UNCLASSIFIED,
+    count: KINDS.filter(k => loose.includes(k.type)).reduce((a, k) => a + k.count, 0)});
+  return rows;
+}
+function defaultOn(){ return new Set(KINDS.map(k => k.type).filter(t => CLASSIFIED.has(t))); }
+function sameSet(a, b){ return a.size === b.size && [...a].every(x => b.has(x)); }
+function onFromUrl(){
+  const known = new Set(KINDS.map(k => k.type));
+  const asked = url.types.filter(t => known.has(t));
+  ON = asked.length ? new Set(asked) : defaultOn();
+}
+// The types to ask the canvas for: an empty list means every kind.
+function typesForQuery(){ return ON.size === KINDS.length ? [] : [...ON]; }
+function renderTypeChips(){
+  const box = $("f-type");
+  const rows = kindRows().map(r => {
+    const raw = rawTypesOf(r.key);
+    const input = el("input", {type: "checkbox"});
+    input.checked = raw.length > 0 && raw.every(t => ON.has(t));
+    input.addEventListener("change", () => {
+      for (const t of raw) input.checked ? ON.add(t) : ON.delete(t);
+      url.types = sameSet(ON, defaultOn()) ? [] : [...ON];
+      url.entity = ""; url.rel = "";
+      pushUrl(); load();
+    });
+    const name = r.key === UNCLASSIFIED ? "Unclassified"
+      : (KIND_WORDS[r.key] ? KIND_WORDS[r.key][1] : words(r.key));
+    return el("label", {class: "type"}, input,
+      el("span", {class: "sw sw--" + (r.key === UNCLASSIFIED ? "unknown" : kindKey(r.key)), "aria-hidden": "true"}),
+      el("span", {text: name}), el("span", {class: "measured", text: fmt(r.count)}));
+  });
+  fill(box, el("legend", {text: "Kinds"}), rows);
+  box.removeAttribute("aria-busy");
+}
+async function loadKinds(){
+  try {
+    const out = await api("/api/graph/types");
+    KINDS = out.types || [];
+    CLASSIFIED = new Set(out.classified || []);
+    TOTAL = KINDS.reduce((a, k) => a + k.count, 0);
+    onFromUrl();
     renderTypeChips();
-    function populateOptions(nodes){
-      const orgs=new Set();
-      for (const n of nodes){ if(n.org) orgs.add(n.org); }
-      const el=$("f-org"), cur=el.value;
-      el.innerHTML='<option value="">All</option>'; [...orgs].sort().forEach((v)=>el.add(new Option(v,v))); el.value=cur;
-    }
-    function filterQuery(){
-      const p=new URLSearchParams(); p.set("min_conn", $("f-degree").value);
-      if ($("f-org").value) p.set("org", $("f-org").value);
-      for (const t of state.types) p.append("type", t);
-      return p.toString();
-    }
-    let loading=false;
-    async function load(){
-      if (loading) return; loading=true;
-      const ov=$("overlay"); ov.textContent = "Loading graph…"; ov.classList.remove("hidden");
-      try{
-        const res = await fetch("/api/graph/canvas?"+filterQuery(), H);
-        if (res.status===413){ const i=await res.json(); ov.textContent="Too many nodes ("+(i.candidate_count||"5000+")+") — raise “Min connections”."; loading=false; return; }
-        if (!res.ok) throw new Error("HTTP "+res.status);
-        const data = await res.json();
-        CURRENT = { nodes:data.nodes, links:data.links, communities:data.communities||{} };
-        populateOptions(data.nodes);
-        $("count").textContent = data.nodes.length+" nodes · "+data.links.length+" links";
-        if (!data.nodes.length){ ov.textContent="No entities match these filters."; loading=false; return; }
-        for (const n of data.nodes) n._r = nodeRadius(n);
-        assignLinkCurvature(data.links);
-        state.mode="map"; state.egoNodeId=null; state.egoHops={};
-        recomputeDerived(); applyLayout();
-        fg.graphData({ nodes:data.nodes, links:data.links });
-        reframe();
-        ov.classList.add("hidden");
-      }catch(e){ ov.textContent="Couldn’t load the graph. Is the daemon running?"; }
-      finally{ loading=false; }
-    }
+  } catch (e) {
+    fill($("f-type"), el("legend", {text: "Kinds"}), el("p", {class: "said said--bad", text: "Kinds not loaded. " + errText(e)}));
+    $("f-type").removeAttribute("aria-busy");
+    throw e;
+  }
+}
 
-    const deg=$("f-degree");
-    deg.addEventListener("input", ()=>{ $("deg-val").textContent=deg.value; });
-    deg.addEventListener("change", load);
-    $("f-org").addEventListener("change", load);
-    $("f-layout").addEventListener("change", (e)=>{ state.layout=e.target.value; applyLayout(); fg.d3ReheatSimulation(); reframe(); });
-    // ---- search: highlight on-screen matches, or fetch-and-jump to an off-screen one ----
-    function setSearchStatus(msg){ const el = $("search-status"); if (el) el.textContent = msg || ""; }
-    // Merges a fetched entity+neighbourhood into the live graph without disturbing
-    // existing node positions: reuses force-graph's own current node/link objects
-    // (per its documented incremental-update pattern) and only appends genuinely new ones.
-    function mergeEgoIntoCurrent(egoNodes, egoLinks){
-      const { nodes: curNodes, links: curLinks } = fg.graphData();
-      const haveNode = new Set(curNodes.map((n)=>n.id));
-      const newNodes = egoNodes.filter((n)=> !haveNode.has(n.id));
-      for (const n of newNodes) n._r = nodeRadius(n);
-      const linkKey = (l)=>{
-        const s = typeof l.source==="object"?l.source.id:l.source, t = typeof l.target==="object"?l.target.id:l.target;
-        return s+"→"+t+"→"+(l.relation||"");
-      };
-      const haveLink = new Set(curLinks.map(linkKey));
-      const newLinks = egoLinks.filter((l)=> !haveLink.has(linkKey(l)));
-      const nodes = curNodes.concat(newNodes), links = curLinks.concat(newLinks);
-      assignLinkCurvature(links);   // recompute across the merged set — a new parallel edge can change existing curvature
-      CURRENT = { nodes, links, communities: CURRENT.communities };
-      recomputeDerived();
-      fg.graphData({ nodes, links });
-      $("count").textContent = nodes.length+" nodes · "+links.length+" links";
-    }
-    async function jumpToEntity(id){
-      try{
-        const r = await fetch("/api/graph/ego?id="+encodeURIComponent(id)+"&hops=1", H);
-        if (!r.ok){ setSearchStatus("Couldn’t load that entity."); return; }
-        const eg = await r.json();
-        mergeEgoIntoCurrent(eg.nodes, eg.links);
-        fg.d3ReheatSimulation();
-        state.selectedNodeId = id;
-        openDrawer(id);
-        setTimeout(()=>{
-          const n = CURRENT.nodes.find((x)=>x.id===id);
-          if (n) fg.centerAt(n.x + (DRAWER_W/2)/fg.zoom(), n.y, 600);
-        }, reduce ? 50 : 300);
-      }catch(e){ setSearchStatus("Couldn’t load that entity."); }
-    }
-    // Search: live-highlights loaded nodes AND shows a clickable dropdown of
-    // matches from the whole store (via /api/graph/search). Clicking a result
-    // focuses it if it's already on the map, or pulls it in (ego fetch) if not —
-    // so you never have to hunt for the right dot by hovering.
-    let hitEls = [], hitActive = -1;   // current dropdown rows + keyboard-highlighted index
-    function hideHits(){ const ul=$("f-hits"); ul.hidden=true; ul.innerHTML=""; hitEls=[]; hitActive=-1; }
-    function setHitActive(i){
-      if (!hitEls.length) return;
-      hitActive = (i + hitEls.length) % hitEls.length;   // wrap around
-      hitEls.forEach((li,k)=> li.classList.toggle("active", k===hitActive));
-      hitEls[hitActive].scrollIntoView({ block:"nearest" });
-    }
-    let searchT=null, searchSeq=0;
-    async function runSearch(raw){
-      const term = raw.toLowerCase();
-      state.searchTerm = term; fg.nodeColor(fg.nodeColor());   // live highlight of loaded nodes
-      setSearchStatus("");
-      if (!term){ hideHits(); return; }
-      const mySeq = ++searchSeq;
-      try{
-        const r = await fetch("/api/graph/search?q="+encodeURIComponent(raw), H);
-        if (!r.ok || mySeq!==searchSeq) return;
-        const hits = (await r.json()).slice(0, 10);
-        if (mySeq!==searchSeq) return;   // user kept typing — drop this stale result
-        if (!hits.length){ hideHits(); setSearchStatus(`No entity matches “${raw}”.`); return; }
-        const loaded = new Set(CURRENT.nodes.map((n)=>n.id));
-        const ul = $("f-hits");
-        ul.innerHTML = hits.map((h)=> `<li data-id="${escAttr(h.id)}">${esc(h.name)} `
-          + `<span style="color:var(--faint)">${esc(h.type)}${h.org?" · "+esc(h.org):""} · ${h.degree||0} conns`
-          + `${h.via_alias?" · alias":""}${loaded.has(h.id)?"":" · off-map"}</span></li>`).join("");
-        ul.hidden = false;
-        hitEls = [...ul.children]; hitActive = -1;
-        hitEls.forEach((li)=> li.onclick = ()=> pickSearchHit(li.dataset.id));
-      }catch(e){ hideHits(); setSearchStatus("Search failed."); }
-    }
-    async function pickSearchHit(id){
-      hideHits();
-      const n = CURRENT.nodes.find((x)=>x.id===id);
-      if (n){ state.selectedNodeId = id; openDrawer(id); fg.centerAt(n.x + (DRAWER_W/2)/fg.zoom(), n.y, 600); }
-      else { setSearchStatus("Adding to the map…"); await jumpToEntity(id); }
-    }
-    $("f-search").addEventListener("input", (e)=>{ clearTimeout(searchT);
-      const raw = e.target.value.trim();
-      searchT=setTimeout(()=> runSearch(raw), 220); });
-    // Keyboard nav: ↑/↓ move through results, Enter opens the highlighted (or first) one, Esc closes.
-    $("f-search").addEventListener("keydown", (e)=>{
-      if (e.key === "Escape"){ hideHits(); return; }
-      const open = !$("f-hits").hidden && hitEls.length;
-      if (e.key === "ArrowDown" && open){ e.preventDefault(); setHitActive(hitActive+1); }
-      else if (e.key === "ArrowUp" && open){ e.preventDefault(); setHitActive(hitActive-1); }
-      else if (e.key === "Enter" && open){ e.preventDefault();
-        const li = hitEls[hitActive >= 0 ? hitActive : 0]; if (li) pickSearchHit(li.dataset.id); }
-    });
-    $("f-search").addEventListener("blur", ()=> setTimeout(hideHits, 150));   // delay so a click on a result registers first
+// ---- legend ----
+function renderLegend(){
+  const box = $("legend");
+  if (url.view === "circles"){
+    const titles = CURRENT.communities || {};
+    const items = [...CIRCLE_SLOT.entries()].map(([cid, slot]) => el("li", {},
+      el("button", {type: "button", title: "Show only this circle", onclick: () => {
+        url.circle = cid; url.entity = ""; url.rel = ""; pushUrl(); load(); }},
+        el("span", {class: "sw sw--c" + (slot + 1), "aria-hidden": "true"}),
+        el("span", {text: titles[cid] || "Circle " + cid}))));
+    items.push(el("li", {}, el("span", {class: "sw sw--unknown", "aria-hidden": "true"}),
+      el("span", {text: "Smaller circles, or none"})));
+    fill(box, el("h2", {id: "legend-h", text: url.circle ? "One circle" : "Largest circles"}), el("ul", {}, items),
+      url.circle ? el("button", {type: "button", text: "Show every circle", onclick: () => {
+        url.circle = ""; pushUrl(); load(); }}) : null);
+    box.hidden = false;
+    return;
+  }
+  const present = new Set(CURRENT.nodes.map(n => kindKey(n.type)));
+  const order = [...Object.keys(KIND_WORDS), "unknown"].filter(k => present.has(k));
+  const items = order.map(k => el("li", {},
+    el("span", {class: "sw sw--" + k, "aria-hidden": "true"}),
+    el("span", {text: k === "unknown" ? "Unclassified" : KIND_WORDS[k][1]})));
+  if (CURRENT.nodes.some(n => n.origin === "org"))
+    items.push(el("li", {}, el("span", {class: "sw sw--origin", "aria-hidden": "true"}),
+      el("span", {text: "From your organisation's shared graph"})));
+  fill(box, el("h2", {id: "legend-h", text: "On the map"}), el("ul", {}, items));
+  box.hidden = items.length === 0;
+}
 
-    // ---- entity drawer ----
-    const dw = $("drawer"), dwBody = $("dw-body");
-    let dwId = null, dwData = null;
-    $("dw-close").addEventListener("click", closeDrawer);
-    function closeDrawer(){ dw.hidden = true; dwId = null; dwData = null; }
-    function esc(s){ const d = document.createElement("div"); d.textContent = s == null ? "" : s; return d.innerHTML; }
-    // esc() is safe for TEXT-node contexts only (it doesn't escape quotes). For
-    // quoted HTML attributes use escAttr(), which also escapes " and '.
-    function escAttr(s){ return String(s == null ? "" : s)
-      .replace(/&/g,"&amp;").replace(/"/g,"&quot;").replace(/'/g,"&#39;")
-      .replace(/</g,"&lt;").replace(/>/g,"&gt;"); }
+// ---- filters fold away on a narrow screen so the map comes first ----
+const narrow = window.matchMedia("(max-width: 60rem)");
+function foldFilters(){ $("filters").open = !narrow.matches; }
+foldFilters();
+if (narrow.addEventListener) narrow.addEventListener("change", foldFilters);
 
-    async function openDrawer(id){
-      dwId = id; dw.hidden = false; dwBody.textContent = "Loading…";
-      try{
-        const r = await fetch("/api/graph/entity/" + encodeURIComponent(id), H);
-        if (r.status === 404){ dwBody.textContent = "Entity not found."; return; }
-        if (!r.ok) throw new Error("HTTP " + r.status);
-        dwData = await r.json(); renderDrawer();
-      }catch(e){ dwBody.textContent = "Couldn’t load this entity."; }
-    }
+// ---- sizing ----
+function fit(){ const r=$("stage").getBoundingClientRect(); fg.width(r.width).height(r.height); }
+fit(); new ResizeObserver(fit).observe($("stage"));
 
-    // Relations grouped by type, high-count groups collapsed behind a
-    // <details> — so an entity 'involved_in' 300 things reads as one
-    // "involved_in 300" header + 8 chips + "show the rest", not 300 rows.
-    const REL_CAP = 8;
-    function relList(items){
-      if (!items.length) return '<div class="dw-row" style="color:var(--muted)">none</div>';
-      const groups = {};
-      for (const x of items){ (groups[x.relation || "related"] ??= []).push(x); }
-      const chip = (x) => `<span class="dw-chip">${esc(x.other_name)}</span>`;
-      return Object.entries(groups).sort((a,b)=> b[1].length - a[1].length).map(([rel,list])=>{
-        const head = `<div class="dw-relhead">${esc(rel)} <span class="dw-relcount">${list.length}</span></div>`;
-        const shown = `<div class="dw-chips">${list.slice(0,REL_CAP).map(chip).join("")}</div>`;
-        const rest = list.length > REL_CAP
-          ? `<details class="dw-more"><summary>+${list.length-REL_CAP} more</summary>`
-            + `<div class="dw-chips">${list.slice(REL_CAP).map(chip).join("")}</div></details>`
-          : "";
-        return `<div class="dw-relgroup">${head}${shown}${rest}</div>`;
-      }).join("");
+// ---- the view note: what this view is, and the way back ----
+function renderViewNote(data){
+  const bits = [];
+  if (url.entity && url.rel) bits.push("Only the " + relWords(url.rel) + " links of one entity.");
+  if (url.unlinked && data){
+    bits.push(data.truncated
+      ? "Entities with no links: the newest " + fmt(data.nodes.length) + " of " + fmt(data.total) + "."
+      : "Entities with no links: " + fmt(data.nodes.length) + " in all.");
+  }
+  if (url.sinceHours) bits.push("Entities that gained links or facts in the last " + url.sinceHours + " hours.");
+  if (url.circle) bits.push("One circle.");
+  $("view-note").hidden = bits.length === 0;
+  $("view-text").textContent = bits.join(" ");
+  $("f-unlinked").checked = url.unlinked;
+  $("f-since").checked = Boolean(url.sinceHours);
+  $("f-colour").value = url.view;
+  const freeDegree = Boolean(url.unlinked || url.sinceHours);
+  $("f-degree").disabled = freeDegree;
+  $("deg-help").textContent = freeDegree
+    ? "Not used in this view: it shows every entity it finds, however few links."
+    : "Entities with fewer links stay off the map until you find them.";
+}
+$("view-clear").addEventListener("click", () => {
+  url.unlinked = false; url.sinceHours = 0; url.circle = ""; url.entity = ""; url.rel = "";
+  closeDrawer(false); pushUrl(); load();
+});
+$("f-unlinked").addEventListener("change", (e) => {
+  url.unlinked = e.target.checked; url.entity = ""; url.rel = ""; pushUrl(); load(); });
+$("f-since").addEventListener("change", (e) => {
+  url.sinceHours = e.target.checked ? 24 : 0; url.entity = ""; url.rel = ""; pushUrl(); load(); });
+$("f-colour").addEventListener("change", (e) => {
+  url.view = e.target.value === "circles" ? "circles" : "kinds";
+  if (url.view !== "circles" && url.circle){ url.circle = ""; pushUrl(); load(); return; }
+  pushUrl(); fg.nodeColor(fg.nodeColor()); renderLegend(); });
+
+function pushUrl(){
+  const next = location.pathname + writeUrlState(url);
+  if (next !== location.pathname + location.search) history.pushState(null, "", next);
+}
+window.addEventListener("popstate", () => {
+  url = readUrlState(location.search);
+  onFromUrl();
+  renderTypeChips();
+  if (!url.entity) closeDrawer(false);
+  load();
+});
+
+// ---- filters + data ----
+function populateOptions(nodes){
+  const orgs = new Set();
+  for (const n of nodes){ if (n.org) orgs.add(n.org); }
+  const sel = $("f-org"), cur = sel.value;
+  fill(sel, el("option", {value: "", text: "All organisations"}),
+    [...orgs].sort().map(v => el("option", {value: v, text: v})));
+  sel.value = cur;
+}
+function overlay(text, action){
+  $("overlay").hidden = !text;
+  fill($("overlay").firstElementChild, el("p", {text: text || ""}), action || null);
+}
+function showCount(){
+  $("count").textContent = TOTAL
+    ? fmt(CURRENT.nodes.length) + " shown of " + plural(TOTAL, "entity", "entities") + "."
+    : plural(CURRENT.nodes.length, "entity", "entities") + " shown.";
+}
+function draw(data){
+  for (const n of data.nodes) n._r = nodeRadius(n);
+  assignLinkCurvature(data.links);
+  CURRENT = { nodes:data.nodes, links:data.links, communities:data.communities||{} };
+  state.mode="map"; state.egoNodeId=null; state.egoHops={};
+  recomputeDerived(); applyLayout();
+  fg.graphData({ nodes:data.nodes, links:data.links });
+  reframe();
+  renderLegend();
+  showCount();
+}
+let loadSeq = 0;
+async function load(){
+  const mine = ++loadSeq;
+  overlay("Loading the graph.");
+  renderViewNote(null);
+  try {
+    if (url.entity && url.rel){ await loadRelationView(mine); return; }
+    if (!ON.size){
+      CURRENT = {nodes: [], links: [], communities: {}}; fg.graphData({nodes: [], links: []});
+      showCount(); renderLegend();
+      overlay("Every kind is switched off. Turn one on under Kinds."); return;
     }
-    // Observations collapsed by attribute+value: 20 sources all reporting the
-    // same role become one row ("role  Operations Manager  ×20 (latest date)").
-    // Distinct values for the same attribute stay as separate rows (real history).
-    function obsList(obs){
-      if (!obs.length) return '<div class="dw-row" style="color:var(--muted)">none</div>';
-      const map = new Map();
-      for (const o of obs){
-        const key = (o.attribute||"") + "\u241F" + (o.value||"");
-        const cnt = o.observed_count || 1, d = o.last_seen || o.valid_from || "";
-        const cur = map.get(key);
-        if (!cur) map.set(key, { attribute:o.attribute, value:o.value, count:cnt, latest:d });
-        else { cur.count += cnt; if (d > cur.latest) cur.latest = d; }
+    const s = {...url, types: typesForQuery()};
+    let data;
+    try {
+      data = await api("/api/graph/canvas?" + canvasQuery(s, $("f-degree").value, $("f-org").value));
+    } catch (e) {
+      if (e.status === 413){
+        const n = e.data && e.data.candidate_count;
+        overlay("Too many to draw at once" + (n ? " (" + fmt(n) + " match)" : "") +
+          ". Raise Fewest links shown, or switch a kind off.");
+        return;
       }
-      return [...map.values()].sort((a,b)=> (b.latest||"").localeCompare(a.latest||"")).map(r =>
-        `<div class="dw-row"><span class="rel">${esc(r.attribute)}</span><span>${esc(r.value)}`
-        + (r.count > 1 ? ` <span style="color:var(--faint)">×${r.count}</span>` : "")
-        + (r.latest ? ` <span style="color:var(--faint)">(${esc(r.latest)})</span>` : "")
-        + `</span></div>`).join("");
+      throw e;
     }
-    function renderDrawer(){
-      const d = dwData;
-      dwBody.innerHTML =
-        `<div class="dw-name">${esc(d.name)}</div>`
-        + `<div class="dw-meta">${esc(d.type)} · ${esc(d.org || "no org")} · ${d.connections} connections`
-        + (d.email_addr ? " · " + esc(d.email_addr) : "") + `</div>`
-        + `<div class="dw-actions"><button id="dw-edit" class="primary">Edit</button>`
-        + `<button id="dw-merge-btn">Merge…</button>`
-        + `<button id="dw-suppress" class="danger">Suppress</button></div>`
-        + `<div id="dw-inline"></div>`
-        + `<div class="dw-sec"><h4>Relations</h4>${relList(d.relations)}</div>`
-        + `<div class="dw-sec"><h4>Backlinks</h4>${relList(d.backlinks)}</div>`
-        + `<div class="dw-sec"><h4>Observations</h4>${obsList(d.observations)}</div>`;
-      $("dw-edit").onclick = renderEdit;
-      $("dw-merge-btn").onclick = renderMerge;
-      $("dw-suppress").onclick = doSuppress;
-    }
+    if (mine !== loadSeq) return;
+    populateOptions(data.nodes);
+    draw(data);
+    renderViewNote(data);
+    if (!data.nodes.length) overlay(url.sinceHours
+      ? "Nothing reached the graph in the last " + url.sinceHours + " hours."
+      : "No entities match these filters.");
+    else overlay("");
+    if (url.entity) await openEntity(url.entity, {fromUrl: true});
+  } catch (e) {
+    if (mine !== loadSeq) return;
+    overlay("The graph didn't load. " + errText(e),
+      el("button", {class: "btn btn--sm", type: "button", text: "Try again", onclick: () => load()}));
+  }
+}
+// ?entity=<id>&rel=<relation>: that entity and only its links of that kind.
+async function loadRelationView(mine){
+  const eg = await api("/api/graph/ego?id=" + encodeURIComponent(url.entity) + "&hops=1&relation=" + encodeURIComponent(url.rel));
+  if (mine !== loadSeq) return;
+  draw(eg);
+  renderViewNote(eg);
+  overlay("");
+  state.selectedNodeId = url.entity;
+  await openDrawer(url.entity);
+}
 
-    function renderEdit(){
-      const d = dwData, box = $("dw-inline");
-      box.innerHTML =
-        field("Name","dw-f-name",d.name) + field("Organisation","dw-f-org",d.org)
-        + field("Email","dw-f-email",d.email_addr) + field("Notes","dw-f-notes",d.notes,true)
-        + `<div class="dw-actions"><button id="dw-save" class="primary">Save</button>`
-        + `<button id="dw-cancel">Cancel</button></div><div id="dw-edit-err" class="dw-err"></div>`;
-      $("dw-cancel").onclick = renderDrawer;
-      $("dw-save").onclick = doSave;
-    }
-    function field(label,id,val,area){
-      const input = area ? `<textarea id="${id}" rows="2">${esc(val)}</textarea>`
-                         : `<input id="${id}" value="${escAttr(val)}">`;
-      return `<div class="dw-field"><label>${label}</label>${input}</div>`;
-    }
-    async function doSave(){
-      const body = { name: $("dw-f-name").value.trim(), org: $("dw-f-org").value.trim(),
-                     email_addr: $("dw-f-email").value.trim(), notes: $("dw-f-notes").value };
-      try{
-        const r = await fetch("/api/graph/entity/" + encodeURIComponent(dwId),
-          { method:"POST", headers:{...H.headers,"Content-Type":"application/json"}, body:JSON.stringify(body) });
-        if (!r.ok) throw new Error("HTTP " + r.status);
-        dwData = await r.json(); renderDrawer(); load();   // refresh map (name/colour)
-      }catch(e){ const el = $("dw-edit-err"); if (el) el.textContent = "Save failed."; }
-    }
+const deg = $("f-degree");
+deg.addEventListener("input", ()=>{ $("deg-val").textContent = deg.value; });
+deg.addEventListener("change", ()=> load());
+$("f-org").addEventListener("change", ()=> load());
+$("f-layout").addEventListener("change", (e)=>{ state.layout=e.target.value; applyLayout(); fg.d3ReheatSimulation(); reframe(); });
 
-    function renderMerge(){
-      const box = $("dw-inline");
-      box.innerHTML = `<div class="dw-sec"><h4>Merge “${esc(dwData.name)}” with…</h4>`
-        + `<div class="dw-search"><input id="dw-q" placeholder="search the entity to merge" autocomplete="off">`
-        + `<ul id="dw-hits" class="dw-hits" hidden></ul></div>`
-        + `<div id="dw-merge-err" class="dw-err"></div>`
-        + `<div id="dw-preview"></div>`
-        + `<div class="dw-actions"><button id="dw-merge-cancel">Cancel</button></div></div>`;
-      $("dw-merge-cancel").onclick = renderDrawer;
-      let t = null;
-      $("dw-q").addEventListener("input", (e)=>{ clearTimeout(t);
-        t = setTimeout(()=> searchTargets(e.target.value.trim()), 180); });
-    }
-    async function searchTargets(q){
-      const ul = $("dw-hits");
-      if (!q){ ul.hidden = true; return; }
-      try{
-        const r = await fetch("/api/graph/search?q=" + encodeURIComponent(q), H);
-        const hits = (await r.json()).filter(h => h.id !== dwId).slice(0, 8);
-        ul.innerHTML = hits.map(h => `<li data-id="${escAttr(h.id)}">${esc(h.name)} `
-          + `<span style="color:var(--faint)">${esc(h.type)}${h.org ? " · " + esc(h.org) : ""}`
-          + ` · ${h.degree||0} conns</span></li>`).join("");
-        ul.hidden = hits.length === 0;
-        [...ul.children].forEach(li => li.onclick = ()=> showMergePreview(li.dataset.id));
-      }catch(e){ ul.hidden = true; }
-    }
-    // Dry-run the merge server-side and show the resulting record (survivor +
-    // field-level best-of) with an editable final name, before committing.
-    async function showMergePreview(otherId){
-      $("dw-hits").hidden = true;
-      const box = $("dw-preview"); box.innerHTML = "Previewing…";
-      try{
-        const r = await fetch(`/api/graph/merge/preview?loser=${encodeURIComponent(dwId)}&winner=${encodeURIComponent(otherId)}`, H);
-        const p = await r.json();
-        if (!r.ok || !p.ok){ box.innerHTML = ""; const el=$("dw-merge-err"); if(el) el.textContent = p.message || "Can't preview."; return; }
-        const res = p.result;
-        box.innerHTML =
-          `<div class="dw-sec"><h4>Result</h4>`
-          + `<div class="dw-meta">Keeps <b>${esc(p.winner_name)}</b> (${p.winner_conn} conns); `
-          + `folds in “${esc(p.loser_name)}” (${p.loser_conn} conns) as an alias.</div>`
-          + field("Final name","dw-m-name",res.name)
-          + `<div class="dw-row"><span class="rel">org</span><span>${esc(res.org||"—")}</span></div>`
-          + `<div class="dw-row"><span class="rel">email</span><span>${esc(res.email_addr||"—")}</span></div>`
-          + (res.notes ? `<div class="dw-row"><span class="rel">notes</span><span>${esc(res.notes)}</span></div>` : "")
-          + `<div class="dw-actions"><button id="dw-merge-go" class="primary">Merge</button>`
-          + `<button id="dw-merge-back">Back</button></div></div>`;
-        $("dw-merge-back").onclick = renderMerge;
-        $("dw-merge-go").onclick = ()=> doMerge(p.loser_id, p.winner_id, $("dw-m-name").value.trim());
-      }catch(e){ box.innerHTML=""; const el=$("dw-merge-err"); if(el) el.textContent = "Can't preview."; }
-    }
-    async function doMerge(loserId, winnerId, name){
-      try{
-        const r = await fetch("/api/graph/merge",
-          { method:"POST", headers:{...H.headers,"Content-Type":"application/json"},
-            body: JSON.stringify({ loser_id: loserId, winner_id: winnerId, name }) });
-        const out = await r.json();
-        if (r.ok && out.ok){
-          closeDrawer(); load();
-          setSearchStatus(`Merged — kept “${out.winner_name || out.winner_id}” (the more-connected).`);
-        }
-        else { const el = $("dw-merge-err"); if (el) el.textContent = out.message || "Merge refused."; }
-      }catch(e){ const el = $("dw-merge-err"); if (el) el.textContent = "Merge failed."; }
-    }
+// ---- search: highlight on-screen matches, or fetch-and-jump to an off-screen one ----
+function setSearchStatus(msg){ $("search-status").textContent = msg || ""; }
+// Merges a fetched entity and its neighbourhood into the live graph without
+// moving what is already placed: reuses force-graph's own node and link
+// objects and only appends new ones.
+function mergeEgoIntoCurrent(egoNodes, egoLinks){
+  const { nodes: curNodes, links: curLinks } = fg.graphData();
+  const haveNode = new Set(curNodes.map((n)=>n.id));
+  const newNodes = egoNodes.filter((n)=> !haveNode.has(n.id));
+  for (const n of newNodes) n._r = nodeRadius(n);
+  const linkKey = (l)=> sidOf(l)+"|"+tidOf(l)+"|"+(l.relation||"");
+  const haveLink = new Set(curLinks.map(linkKey));
+  const newLinks = egoLinks.filter((l)=> !haveLink.has(linkKey(l)));
+  const nodes = curNodes.concat(newNodes), links = curLinks.concat(newLinks);
+  assignLinkCurvature(links);   // a new parallel edge can change existing curvature
+  CURRENT = { nodes, links, communities: CURRENT.communities };
+  recomputeDerived();
+  fg.graphData({ nodes, links });
+  overlay("");
+  showCount(); renderLegend();
+}
+function centreOn(id){
+  const n = CURRENT.nodes.find((x)=>x.id===id);
+  if (n && n.x !== undefined) fg.centerAt(n.x, n.y, reduce ? 0 : 600);
+}
+async function jumpToEntity(id){
+  try{
+    const eg = await api("/api/graph/ego?id="+encodeURIComponent(id)+"&hops=1");
+    mergeEgoIntoCurrent(eg.nodes, eg.links);
+    fg.d3ReheatSimulation();
+    setSearchStatus("");
+    return true;
+  }catch(e){
+    setSearchStatus(e.status === 404 ? "That entity is hidden or gone." : "That entity didn't load. " + errText(e));
+    return false;
+  }
+}
+// Open one entity: on the map already, or pulled in with its neighbours.
+async function openEntity(id, opts){
+  opts = opts || {};
+  if (!CURRENT.nodes.some((x)=>x.id===id)){
+    setSearchStatus("Adding it to the map.");
+    if (!(await jumpToEntity(id))) return;
+  }
+  state.selectedNodeId = id;
+  fg.nodeColor(fg.nodeColor());
+  if (!opts.fromUrl && url.entity !== id){ url.entity = id; url.rel = ""; pushUrl(); }
+  await openDrawer(id);
+  setTimeout(()=> centreOn(id), reduce ? 50 : 300);
+}
 
-    async function doSuppress(){
-      if (!window.confirm(`Suppress “${dwData.name}”? It’s hidden from the graph (reversible).`)) return;
-      try{
-        const r = await fetch("/api/graph/entity/" + encodeURIComponent(dwId), { method:"DELETE", headers: H.headers });
-        if (r.ok){ closeDrawer(); load(); }
-      }catch(e){ /* leave drawer open on failure */ }
-    }
+// Search: live-highlights loaded nodes and lists matches from the whole
+// store (/api/graph/search). Picking one focuses it, pulling it in if needed.
+let hitEls = [], hitActive = -1;
+const finder = $("f-search");
+function hideHits(){ const ul=$("f-hits"); ul.hidden=true; fill(ul); hitEls=[]; hitActive=-1;
+  finder.setAttribute("aria-expanded", "false"); finder.removeAttribute("aria-activedescendant"); }
+function setHitActive(i){
+  if (!hitEls.length) return;
+  hitActive = (i + hitEls.length) % hitEls.length;   // wrap around
+  hitEls.forEach((li,k)=>{ li.classList.toggle("active", k===hitActive); li.setAttribute("aria-selected", k===hitActive ? "true" : "false"); });
+  finder.setAttribute("aria-activedescendant", hitEls[hitActive].id);
+  hitEls[hitActive].scrollIntoView({ block:"nearest" });
+}
+function hitLine(h, loaded){
+  const bits = [kindWord(h.type)];
+  if (h.org) bits.push(h.org);
+  bits.push(plural(h.degree || 0, "link"));
+  if (h.via_alias) bits.push("matched another name");
+  if (loaded === false) bits.push("not on the map yet");
+  return bits.join(", ");
+}
+let searchT=null, searchSeq=0;
+async function runSearch(raw){
+  const term = raw.toLowerCase();
+  state.searchTerm = term; fg.nodeColor(fg.nodeColor());   // live highlight of loaded nodes
+  setSearchStatus("");
+  if (!term){ hideHits(); return; }
+  const mySeq = ++searchSeq;
+  try{
+    const hits = (await api("/api/graph/search?q="+encodeURIComponent(raw))).slice(0, 10);
+    if (mySeq!==searchSeq) return;   // still typing: drop this stale result
+    if (!hits.length){ hideHits(); setSearchStatus("Nothing matches " + raw + "."); return; }
+    const loaded = new Set(CURRENT.nodes.map((n)=>n.id));
+    hitEls = hits.map((h, i)=> el("li", {id: "hit-" + i, role: "option", "aria-selected": "false",
+      onmousedown: (e)=> e.preventDefault(), onclick: ()=> pickSearchHit(h.id)},
+      el("strong", {text: h.name}), el("span", {text: hitLine(h, loaded.has(h.id))})));
+    fill($("f-hits"), hitEls);
+    $("f-hits").hidden = false; hitActive = -1;
+    finder.setAttribute("aria-expanded", "true");
+  }catch(e){ hideHits(); setSearchStatus("Search didn't work. " + errText(e)); }
+}
+async function pickSearchHit(id){
+  hideHits();
+  await openEntity(id);
+}
+finder.addEventListener("input", (e)=>{ clearTimeout(searchT);
+  const raw = e.target.value.trim();
+  searchT=setTimeout(()=> runSearch(raw), 220); });
+// Keyboard: Up and Down move through results, Enter opens the highlighted (or first) one, Escape closes.
+finder.addEventListener("keydown", (e)=>{
+  if (e.key === "Escape"){ hideHits(); return; }
+  const open = !$("f-hits").hidden && hitEls.length;
+  if (e.key === "ArrowDown" && open){ e.preventDefault(); setHitActive(hitActive+1); }
+  else if (e.key === "ArrowUp" && open){ e.preventDefault(); setHitActive(hitActive-1); }
+  else if (e.key === "Enter" && open){ e.preventDefault(); hitEls[hitActive >= 0 ? hitActive : 0].click(); }
+});
+finder.addEventListener("blur", ()=> setTimeout(hideHits, 150));
 
-    load();
-  </script>
+// ---- entity drawer ----
+const shell = $("main"), dw = $("drawer"), dwBody = $("dw-body");
+let dwId = null, dwData = null;
+$("dw-close").addEventListener("click", ()=> closeDrawer(true));
+function closeDrawer(updateUrl){
+  dw.hidden = true; shell.classList.remove("has-drawer");
+  dwId = null; dwData = null; state.selectedNodeId = null;
+  fg.nodeColor(fg.nodeColor());
+  if (updateUrl && (url.entity || url.rel)){
+    const hadRel = Boolean(url.rel);
+    url.entity = ""; url.rel = ""; pushUrl();
+    if (hadRel) load();
+  }
+}
+async function openDrawer(id){
+  dwId = id; dw.hidden = false; shell.classList.add("has-drawer");
+  $("dw-name").textContent = "Loading";
+  fill(dwBody, el("span", {class: "skel skel--line"}), el("span", {class: "skel skel--line skel--short"}));
+  dw.setAttribute("aria-busy", "true");
+  try{
+    const d = await api("/api/graph/entity/" + encodeURIComponent(id));
+    if (dwId !== id) return;
+    dwData = d;
+    renderDrawer();
+  }catch(e){
+    $("dw-name").textContent = "Not available";
+    fill(dwBody, el("p", {class: "said said--bad", text: e.status === 404
+      ? "This entity is hidden or no longer exists. Hidden ones are listed in Settings."
+      : "It didn't load. " + errText(e)}),
+      e.status === 404 ? el("a", {class: "link small", href: "/settings#hidden", text: "Hidden entities in Settings"}) : null);
+  }finally{ dw.removeAttribute("aria-busy"); }
+}
+
+// Relations grouped by kind of link; long groups show 8 and fold the rest.
+// A group's name opens the graph on just those links; a name opens that entity.
+const REL_CAP = 8;
+function personBtn(x){
+  return el("button", {class: "person", type: "button", text: x.other_name,
+    onclick: ()=> openEntity(x.other_id)});
+}
+function relList(items){
+  if (!items.length) return el("p", {class: "small muted", text: "None."});
+  const groups = {};
+  for (const x of items){ (groups[x.relation || "related"] ??= []).push(x); }
+  return Object.entries(groups).sort((a,b)=> b[1].length - a[1].length).map(([rel,list])=>
+    el("div", {class: "relgroup"},
+      el("button", {class: "linkbtn", type: "button", title: "Show only these links in the graph",
+        onclick: ()=>{ url.entity = dwId; url.rel = rel; pushUrl(); load(); }},
+        relWords(rel) + " ", el("span", {class: "measured", text: fmt(list.length)})),
+      el("div", {class: "people"}, list.slice(0, REL_CAP).map(personBtn)),
+      list.length > REL_CAP ? el("details", {class: "more"},
+        el("summary", {text: fmt(list.length - REL_CAP) + " more"}),
+        el("div", {class: "people"}, list.slice(REL_CAP).map(personBtn))) : null));
+}
+function dateWords(d){
+  const t = C.parse(d && d.length === 10 ? d + "T00:00:00" : d);
+  return t ? t.toLocaleDateString("en-AU", {day: "numeric", month: "short", year: "numeric"}) : "";
+}
+// Facts collapsed by attribute and value: 20 sources reporting the same role
+// read as one row with a count. Different values stay separate (history).
+function obsList(obs){
+  if (!obs.length) return el("p", {class: "small muted", text: "None yet."});
+  const map = new Map();
+  for (const o of obs){
+    const key = (o.attribute||"") + "␟" + (o.value||"");
+    const cnt = o.observed_count || 1, d = o.last_seen || o.valid_from || "";
+    const cur = map.get(key);
+    if (!cur) map.set(key, { attribute:o.attribute, value:o.value, count:cnt, latest:d, mine: o.source === "manual" });
+    else { cur.count += cnt; if (d > cur.latest) cur.latest = d; if (o.source === "manual") cur.mine = true; }
+  }
+  return el("ul", {class: "facts-list"}, [...map.values()]
+    .sort((a,b)=> (b.latest||"").localeCompare(a.latest||"")).map(r =>
+      el("li", {}, el("span", {text: relWords(r.attribute)}),
+        el("span", {}, r.value || "",
+          r.count > 1 ? el("span", {class: "muted"}, ", seen ", el("span", {class: "measured", text: fmt(r.count)}), " times") : null,
+          r.latest ? el("span", {class: "muted"}, ", ", el("span", {class: "measured", text: dateWords(r.latest)})) : null,
+          r.mine ? el("span", {class: "muted", text: ", added by you"}) : null))));
+}
+function metaLine(d){
+  return el("p", {class: "small muted"}, kindWord(d.type) + ", " + (d.org || "no organisation") + ", ",
+    el("span", {class: "measured", text: fmt(d.connections || 0)}), d.connections === 1 ? " link" : " links",
+    d.email_addr ? ", " + d.email_addr : "");
+}
+function renderDrawer(){
+  const d = dwData;
+  $("dw-name").textContent = d.name;
+  fill(dwBody,
+    metaLine(d),
+    el("div", {class: "acts"},
+      el("button", {class: "btn btn--sm", type: "button", text: "Edit", onclick: renderEdit}),
+      el("button", {class: "btn btn--sm", type: "button", text: "Merge with another", onclick: renderMerge}),
+      el("button", {class: "btn btn--sm", type: "button", text: "Hide from the graph", onclick: (ev)=> doHide(ev.currentTarget)})),
+    el("p", {class: "said", id: "dw-said", role: "status", hidden: true}),
+    el("div", {class: "inline", id: "dw-inline"}),
+    el("section", {"aria-labelledby": "dw-rel-h"}, el("h3", {id: "dw-rel-h", text: "Links out"}), relList(d.relations)),
+    el("section", {"aria-labelledby": "dw-back-h"}, el("h3", {id: "dw-back-h", text: "Linked from"}), relList(d.backlinks)),
+    el("section", {"aria-labelledby": "dw-obs-h"}, el("h3", {id: "dw-obs-h", text: "Facts"}), obsList(d.observations), factForm()));
+}
+
+// "Done. Undo" in place: the undo goes through the same change record What
+// changed on the Overview uses.
+function offerUndo(out, text, changeId, after){
+  said(out, text, "ok");
+  if (!changeId) return;
+  const b = el("button", {class: "linkbtn", type: "button", text: "Undo"});
+  b.addEventListener("click", ()=> act(b, out, async ()=>{
+    await api("/api/changes/" + changeId + "/undo", {method: "POST"});
+    if (after) await after();
+    said((out.id && $(out.id)) || $("dw-said") || out, "Undone.", "ok");
+    return "";
+  }));
+  out.append(" ", b);
+}
+
+// Add a fact: one short line about the entity, undoable.
+function factForm(){
+  const about = el("input", {class: "input", id: "fact-about", type: "text", maxlength: "40",
+    placeholder: "role", autocomplete: "off"});
+  const val = el("input", {class: "input", id: "fact-value", type: "text", maxlength: "80",
+    placeholder: "Site lead", autocomplete: "off", "aria-describedby": "fact-help"});
+  const help = el("span", {class: "help", id: "fact-help", text: "80 characters at most."});
+  const btn = el("button", {class: "btn btn--sm", type: "submit", text: "Add fact"});
+  const out = el("p", {class: "said", id: "fact-said", role: "status", hidden: true});
+  const form = el("form", {novalidate: true},
+    el("h3", {text: "Add a fact"}),
+    el("div", {class: "factrow"},
+      el("div", {class: "field"}, el("label", {for: "fact-about", text: "About"}), about),
+      el("div", {class: "field"}, el("label", {for: "fact-value", text: "Fact"}), val)),
+    help, el("div", {class: "acts"}, btn), out);
+  val.addEventListener("input", ()=>{ help.textContent = val.value.length
+    ? fmt(80 - val.value.length) + " characters left." : "80 characters at most."; });
+  form.addEventListener("submit", (ev)=>{
+    ev.preventDefault();
+    const id = dwId;
+    act(btn, out, async ()=>{
+      const r = await api("/api/graph/entity/" + encodeURIComponent(id) + "/facts",
+        {method: "POST", body: {attribute: about.value, value: val.value}});
+      if (dwId !== id) return "";
+      dwData = r.entity; renderDrawer();
+      offerUndo($("fact-said"), "Fact added.", r.change_id, ()=> openDrawer(id));
+      return "";
+    }, {again: true});
+  });
+  return form;
+}
+
+function field(label, id, val, area){
+  const input = area ? el("textarea", {class: "input", id, rows: "3"}) : el("input", {class: "input", id, type: "text"});
+  input.value = val || "";
+  return el("div", {class: "field"}, el("label", {for: id, text: label}), input);
+}
+function renderEdit(){
+  const d = dwData, out = el("p", {class: "said", role: "status", hidden: true});
+  const save = el("button", {class: "btn btn--primary", type: "submit", text: "Save"});
+  const form = el("form", {novalidate: true},
+    field("Name", "dw-f-name", d.name), field("Organisation", "dw-f-org", d.org),
+    field("Email", "dw-f-email", d.email_addr), field("Notes", "dw-f-notes", d.notes, true),
+    el("div", {class: "acts"}, save, el("button", {class: "btn", type: "button", text: "Cancel", onclick: renderDrawer})), out);
+  form.addEventListener("submit", (ev)=>{
+    ev.preventDefault();
+    const body = { name: $("dw-f-name").value.trim(), org: $("dw-f-org").value.trim(),
+                   email_addr: $("dw-f-email").value.trim(), notes: $("dw-f-notes").value };
+    if (!body.name){ said(out, "A name is needed.", "bad"); $("dw-f-name").setAttribute("aria-invalid", "true"); return; }
+    act(save, out, async ()=>{
+      dwData = await api("/api/graph/entity/" + encodeURIComponent(dwId), {method: "POST", body});
+      renderDrawer(); said($("dw-said"), "Saved.", "ok");
+      load();
+      return "";
+    });
+  });
+  fill($("dw-inline"), form);
+  $("dw-f-name").focus();
+}
+
+function renderMerge(){
+  const q = el("input", {class: "input", id: "dw-q", type: "search", autocomplete: "off",
+    placeholder: "Search for the duplicate"});
+  const ul = el("ul", {class: "hits hits--inline", id: "dw-hits", role: "listbox", "aria-label": "Entities to merge with", hidden: true});
+  fill($("dw-inline"), el("section", {},
+    el("div", {class: "field"}, el("label", {for: "dw-q", text: "Merge " + dwData.name + " with"}), q),
+    ul, el("p", {class: "said", id: "dw-merge-err", role: "status", hidden: true}), el("div", {id: "dw-preview"}),
+    el("div", {class: "acts"}, el("button", {class: "btn btn--sm", type: "button", text: "Cancel", onclick: renderDrawer}))));
+  let t = null;
+  q.addEventListener("input", (e)=>{ clearTimeout(t);
+    t = setTimeout(()=> searchTargets(e.target.value.trim()), 180); });
+  q.focus();
+}
+async function searchTargets(q){
+  const ul = $("dw-hits");
+  if (!ul) return;
+  if (!q){ ul.hidden = true; return; }
+  try{
+    const hits = (await api("/api/graph/search?q=" + encodeURIComponent(q))).filter(h => h.id !== dwId).slice(0, 8);
+    fill(ul, hits.map(h => el("li", {role: "option", tabindex: "0", onclick: ()=> showMergePreview(h.id),
+      onkeydown: (e)=>{ if (e.key === "Enter") showMergePreview(h.id); }},
+      el("strong", {text: h.name}), el("span", {text: hitLine(h)}))));
+    ul.hidden = hits.length === 0;
+  }catch(e){ ul.hidden = true; said($("dw-merge-err"), errText(e), "bad"); }
+}
+// Dry-run the merge on the server and show the record it would leave (the
+// more-connected entity survives, each field the better of the two), with an
+// editable final name, before anything changes.
+async function showMergePreview(otherId){
+  $("dw-hits").hidden = true;
+  const box = $("dw-preview"), err = $("dw-merge-err");
+  said(err, "Working out the result.");
+  try{
+    const p = await api(`/api/graph/merge/preview?loser=${encodeURIComponent(dwId)}&winner=${encodeURIComponent(otherId)}`);
+    said(err, "");
+    const res = p.result;
+    const go = el("button", {class: "btn btn--primary", type: "button", text: "Merge"});
+    const out = el("p", {class: "said", role: "status", hidden: true});
+    fill(box, el("section", {"aria-label": "What the merge leaves"},
+      el("p", {class: "small"}, "Keeps ", el("strong", {text: p.winner_name}), " (",
+        el("span", {class: "measured", text: fmt(p.winner_conn)}), " links) and folds in ",
+        el("strong", {text: p.loser_name}), " (", el("span", {class: "measured", text: fmt(p.loser_conn)}),
+        " links) as another name for it."),
+      field("Final name", "dw-m-name", res.name),
+      el("ul", {class: "facts-list"},
+        el("li", {}, el("span", {text: "Organisation"}), el("span", {text: res.org || "none"})),
+        el("li", {}, el("span", {text: "Email"}), el("span", {text: res.email_addr || "none"})),
+        res.notes ? el("li", {}, el("span", {text: "Notes"}), el("span", {text: res.notes})) : null),
+      el("div", {class: "acts"}, go, el("button", {class: "btn", type: "button", text: "Back", onclick: renderMerge})), out));
+    go.addEventListener("click", ()=> doMerge(go, out, p.loser_id, p.winner_id, $("dw-m-name").value.trim()));
+  }catch(e){ fill(box); said(err, e.data && e.data.message ? e.data.message : errText(e), "bad"); }
+}
+function doMerge(btn, out, loserId, winnerId, name){
+  act(btn, out, async ()=>{
+    try {
+      const r = await api("/api/graph/merge", {method: "POST", body: { loser_id: loserId, winner_id: winnerId, name }});
+      closeDrawer(true);
+      setSearchStatus("Merged. Kept " + (r.winner_name || "the more linked one") + ".");
+      load();
+      return "";
+    } catch (e) {
+      if (e.data && e.data.message) e.message = e.data.message;
+      throw e;
+    }
+  });
+}
+
+// Hide: reversible, so no confirm. Undo sits where it happened.
+function doHide(btn){
+  const id = dwId, name = dwData.name;
+  act(btn, $("dw-said"), async ()=>{
+    const r = await api("/api/graph/entity/" + encodeURIComponent(id), {method: "DELETE"});
+    if (url.entity === id){ url.entity = ""; url.rel = ""; pushUrl(); }
+    const out = el("p", {class: "said", role: "status"});
+    fill(dwBody, out, el("a", {class: "link small", href: "/settings#hidden", text: "Hidden entities in Settings"}));
+    offerUndo(out, name + " is hidden from the graph.", r.change_id, async ()=>{ await load(); await openEntity(id); });
+    load(); loadHidden();
+    return "";
+  });
+}
+
+// ---- hidden entities: a count here, restored from Settings ----
+async function loadHidden(){
+  const p = $("hidden-note");
+  try{
+    const n = ((await api("/api/graph/suppressed")).items || []).length;
+    fill(p, n ? plural(n, "entity", "entities") + " hidden. " : "No entities hidden.",
+      n ? el("a", {class: "link", href: "/settings#hidden", text: "Restore them in Settings"}) : null);
+  }catch(e){ p.textContent = "Hidden entities not counted. " + errText(e); }
+}
+
+// ---- top bar: health and time ----
+async function loadStats(){
+  try {
+    if (!C.tz) {
+      try { const cfg = await api("/api/config"); if (cfg && cfg.timezone) C.tz = cfg.timezone; } catch (e) { /* the Mac's own zone */ }
+    }
+    const stats = await api("/api/dashboard/stats");
+    renderChip(stats.health && stats.health.state, stats.health && stats.health.reasons);
+    const t = C.time(stats.as_of), a = $("asof");
+    a.textContent = t || "not yet";
+    a.className = t ? "measured measured--cool" : "";
+  } catch (e) {
+    if (!e.offline) renderChip(null, [errText(e)]);
+  }
+}
+
+async function start(){
+  $("f-colour").value = url.view;
+  try { await loadKinds(); }
+  catch (e) {
+    overlay("The graph didn't load. " + errText(e),
+      el("button", {class: "btn btn--sm", type: "button", text: "Try again", onclick: () => start()}));
+    return;
+  }
+  await load();
+}
+C.wireOffline(() => { loadStats(); loadHidden(); start(); });
+loadStats();
+loadHidden();
+start();
+</script>
 </body>
 </html>

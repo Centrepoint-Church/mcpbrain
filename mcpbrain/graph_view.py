@@ -17,13 +17,29 @@ from mcpbrain.dashboard import _open_ro
 log = logging.getLogger(__name__)
 
 _MAX_NODES = 5000
+# Entities with no links have nothing to lay out around, and a store can hold
+# thousands: the unlinked view draws the newest this many and says how many
+# there are in all (total, truncated) instead of refusing with too_large.
+_UNLINKED_CAP = 1500
 _EMPTY = {"nodes": [], "links": [], "communities": {}}
+# A fact the owner adds is one short value, the limit graph_write applies to
+# every observation it writes.
+FACT_MAX = 80
+ATTRIBUTE_MAX = 40
 
 
 def graph_canvas(store, *, min_conn: int = 7, org: str = "", community: str = "",
                  types: list[str] | None = None, recency_days: int = 0,
-                 max_links: int = 5000) -> dict:
-    """Return Sigma-shaped {nodes, links, communities} or a too_large marker."""
+                 max_links: int = 5000, unlinked: bool = False,
+                 since_hours: int = 0) -> dict:
+    """Return Sigma-shaped {nodes, links, communities} or a too_large marker.
+
+    unlinked: only entities with no live relation on either side (the
+    Overview's "entities with no links", console_stats.graph_counts), newest
+    first and capped at _UNLINKED_CAP; min_conn does not apply and the payload
+    adds {total, truncated}.
+    since_hours: only entities that gained a relation or observation from a
+    source first seen in that many hours (change_undo.added_since)."""
     path = store._path if hasattr(store, "_path") else store.path
 
     try:
@@ -48,8 +64,20 @@ def graph_canvas(store, *, min_conn: int = 7, org: str = "", community: str = ""
             origin_col = ("COALESCE(e.origin, 'local') AS origin" if has_origin
                          else "'local' AS origin")
 
-            where = ["COALESCE(e.degree, 0) >= :min_conn"]
-            params: dict = {"min_conn": int(min_conn)}
+            where: list[str] = []
+            params: dict = {}
+            if not unlinked:
+                where.append("COALESCE(e.degree, 0) >= :min_conn")
+                params["min_conn"] = int(min_conn)
+            if unlinked:
+                where.append(_unlinked_sql(db))
+            if since_hours and int(since_hours) > 0:
+                if not (_table_exists(db, "relation_sources")
+                        and _table_exists(db, "observation_sources")):
+                    return dict(_EMPTY)
+                from mcpbrain.change_undo import ADDED_SINCE_IDS_SQL, added_cutoff
+                where.append(f"e.id IN ({ADDED_SINCE_IDS_SQL})")
+                params["cutoff"] = added_cutoff(int(since_hours))
             if has_supp:
                 where.append("s.entity_id IS NULL")
             if org:
@@ -70,6 +98,8 @@ def graph_canvas(store, *, min_conn: int = 7, org: str = "", community: str = ""
                 where.append("COALESCE(e.last_seen, '') >= :cutoff")
                 params["cutoff"] = cutoff
 
+            order_limit = (f"ORDER BY COALESCE(e.last_seen, '') DESC, e.name LIMIT {int(_UNLINKED_CAP)}"
+                           if unlinked else "LIMIT 5001")
             rows = db.execute(f"""
                 SELECT e.id, e.name, e.type, COALESCE(e.org, '') AS org,
                        COALESCE(e.email_count, 0) AS email_count,
@@ -89,9 +119,21 @@ def graph_canvas(store, *, min_conn: int = 7, org: str = "", community: str = ""
                 ) ec ON ec.entity_id = e.id
                 LEFT JOIN community_summaries cs
                        ON cs.community_id = ec.community_id AND cs.level = 0
-                WHERE {' AND '.join(where)}
-                LIMIT 5001
+                WHERE {' AND '.join(where) or '1'}
+                {order_limit}
             """, params).fetchall()
+
+            if unlinked:
+                total = db.execute(
+                    f"SELECT COUNT(*) AS n FROM entities e {supp_join} "
+                    f"LEFT JOIN (SELECT entity_id, MIN(community_id) AS community_id "
+                    f"FROM entity_communities WHERE level = 0 GROUP BY entity_id) ec "
+                    f"ON ec.entity_id = e.id WHERE {' AND '.join(where)}",
+                    params).fetchone()["n"]
+                out = {"nodes": _node_rows(rows), "links": [],
+                       "communities": _community_titles(rows),
+                       "total": total, "truncated": total > len(rows)}
+                return out
 
             if len(rows) > _MAX_NODES:
                 total = db.execute(f"""
@@ -104,19 +146,12 @@ def graph_canvas(store, *, min_conn: int = 7, org: str = "", community: str = ""
                         WHERE level = 0
                         GROUP BY entity_id
                     ) ec ON ec.entity_id = e.id
-                    WHERE {' AND '.join(where)}
+                    WHERE {' AND '.join(where) or '1'}
                 """, params).fetchone()["n"]
                 return {"error": "too_large", "cap": _MAX_NODES, "candidate_count": total}
 
             node_ids = {r["id"] for r in rows}
-            nodes = [{
-                "id": r["id"], "name": r["name"], "type": r["type"] or "person",
-                "org": r["org"], "email_count": r["email_count"],
-                "email_addr": r["email_addr"], "connections": r["degree"],
-                "community": r["community_id"],
-                "first_seen": r["first_seen"], "last_seen": r["last_seen"],
-                "origin": r["origin"],
-            } for r in rows]
+            nodes = _node_rows(rows)
 
             link_cap = max(100, min(50000, int(max_links)))
             links = []
@@ -133,18 +168,64 @@ def graph_canvas(store, *, min_conn: int = 7, org: str = "", community: str = ""
                     if len(links) >= link_cap:
                         break
 
-            communities: dict = {}
-            for r in rows:
-                cid = r["community_id"]
-                if cid is not None and str(cid) not in communities:
-                    communities[str(cid)] = r["community_title"] or f"Community {cid}"
-
-            return {"nodes": nodes, "links": links, "communities": communities}
+            return {"nodes": nodes, "links": links, "communities": _community_titles(rows)}
         finally:
             db.close()
     except sqlite3.Error as exc:
         log.warning("graph_canvas: read failed (%s) — returning empty", exc)
         return dict(_EMPTY)
+
+
+def _node_rows(rows) -> list[dict]:
+    return [{
+        "id": r["id"], "name": r["name"], "type": r["type"] or "person",
+        "org": r["org"], "email_count": r["email_count"],
+        "email_addr": r["email_addr"], "connections": r["degree"],
+        "community": r["community_id"],
+        "first_seen": r["first_seen"], "last_seen": r["last_seen"],
+        "origin": r["origin"],
+    } for r in rows]
+
+
+def _community_titles(rows) -> dict:
+    communities: dict = {}
+    for r in rows:
+        cid = r["community_id"]
+        if cid is not None and str(cid) not in communities:
+            communities[str(cid)] = r["community_title"] or f"Community {cid}"
+    return communities
+
+
+def _unlinked_sql(db) -> str:
+    """WHERE clause for "no live relation on either side", the definition
+    console_stats.graph_counts uses for the Overview's unlinked count."""
+    if not _table_exists(db, "entity_relations"):
+        return "1"
+    cols = {r["name"] for r in db.execute("PRAGMA table_info(entity_relations)")}
+    live = "AND r.invalidated_at IS NULL" if "invalidated_at" in cols else ""
+    return (f"NOT EXISTS (SELECT 1 FROM entity_relations r WHERE r.entity_a = e.id {live}) "
+            f"AND NOT EXISTS (SELECT 1 FROM entity_relations r WHERE r.entity_b = e.id {live})")
+
+
+def graph_types(store) -> list[dict]:
+    """Every entity type present with its count, largest first:
+    [{type, count}]. Counts every entity as console_stats.graph_counts does
+    (the Overview's numbers), so a kind's figure there matches the graph's."""
+    path = store._path if hasattr(store, "_path") else store.path
+    try:
+        db = _open_ro(Path(path))
+        try:
+            if not _table_exists(db, "entities"):
+                return []
+            rows = db.execute(
+                "SELECT COALESCE(NULLIF(type, ''), 'unknown') AS type, COUNT(*) AS n "
+                "FROM entities GROUP BY 1 ORDER BY n DESC, type").fetchall()
+            return [{"type": r["type"], "count": int(r["n"])} for r in rows]
+        finally:
+            db.close()
+    except sqlite3.Error as exc:
+        log.warning("graph_types: read failed (%s)", exc)
+        return []
 
 
 def _rel_filters(db, alias: str = "") -> tuple[str, str]:
@@ -172,11 +253,13 @@ def _table_exists(db, name):
                       (name,)).fetchone() is not None
 
 
-def graph_ego(store, entity_id: str, hops: int = 1) -> dict | None:
+def graph_ego(store, entity_id: str, hops: int = 1, relation: str = "") -> dict | None:
     """One entity plus its N-hop neighbourhood, ignoring the min-connections/org/
     type filters entirely. Used to jump to a search hit that graph_canvas()'s
-    degree floor would otherwise hide from the map. Returns None if the entity
-    is unknown or suppressed."""
+    degree floor would otherwise hide from the map. relation, when given,
+    follows and returns only links of that relation (the drawer's "works_at 12"
+    group opened in the graph). Returns None if the entity is unknown or
+    suppressed."""
     hops = max(0, min(3, int(hops)))
     path = store._path if hasattr(store, "_path") else store.path
     try:
@@ -191,6 +274,10 @@ def graph_ego(store, entity_id: str, hops: int = 1) -> dict | None:
                 return None
 
             rel_where, _ = _rel_filters(db)
+            rel_params: tuple = ()
+            if relation:
+                rel_where += " AND relation = ?"
+                rel_params = (relation,)
             seen = {entity_id}
             frontier = {entity_id}
             for _ in range(hops):
@@ -201,7 +288,7 @@ def graph_ego(store, entity_id: str, hops: int = 1) -> dict | None:
                     f"SELECT entity_a, entity_b FROM entity_relations "
                     f"WHERE COALESCE(strength, 0) > 0{rel_where} "
                     f"AND (entity_a IN ({qmarks}) OR entity_b IN ({qmarks}))",
-                    (*frontier, *frontier)).fetchall()
+                    (*rel_params, *frontier, *frontier)).fetchall()
                 nxt = {other for r in rows for other in (r["entity_a"], r["entity_b"])
                        if other not in seen}
                 seen |= nxt
@@ -252,7 +339,8 @@ def graph_ego(store, entity_id: str, hops: int = 1) -> dict | None:
             for r in db.execute(
                 "SELECT entity_a AS source, entity_b AS target, "
                 "COALESCE(relation, '') AS relation, COALESCE(strength, 1) AS strength "
-                f"FROM entity_relations WHERE COALESCE(strength, 0) > 0{rel_where}"
+                f"FROM entity_relations WHERE COALESCE(strength, 0) > 0{rel_where}",
+                rel_params
             ):
                 if r["source"] in found_ids and r["target"] in found_ids:
                     links.append({"source": r["source"], "target": r["target"],
@@ -523,11 +611,52 @@ def merge_entities(store, loser_id: str, winner_id: str, name_override: str | No
 
 
 def suppress_entity(store, entity_id: str) -> dict:
-    """Soft-delete (reversible) an entity."""
+    """Soft-delete (reversible) an entity. The change id comes back so the page
+    can offer Undo in place (change_undo undoes entity_suppressed rows)."""
     ok = store.suppress_entity(entity_id, reason="graph-ui")
-    if ok:
-        store.record_change("entity_suppressed", ref_id=entity_id, summary="suppressed via graph")
-    return {"ok": bool(ok)}
+    if not ok:
+        return {"ok": False}
+    ent = store.get_entity(entity_id) or {}
+    change_id = store.record_change(
+        "entity_suppressed", ref_id=entity_id, source="dashboard",
+        summary=f"Hid {ent.get('name') or entity_id} from the graph")
+    return {"ok": True, "change_id": change_id}
+
+
+def add_fact(store, entity_id: str, attribute, value) -> dict:
+    """Record a fact the owner states about an entity, as an undoable change.
+
+    {"ok": True, "change_id": N, "entity": <entity_detail>} on success;
+    {"ok": False, "error": "invalid", "reason": ...} for an empty attribute or
+    value, or one too long; {"ok": False, "error": "not_found"} for an unknown
+    entity. Written source='manual' with high confidence, like a role set
+    through graph_corrections, so entity_detail shows it."""
+    attribute = " ".join(str(attribute or "").split())
+    value = " ".join(str(value or "").split())
+    if not attribute:
+        return {"ok": False, "error": "invalid", "reason": "Say what the fact is about."}
+    if len(attribute) > ATTRIBUTE_MAX:
+        return {"ok": False, "error": "invalid",
+                "reason": f"Keep what it is about to {ATTRIBUTE_MAX} characters."}
+    if not value:
+        return {"ok": False, "error": "invalid", "reason": "Write the fact."}
+    if len(value) > FACT_MAX:
+        return {"ok": False, "error": "invalid",
+                "reason": f"Keep the fact to {FACT_MAX} characters or fewer."}
+    ent = store.get_entity(entity_id)
+    if ent is None:
+        return {"ok": False, "error": "not_found"}
+    change = {"change_type": "fact_added", "source": "dashboard",
+              "summary": f"Added a fact to {ent.get('name') or entity_id}: {attribute} {value}"}
+    if store.add_manual_observation(entity_id, attribute, value, change=change) is None:
+        return {"ok": False, "error": "not_found"}
+    try:
+        from mcpbrain import entity_resource
+        entity_resource.invalidate_cache()
+    except Exception:  # noqa: BLE001 -- the write itself already committed
+        pass
+    return {"ok": True, "change_id": change.get("change_log_id"),
+            "entity": entity_detail(store, entity_id)}
 
 
 def list_suppressed(store) -> list[dict]:

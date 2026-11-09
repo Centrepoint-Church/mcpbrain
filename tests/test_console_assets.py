@@ -246,7 +246,7 @@ def test_page_helpers_are_defined_once_in_console_js():
     for name in SHARED:
         assert len(re.findall(rf"function {name}\(", js)) == 1, name
         assert f"{name}: {name}" in js, name
-    for page in ("dashboard.html", "settings.html", "index.html"):
+    for page in ("dashboard.html", "settings.html", "index.html", "graph.html"):
         html = (WIZARD / page).read_text(encoding="utf-8")
         for name in SHARED:
             assert not re.search(rf"function {name}\(", html), (page, name)

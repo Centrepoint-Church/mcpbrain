@@ -367,5 +367,5 @@ def test_restore_redraws_the_list():
 
 
 def test_no_inline_styles():
-    for name in ("settings.html", "index.html", "dashboard.html"):
+    for name in ("settings.html", "index.html", "dashboard.html", "graph.html"):
         assert 'style="' not in (_WIZ / name).read_text(encoding="utf-8"), name
