@@ -920,6 +920,11 @@ _CONFIRMABLE_TOOLS = frozenset({"brain_graph_correct"})
 
 
 
+# When this process loaded the daemon, before the control server can take a
+# request: any review decision claimed earlier belongs to a dead process.
+_PROCESS_STARTED_AT = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
+
+
 def _requests_for_mode(store, kind: str, build, key: str) -> list:
     """Block requests for an automatic-change kind, by its mode: none when off
     (nothing would be written), and in ask mode none for an item whose earlier
@@ -3929,19 +3934,23 @@ class Daemon:
                     log.warning("drift_monitor failed: %s", exc, exc_info=True)
 
         # S4b: feed the bandit real reward from recent accept signals, then advise.
-        try:
-            from mcpbrain import threshold_bandit as tb
-            tb.init_bandit_table(self._store)
-            # Attribute recent feedback to the threshold arm currently in effect.
-            from mcpbrain.lessons import read_recent_outcomes
-            used = len(read_recent_outcomes(self._store, days=7))
-            if used:
-                arm = min(tb.ARMS, key=lambda a: abs(a - config.recall_max_distance(home)))
-                for _ in range(used):
-                    tb.step(self._store, arm, outcome="used")
-            summary["bandit"] = tb.advisory_report(self._store, home)
-        except Exception as exc:  # noqa: BLE001
-            log.warning("bandit advisory failed: %s", exc, exc_info=True)
+        # Draft style tuning off (Settings > Automatic changes): skip it all.
+        if config.auto_change_mode(home, "draft_style") == "off":
+            summary["bandit"] = {"skipped": "off"}
+        else:
+            try:
+                from mcpbrain import threshold_bandit as tb
+                tb.init_bandit_table(self._store)
+                # Attribute recent feedback to the threshold arm currently in effect.
+                from mcpbrain.lessons import read_recent_outcomes
+                used = len(read_recent_outcomes(self._store, days=7))
+                if used:
+                    arm = min(tb.ARMS, key=lambda a: abs(a - config.recall_max_distance(home)))
+                    for _ in range(used):
+                        tb.step(self._store, arm, outcome="used")
+                summary["bandit"] = tb.advisory_report(self._store, home)
+            except Exception as exc:  # noqa: BLE001
+                log.warning("bandit advisory failed: %s", exc, exc_info=True)
 
         # S5: outcome-grounded lessons (only writes when 'used'/'edited' exist).
         if config.lessons_enabled(home):
@@ -5371,6 +5380,19 @@ class Daemon:
         except Exception as exc:  # noqa: BLE001 — must not stop the daemon starting
             log.info("embed-backend migrate skipped (model not ready): %s", exc)
 
+    def _recover_pending_changes(self) -> int:
+        """Startup sweep: return pending changes stranded in 'deciding' to the
+        review queue. Best effort; never blocks startup."""
+        try:
+            from mcpbrain import auto_changes
+            n = auto_changes.recover_stale(self._store, claimed_before=_PROCESS_STARTED_AT)
+            if n:
+                log.info("startup: returned %d interrupted review decision(s) to the queue", n)
+            return n
+        except Exception as exc:  # noqa: BLE001
+            log.warning("pending-change recovery failed: %s", exc, exc_info=True)
+            return 0
+
     def run(self) -> None:
         """Acquire the single-writer lock and loop until stopped.
 
@@ -5404,6 +5426,10 @@ class Daemon:
                     log.info("startup: swept %d orphaned snapshot temp dir(s)", removed)
             except Exception as exc:  # noqa: BLE001 — sweep must not crash startup
                 log.warning("snapshot orphan sweep failed: %s", exc, exc_info=True)
+            # A review decision cut off by a crash or kill leaves its row
+            # claimed ('deciding'). Rows claimed before this process started
+            # can't be in flight, so they go back to the queue.
+            self._recover_pending_changes()
             # Reinstall recovery FIRST: if the store is empty and a backup is
             # configured, pull+restore the latest Drive snapshot before the
             # loop, so the first normal cycle delta-syncs from the snapshot

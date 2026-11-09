@@ -390,7 +390,7 @@ def _suppress_pair(store, pair_id: str) -> None:
         store.set_meta(_SUPPRESS_META, json.dumps(sorted(s)))
 
 
-def apply_org_merge_answers(store, answers, *, cap) -> dict:
+def apply_org_merge_answers(store, answers, *, cap, change_ids: list | None = None) -> dict:
     """Drain-side entry for the curator's fuzzy-merge adjudication (spec B3.3).
 
     The enrich subagent judges each structural pair packet and returns
@@ -413,12 +413,12 @@ def apply_org_merge_answers(store, answers, *, cap) -> dict:
         else:
             _suppress_pair(store, pid)
             distinct += 1
-    result = _apply_merge_verdicts(store, verdicts, cap=cap)
+    result = _apply_merge_verdicts(store, verdicts, cap=cap, change_ids=change_ids)
     result["distinct"] = distinct
     return result
 
 
-def _apply_merge_verdicts(store, verdicts, *, cap) -> dict:
+def _apply_merge_verdicts(store, verdicts, *, cap, change_ids: list | None = None) -> dict:
     """Apply curator merge verdicts with the 0.7.84 brain-review hardening:
     re-fetch both entities from the store by their OWN id (never trust a
     verdict's embedded data), missing -> skip; enforce the _NAME_MERGEABLE_TYPES,
@@ -462,10 +462,13 @@ def _apply_merge_verdicts(store, verdicts, *, cap) -> dict:
             result["capped"] += 1
             continue
         winner, loser = _pick_winner(a, b)
+        change = {"change_type": "tidy_merge", "source": "org_merge_review",
+                  "summary": f"Merged {loser['id']} into {winner['id']}"}
         store.merge_entities(loser["id"], winner["id"],
                              canonical_name=v.get("canonical") or None, method="curator",
-                             change={"change_type": "tidy_merge", "source": "org_merge_review",
-                                     "summary": f"Merged {loser['id']} into {winner['id']}"})
+                             change=change)
+        if change_ids is not None and change.get("change_log_id"):
+            change_ids.append(change["change_log_id"])
         result["merged"] += 1
     return result
 

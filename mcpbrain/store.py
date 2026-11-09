@@ -142,12 +142,17 @@ def _log_change_tx(db, change_type: str, *, ref_id: str = "", summary: str = "",
 
 def _log_recorded_change(db, change: dict, ref_id, before, after) -> int:
     """Record an undoable change described by `change` ({change_type, summary?,
-    detail?, source?, ref_id?}) with a JSON {before, after} revert_ref."""
+    detail?, source?, ref_id?}) with a JSON {before, after} revert_ref.
+
+    The new change_log id is also written back into `change["change_log_id"]`,
+    so a caller holding the dict (an applier whose mutator returns a bool or a
+    count) learns exactly which row its own write recorded."""
     from mcpbrain.change_undo import revert_json
-    return _log_change_tx(
+    change["change_log_id"] = _log_change_tx(
         db, change["change_type"], ref_id=str(change.get("ref_id", ref_id)),
         summary=change.get("summary", ""), detail=change.get("detail", ""),
         revert_ref=revert_json(before, after), source=change.get("source", ""))
+    return change["change_log_id"]
 
 
 _MERGE_TOUCHED_COLS = ("name", "type", "org", "aliases", "email_addr", "notes")
@@ -1757,7 +1762,8 @@ class Store:
             # Automatic changes held for the owner's review ("ask me first").
             # payload is what auto_changes.APPLY[kind] needs to make the change
             # later; change_log_id is the undoable change approval recorded.
-            # status: pending | applied | declined.
+            # status: pending | deciding (claimed by one decide; decided_at is
+            # the claim time) | applied | declined.
             db.execute(f"""CREATE TABLE IF NOT EXISTS pending_changes(
                 id            INTEGER PRIMARY KEY AUTOINCREMENT,
                 kind          TEXT NOT NULL,
@@ -1767,7 +1773,13 @@ class Store:
                 status        TEXT NOT NULL DEFAULT 'pending',
                 created_at    TEXT DEFAULT CURRENT_TIMESTAMP,
                 decided_at    TEXT DEFAULT '',
-                change_log_id INTEGER){_S}""")
+                change_log_id INTEGER,
+                error         TEXT DEFAULT ''){_S}""")
+            # error: why the last approval didn't go through (the row stays
+            # pending). Added after the table first shipped on this branch.
+            if "error" not in {r["name"] for r in db.execute(
+                    "PRAGMA table_info(pending_changes)").fetchall()}:
+                db.execute("ALTER TABLE pending_changes ADD COLUMN error TEXT DEFAULT ''")
             db.execute("CREATE INDEX IF NOT EXISTS idx_pc_status ON pending_changes(status)")
             db.execute("CREATE INDEX IF NOT EXISTS idx_pc_kind_target "
                        "ON pending_changes(kind, target)")

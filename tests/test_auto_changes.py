@@ -834,3 +834,181 @@ def test_legacy_dismiss_declines_a_pending_change(server):
     code, out = _req(srv, "POST", f"/api/dashboard/findings/{fid}/dismiss")
     assert code == 200 and out["change"] == "declined"
     assert _pending(s)[0]["id"] == pid and _pending(s)[0]["status"] == "declined"
+
+
+# --- fix round 1: a decision never strands its row ------------------------------------
+
+def _queued_profile(s):
+    _dana(s)
+    return auto_changes.propose(s, "profiles", "dana-okafor", "New profile for Dana Okafor",
+                                {"entity_id": "dana-okafor", "profile": "Dana runs finance."})
+
+
+def test_exception_inside_apply_leaves_row_pending_and_listed(server, monkeypatch):
+    srv, s = server
+    pid = _queued_profile(s)
+
+    def boom(store, home, payload):
+        raise RuntimeError("disk on fire")
+    monkeypatch.setitem(auto_changes.APPLY, "profiles", boom)
+    code, out = _req(srv, "POST", f"/api/pending/{pid}/apply")
+    assert code == 409 and "disk on fire" in out["reason"]
+    row = _pending(s)[0]
+    assert row["status"] == "pending" and "disk on fire" in row["error"]
+    assert [i["id"] for i in _req(srv, "GET", "/api/pending")[1]["items"]] == [pid]
+
+
+def test_exception_inside_settle_leaves_row_pending_and_listed(server, monkeypatch):
+    srv, s = server
+    pid = _queued_profile(s)
+
+    def bad_settle(*a, **kw):
+        raise RuntimeError("settle failed")
+    monkeypatch.setattr(auto_changes, "_settle", bad_settle)
+    code, out = _req(srv, "POST", f"/api/pending/{pid}/decline")
+    assert code == 409 and "settle failed" in out["reason"]
+    assert _pending(s)[0]["status"] == "pending"
+    assert [i["id"] for i in _req(srv, "GET", "/api/pending")[1]["items"]] == [pid]
+    monkeypatch.undo()
+    assert _req(srv, "POST", f"/api/pending/{pid}/decline")[0] == 200
+
+
+def _set_deciding(s, pid, claimed_at):
+    with s._connect(write=True) as db:
+        db.execute("UPDATE pending_changes SET status='deciding', decided_at=? WHERE id=?",
+                   (claimed_at, pid))
+
+
+def test_stale_deciding_row_is_recovered(tmp_path, home):
+    s = _store(tmp_path)
+    old = auto_changes.propose(s, "profiles", "a", "a", {})
+    fresh = auto_changes.propose(s, "profiles", "b", "b", {})
+    _set_deciding(s, old, "2026-01-01T00:00:00Z")
+    _set_deciding(s, fresh, "2099-01-01T00:00:00Z")    # claimed after the cutoff
+    assert auto_changes.list_pending(s) == []
+    assert auto_changes.recover_stale(s, claimed_before="2026-06-01T00:00:00Z") == 1
+    assert [r["id"] for r in auto_changes.list_pending(s)] == [old]
+    assert s.pending_changes_count() == 1
+    assert auto_changes.recover_stale(s, older_than_s=60) == 0   # 2099 claim is "now-ish"
+    assert auto_changes.recover_stale(s) == 1
+    assert auto_changes.decide(s, home, fresh, approve=False)["ok"] is True
+
+
+def test_daemon_startup_sweep_recovers_rows_claimed_before_start(tmp_path, monkeypatch):
+    import mcpbrain.daemon as daemon_mod
+    s = _store(tmp_path)
+    pid = auto_changes.propose(s, "consolidation", "x", "x", {})
+    _set_deciding(s, pid, "2026-01-01T00:00:00Z")
+
+    class _D:
+        _store = s
+    assert daemon_mod.Daemon._recover_pending_changes(_D()) == 1
+    assert _pending(s)[0]["status"] == "pending"
+    # a stranded consolidation review no longer blocks future passes forever
+    assert auto_changes.pending_targets(s, "consolidation") == {"x"}
+
+
+def test_legacy_dismiss_never_strands_a_row(server, monkeypatch):
+    srv, s = server
+    pid = auto_changes.propose(s, "profiles", "x", "New profile", {})
+    fid = _pending_findings(s)[0]["id"]
+    monkeypatch.setattr(auto_changes, "decide",
+                        lambda *a, **kw: {"ok": False, "reason": "busy"})
+    code, out = _req(srv, "POST", f"/api/dashboard/findings/{fid}/dismiss")
+    assert code == 409 and out["reason"] == "busy"
+    assert _pending(s)[0]["status"] == "pending" and _pending(s)[0]["id"] == pid
+    assert [f["id"] for f in _pending_findings(s)] == [fid]
+
+
+# --- fix round 1: tidy approval records its own change ------------------------------------
+
+def test_tidy_approval_links_its_own_change_despite_a_concurrent_tidy_write(tmp_path, home,
+                                                                         monkeypatch):
+    s = _store(tmp_path)
+    _modes(home, tidy="ask")
+    fids = _orphans(s, 2)
+    _drain_orphans(s, fids)
+    rows = _pending(s)
+    s.upsert_entity("pat-nguyen", "Pat Nguyen", "person")
+    real = s.suppress_entity
+
+    def racing_suppress(eid, reason="", *, change=None):
+        # Another tidy write lands after the approval starts, before its own.
+        s.update_entity_org("pat-nguyen", "Acme", change={
+            "change_type": "tidy_org", "source": "review_org", "summary": "race"})
+        return real(eid, reason, change=change)
+    monkeypatch.setattr(s, "suppress_entity", racing_suppress)
+    for r in rows:
+        assert auto_changes.decide(s, home, r["id"], approve=True)["ok"] is True
+    suppress_ids = [c["id"] for c in _changes(s, "tidy_suppress")]
+    assert [r["change_log_id"] for r in _pending(s)] == suppress_ids
+    assert len(_changes(s, "tidy_org")) == 2
+
+
+def test_appliers_report_their_change_ids(tmp_path):
+    from mcpbrain.review_apply import apply_orphan_verdicts
+    s = _store(tmp_path)
+    fids = _orphans(s, 2)
+    ids: list = []
+    apply_orphan_verdicts(s, [{"finding_id": f, "verdict": "suppress"} for f in fids],
+                          cap=5, change_ids=ids)
+    assert ids == [c["id"] for c in _changes(s, "tidy_suppress")]
+
+
+# --- fix round 1: one cap per pass, applied plus proposed --------------------------------
+
+def test_tidy_ask_cap_bounds_applied_plus_proposed(tmp_path, home):
+    from mcpbrain.drain import BLOCK_DRAINERS
+    s = _store(tmp_path)
+    _cfg(home, review_max_apply_per_run=3, auto_changes={"tidy": "ask"},
+         orgs=[{"name": "Acme", "domains": ["example.org"]}])
+    for name in ("Acme Pty", "Acme Ltd"):
+        s.record_finding("org_unrecognised", name, summary=f"unrecognised org {name}")
+    for i in range(2):
+        s.upsert_entity(f"sam-{i}", f"Sam {i}", "person", org="external")
+        s.record_finding("lint:ambiguous_org", f"sam-{i}", summary="ambiguous")
+    verdicts = [{"finding_id": f["id"], "verdict": "add_to_config"}
+                for f in s.open_findings("org_unrecognised")]
+    verdicts += [{"finding_id": f["id"], "verdict": "canonicalize", "canonical_org": "Acme"}
+                 for f in s.open_findings("lint:ambiguous_org")]
+    out = BLOCK_DRAINERS["review_org"](s, {"review_org": verdicts})
+    assert out["suggested"] == 2 and out["proposed"] == 1
+    assert out["suggested"] + out["proposed"] <= 3
+    assert len(_pending(s)) == 1
+
+
+# --- fix round 1: draft style off skips the bandit; text names the console setting -------
+
+def test_draft_style_off_skips_the_bandit_run(tmp_path, home, monkeypatch):
+    import mcpbrain.daemon as daemon_mod
+    from mcpbrain import threshold_bandit
+    s = _store(tmp_path)
+    _cfg(home, drift_monitor=False, lessons=False, auto_changes={"draft_style": "off"})
+    monkeypatch.setattr(daemon_mod, "app_dir", lambda: Path(home))
+    calls = []
+    monkeypatch.setattr(threshold_bandit, "init_bandit_table", lambda st: calls.append("init"))
+    monkeypatch.setattr(threshold_bandit, "advisory_report",
+                        lambda st, h: calls.append("report") or {})
+
+    class _D:
+        _store = s
+        _clock = staticmethod(lambda: 1.0)
+        def _is_due(self, *_): return True
+
+    out = daemon_mod.Daemon._run_self_improve(_D())
+    assert calls == [] and out["bandit"] == {"skipped": "off"}
+    _modes(home, draft_style="advise")
+    daemon_mod.Daemon._run_self_improve(_D())
+    assert calls == ["init", "report"]
+
+
+def test_advisory_text_points_at_the_console_setting(tmp_path, home, monkeypatch):
+    _s, report = _bandit(tmp_path, home, monkeypatch, auto_changes={"draft_style": "advise"})
+    assert "bandit_auto_apply" not in report["advisory"]
+    assert "Settings > Automatic changes > Draft style tuning" in report["advisory"]
+
+
+def test_advisory_report_off_recommends_nothing(tmp_path, home, monkeypatch):
+    _s, report = _bandit(tmp_path, home, monkeypatch, auto_changes={"draft_style": "off"})
+    assert report["auto_apply"] is False and "off" in report["advisory"]
+    assert "bandit_auto_apply" not in report["advisory"]

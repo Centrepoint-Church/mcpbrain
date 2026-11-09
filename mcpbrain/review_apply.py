@@ -12,7 +12,15 @@ from mcpbrain.resolve import _NAME_MERGEABLE_TYPES, _pick_winner, is_role_addres
 log = logging.getLogger(__name__)
 
 
-def apply_orphan_verdicts(store, verdicts: list[dict], *, cap: int) -> dict:
+def _note(change_ids: list | None, change: dict) -> None:
+    """Hand back the change_log id the store recorded for this write (set on
+    the change dict by store._log_recorded_change), when the caller asked."""
+    if change_ids is not None and change.get("change_log_id"):
+        change_ids.append(change["change_log_id"])
+
+
+def apply_orphan_verdicts(store, verdicts: list[dict], *, cap: int,
+                          change_ids: list | None = None) -> dict:
     """Apply a batch of orphan-finding verdicts.
 
     Each verdict: {"finding_id": int, "ref_id": <entity id>, "verdict":
@@ -50,9 +58,10 @@ def apply_orphan_verdicts(store, verdicts: list[dict], *, cap: int) -> dict:
             if result["suppressed"] >= cap:
                 result["capped"] += 1
                 continue
-            if store.suppress_entity(ref_id, reason=verdict.get("reason", ""), change={
-                    "change_type": "tidy_suppress", "source": "review_orphan",
-                    "summary": f"Hid orphan entity {ref_id}"}):
+            change = {"change_type": "tidy_suppress", "source": "review_orphan",
+                      "summary": f"Hid orphan entity {ref_id}"}
+            if store.suppress_entity(ref_id, reason=verdict.get("reason", ""), change=change):
+                _note(change_ids, change)
                 store.resolve_finding(finding_id, verdict="suppress")
                 result["suppressed"] += 1
             else:
@@ -69,7 +78,8 @@ def apply_orphan_verdicts(store, verdicts: list[dict], *, cap: int) -> dict:
 
 
 def apply_missing_org_verdicts(
-    store, verdicts: list[dict], *, cap: int, home: str | None = None
+    store, verdicts: list[dict], *, cap: int, home: str | None = None,
+    change_ids: list | None = None,
 ) -> dict:
     """Apply a batch of missing-org-finding verdicts.
 
@@ -114,9 +124,10 @@ def apply_missing_org_verdicts(
             if result["assigned"] >= cap:
                 result["capped"] += 1
                 continue
-            if store.update_entity_org(ref_id, org, change={
-                    "change_type": "tidy_org", "source": "review_missing_org",
-                    "summary": f"Set org of {ref_id} to {org}"}):
+            change = {"change_type": "tidy_org", "source": "review_missing_org",
+                      "summary": f"Set org of {ref_id} to {org}"}
+            if store.update_entity_org(ref_id, org, change=change):
+                _note(change_ids, change)
                 store.resolve_finding(finding_id, verdict="assign")
                 result["assigned"] += 1
             else:
@@ -133,7 +144,8 @@ def apply_missing_org_verdicts(
     return result
 
 
-def apply_ownerless_verdicts(store, verdicts: list[dict], *, cap: int) -> dict:
+def apply_ownerless_verdicts(store, verdicts: list[dict], *, cap: int,
+                             change_ids: list | None = None) -> dict:
     """Apply a batch of ownerless-action-finding verdicts.
 
     Each verdict: {"finding_id": int, "ref_id": <action id>, "verdict":
@@ -177,10 +189,12 @@ def apply_ownerless_verdicts(store, verdicts: list[dict], *, cap: int) -> dict:
             if result["owner_assigned"] >= cap:
                 result["capped"] += 1
                 continue
+            change = {"change_type": "tidy_owner", "source": "review_ownerless",
+                      "summary": f"Set owner of action {ref_id} to {owner}"}
             if store.assign_action_owner(
                     ref_id, owner, owner_entity_id=verdict.get("owner_entity_id", ""),
-                    change={"change_type": "tidy_owner", "source": "review_ownerless",
-                            "summary": f"Set owner of action {ref_id} to {owner}"}):
+                    change=change):
+                _note(change_ids, change)
                 store.resolve_finding(finding_id, verdict="owner")
                 result["owner_assigned"] += 1
             else:
@@ -201,7 +215,8 @@ def apply_ownerless_verdicts(store, verdicts: list[dict], *, cap: int) -> dict:
 
 
 def apply_org_verdicts(
-    store, verdicts: list[dict], *, cap: int, home: str | None = None
+    store, verdicts: list[dict], *, cap: int, home: str | None = None,
+    change_ids: list | None = None,
 ) -> dict:
     """Apply a batch of org-hygiene-finding verdicts, bundled across THREE
     finding kinds that have DIFFERENT `ref_id` semantics (see mcpbrain/
@@ -288,9 +303,10 @@ def apply_org_verdicts(
             if _budget_used() >= cap:
                 result["capped"] += 1
                 continue
-            if store.update_entity_org(ref_id, canonical_org, change={
-                    "change_type": "tidy_org", "source": "review_org",
-                    "summary": f"Set org of {ref_id} to {canonical_org}"}):
+            change = {"change_type": "tidy_org", "source": "review_org",
+                      "summary": f"Set org of {ref_id} to {canonical_org}"}
+            if store.update_entity_org(ref_id, canonical_org, change=change):
+                _note(change_ids, change)
                 store.resolve_finding(finding_id, verdict="canonicalize")
                 result["canonicalized"] += 1
             else:
@@ -300,10 +316,11 @@ def apply_org_verdicts(
             if _budget_used() >= cap:
                 result["capped"] += 1
                 continue
-            updated = store.rewrite_org_field(ref_id, canonical_org, change={
-                "change_type": "tidy_org_rewrite", "source": "review_org",
-                "summary": f"Relabelled org {ref_id} as {canonical_org}"})
+            change = {"change_type": "tidy_org_rewrite", "source": "review_org",
+                      "summary": f"Relabelled org {ref_id} as {canonical_org}"}
+            updated = store.rewrite_org_field(ref_id, canonical_org, change=change)
             if updated > 0:
+                _note(change_ids, change)
                 store.resolve_finding(finding_id, verdict="canonicalize")
                 result["canonicalized"] += 1
             else:
@@ -325,7 +342,8 @@ def apply_org_verdicts(
     return result
 
 
-def apply_duplicate_verdicts(store, answers: list[dict], *, cap: int) -> dict:
+def apply_duplicate_verdicts(store, answers: list[dict], *, cap: int,
+                             change_ids: list | None = None) -> dict:
     """Apply the LLM-adjudicated entity-merge answers from the merge_review
     spool block — the LIVE, unattended tier that folds a `same=true` pair
     into one entity via resolve._pick_winner + store.merge_entities. Ported
@@ -417,16 +435,17 @@ def apply_duplicate_verdicts(store, answers: list[dict], *, cap: int) -> dict:
             continue
 
         winner, loser = _pick_winner(a, b)
+        change = {"change_type": "tidy_merge", "source": "merge_review",
+                  "summary": f"Merged {loser['id']} into {winner['id']}"}
         try:
             store.merge_entities(loser["id"], winner["id"],
                                  canonical_name=ans.get("canonical") or None,
-                                 method="llm", change={
-                                     "change_type": "tidy_merge", "source": "merge_review",
-                                     "summary": f"Merged {loser['id']} into {winner['id']}"})
+                                 method="llm", change=change)
         except Exception as exc:
             log.error("review_apply: merge failed for %s <- %s: %s",
                       winner["id"], loser["id"], exc)
             continue
+        _note(change_ids, change)
         result["merged"] += 1
 
     return result

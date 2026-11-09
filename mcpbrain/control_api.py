@@ -677,10 +677,14 @@ class ControlServer:
                 if finding and finding["finding_type"] == auto_changes.FINDING_TYPE and \
                         not finding["resolved_at"] and str(finding["ref_id"]).isdigit():
                     # Same for a change held for review: dismissing declines it,
-                    # and decide() resolves this finding.
-                    if auto_changes.decide(self.store, str(self.home), int(finding["ref_id"]),
-                                           approve=False)["ok"]:
+                    # and decide() resolves this finding. On failure the finding
+                    # stays open with its row: closing it here would strand the
+                    # row, queued but with no Needs-you item.
+                    out = auto_changes.decide(self.store, str(self.home),
+                                              int(finding["ref_id"]), approve=False)
+                    if out["ok"]:
                         return h_json(h, 200, {"dismissed": True, "change": "declined"})
+                    return h_json(h, 409, {"dismissed": False, "reason": out["reason"]})
                 from mcpbrain.agent_errs import FINDING_TYPE as _AGENT_STDERR_FINDING_TYPE
                 verdict = (None if finding and finding["finding_type"] == _AGENT_STDERR_FINDING_TYPE
                            else "dismissed_by_human")

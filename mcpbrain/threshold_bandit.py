@@ -214,6 +214,17 @@ def advisory_report(store, home: str) -> dict:
     from mcpbrain import config
     try:
         current = config.recall_max_distance(home)
+        if config.auto_change_mode(home, "draft_style") == "off":
+            # Off: no recommendation, no write. The daemon skips the bandit
+            # entirely in this mode; this guard covers any other caller.
+            return {
+                "recommended_threshold": current,
+                "current_threshold": current,
+                "arms": {},
+                "has_used_signal": False,
+                "advisory": "Draft style tuning is off (Settings > Automatic changes).",
+                "auto_apply": False,
+            }
         arms = _read_arms(store)
 
         # Check whether any positive reward signal exists in feedback
@@ -254,7 +265,8 @@ def advisory_report(store, home: str) -> dict:
                 advisory = (
                     f"Bandit recommends threshold {recommended:.2f} "
                     f"(current {current:.2f}) based on reward signal. "
-                    "Set bandit_auto_apply=true in config to auto-apply."
+                    "To apply it automatically, set Settings > Automatic changes > "
+                    "Draft style tuning to Apply."
                 )
 
         # Auto-apply only when the draft_style mode is "apply" AND signal

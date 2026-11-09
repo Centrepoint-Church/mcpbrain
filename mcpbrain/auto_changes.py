@@ -119,7 +119,11 @@ def decide(store, home, pending_id: int, *, approve: bool) -> dict:
 
     Returns {"ok": bool, "reason": str}. An approval whose APPLY makes no
     change (the item changed since, a guard refused) leaves the change pending
-    with the reason, so the owner can decline it."""
+    with the reason, so the owner can decline it.
+
+    The row is claimed ('deciding') so two clicks can't both apply it. Any
+    exception after the claim puts it back to 'pending' with the error noted,
+    so a failure never strands it; a crash is repaired by recover_stale()."""
     home = str(home)
     with store._connect(write=True) as db:
         row = db.execute("SELECT * FROM pending_changes WHERE id=?",
@@ -127,30 +131,38 @@ def decide(store, home, pending_id: int, *, approve: bool) -> dict:
         if row is None:
             return {"ok": False, "reason": NOT_FOUND}
         claimed = db.execute(
-            "UPDATE pending_changes SET status=? WHERE id=? AND status=?",
-            (_DECIDING, row["id"], _PENDING)).rowcount
+            "UPDATE pending_changes SET status=?, decided_at=? WHERE id=? AND status=?",
+            (_DECIDING, _now(), row["id"], _PENDING)).rowcount
         if not claimed:
             return {"ok": False, "reason": ALREADY_DECIDED}
     row = dict(row)
     try:
+        return _decide_claimed(store, home, row, approve)
+    except Exception as exc:  # noqa: BLE001 -- never leave the row claimed
+        log.exception("auto_changes: deciding pending change %s failed", row["id"])
+        _release(store, row["id"], f"Failed: {exc}")
+        return {"ok": False, "reason": f"Failed: {exc}"}
+
+
+def _decide_claimed(store, home: str, row: dict, approve: bool) -> dict:
+    try:
         payload = json.loads(row["payload"] or "{}")
     except ValueError:
         payload = {}
-
     if not approve:
         _settle(store, row["id"], _DECLINED, None)
         _close_finding(store, row["id"], "declined")
         _on_decline(store, row["kind"], payload)
         return {"ok": True, "reason": ""}
-
     try:
         change_id = APPLY[row["kind"]](store, home, payload)
     except NotApplied as exc:
-        _settle(store, row["id"], _PENDING, None)
-        return {"ok": False, "reason": str(exc) or "Nothing to change"}
+        reason = str(exc) or "Nothing to change"
+        _release(store, row["id"], reason)
+        return {"ok": False, "reason": reason}
     except Exception as exc:  # noqa: BLE001 -- surface it, keep the review
         log.exception("auto_changes: applying pending change %s failed", row["id"])
-        _settle(store, row["id"], _PENDING, None)
+        _release(store, row["id"], f"Apply failed: {exc}")
         return {"ok": False, "reason": f"Apply failed: {exc}"}
     _settle(store, row["id"], _APPLIED, change_id or None)
     _close_finding(store, row["id"], "applied")
@@ -158,10 +170,42 @@ def decide(store, home, pending_id: int, *, approve: bool) -> dict:
 
 
 def _settle(store, pid: int, status: str, change_id) -> None:
-    decided = "" if status == _PENDING else _now()
     with store._connect(write=True) as db:
-        db.execute("UPDATE pending_changes SET status=?, decided_at=?, change_log_id=? "
-                   "WHERE id=?", (status, decided, change_id, pid))
+        db.execute("UPDATE pending_changes SET status=?, decided_at=?, change_log_id=?, "
+                   "error='' WHERE id=?", (status, _now(), change_id, pid))
+
+
+def _release(store, pid: int, error: str) -> None:
+    """Put a claimed row back in the queue with why it didn't go through.
+    Best effort: if even this write fails, recover_stale() picks it up."""
+    try:
+        with store._connect(write=True) as db:
+            db.execute("UPDATE pending_changes SET status=?, decided_at='', error=? "
+                       "WHERE id=? AND status=?", (_PENDING, error[:500], pid, _DECIDING))
+    except Exception:  # noqa: BLE001
+        log.exception("auto_changes: could not release pending change %s", pid)
+
+
+def recover_stale(store, *, claimed_before: str | None = None,
+                  older_than_s: float | None = None) -> int:
+    """Return rows stuck in 'deciding' (a crash between claim and settle) to
+    'pending'. Only rows claimed before `claimed_before` (an ISO UTC stamp, as
+    _now() writes) or more than `older_than_s` seconds ago are touched, so a
+    decision in flight right now is left alone; with neither, every such row.
+    The daemon calls this at startup with its own start time. Returns the count."""
+    if older_than_s is not None:
+        cutoff = datetime.fromtimestamp(
+            datetime.now(timezone.utc).timestamp() - older_than_s, timezone.utc
+        ).strftime("%Y-%m-%dT%H:%M:%SZ")
+        claimed_before = min(claimed_before, cutoff) if claimed_before else cutoff
+    sql = ("UPDATE pending_changes SET status=?, decided_at='', "
+           "error='Interrupted before it finished; try again' WHERE status=?")
+    params: list = [_PENDING, _DECIDING]
+    if claimed_before is not None:
+        sql += " AND (COALESCE(decided_at,'')='' OR decided_at < ?)"
+        params.append(claimed_before)
+    with store._connect(write=True) as db:
+        return db.execute(sql, params).rowcount
 
 
 def _on_decline(store, kind: str, payload: dict) -> None:
@@ -264,21 +308,31 @@ def _apply_draft_style(store, home, payload) -> int:
 # holds one verdict and the block it came from.
 
 def _appliers() -> dict[str, Callable]:
+    """block -> applier(store, verdicts, cap, home, change_ids=None). change_ids,
+    when given, receives the change_log id of every change the applier made."""
     from mcpbrain import org_curate, review_apply
+
+    def _ids(change_ids):
+        return {} if change_ids is None else {"change_ids": change_ids}
     return {
-        "review_orphan": lambda s, v, cap, home: review_apply.apply_orphan_verdicts(
-            s, v, cap=cap),
-        "review_missing_org": lambda s, v, cap, home: review_apply.apply_missing_org_verdicts(
-            s, v, cap=cap, home=home),
-        "review_ownerless": lambda s, v, cap, home: review_apply.apply_ownerless_verdicts(
-            s, v, cap=cap),
-        "review_org": lambda s, v, cap, home: review_apply.apply_org_verdicts(
-            s, v, cap=cap, home=home),
-        "merge_answers": lambda s, v, cap, home: review_apply.apply_duplicate_verdicts(
-            s, v, cap=cap),
-        "org_merge_review": lambda s, v, cap, home: org_curate.apply_org_merge_answers(
-            s, v, cap=cap),
+        "review_orphan": lambda s, v, cap, home, ids=None: review_apply.apply_orphan_verdicts(
+            s, v, cap=cap, **_ids(ids)),
+        "review_missing_org": lambda s, v, cap, home, ids=None:
+            review_apply.apply_missing_org_verdicts(s, v, cap=cap, home=home, **_ids(ids)),
+        "review_ownerless": lambda s, v, cap, home, ids=None:
+            review_apply.apply_ownerless_verdicts(s, v, cap=cap, **_ids(ids)),
+        "review_org": lambda s, v, cap, home, ids=None: review_apply.apply_org_verdicts(
+            s, v, cap=cap, home=home, **_ids(ids)),
+        "merge_answers": lambda s, v, cap, home, ids=None:
+            review_apply.apply_duplicate_verdicts(s, v, cap=cap, **_ids(ids)),
+        "org_merge_review": lambda s, v, cap, home, ids=None:
+            org_curate.apply_org_merge_answers(s, v, cap=cap, **_ids(ids)),
     }
+
+
+# The applier result keys that count a write against the per-run cap.
+_SPENT_KEYS = ("suppressed", "assigned", "owner_assigned", "canonicalized", "suggested",
+               "merged")
 
 
 TIDY_BLOCKS = ("review_orphan", "review_missing_org", "review_ownerless", "review_org",
@@ -339,7 +393,8 @@ def run_tidy(store, home, block: str, items: list, *, cap: int) -> dict:
     verdict that would change the graph becomes one pending row (at most `cap`
     per call, the same review_max_apply_per_run cap apply mode uses); the
     others go through the applier as usual. Returns the applier's counts, plus
-    "proposed" and "capped" in ask mode."""
+    "proposed" and "capped" in ask mode. In ask mode `cap` bounds the writes
+    the pass-through verdicts make plus the proposals queued, together."""
     home = str(home)
     mode = config.auto_change_mode(home, "tidy")
     applier = _appliers()[block]
@@ -352,12 +407,13 @@ def run_tidy(store, home, block: str, items: list, *, cap: int) -> dict:
     queue = [v for v in items if isinstance(v, dict) and _changes_graph(block, v)]
     rest = [v for v in items if not (isinstance(v, dict) and _changes_graph(block, v))]
     out = dict(applier(store, rest, cap, home))
+    spent = sum(int(out.get(k) or 0) for k in _SPENT_KEYS)
     proposed = capped = 0
     for v in queue:
         ts = _tidy_target_and_summary(store, block, v)
         if ts is None:
             continue
-        if proposed >= cap:
+        if spent + proposed >= cap:
             capped += 1
             continue
         propose(store, "tidy", ts[0], ts[1], {"block": block, "verdict": v})
@@ -372,16 +428,13 @@ def _apply_tidy(store, home, payload) -> int:
     appliers = _appliers()
     if block not in appliers or not isinstance(verdict, dict):
         raise NotApplied("This change can't be applied")
-    with store._connect() as db:
-        before = db.execute("SELECT COALESCE(MAX(id), 0) FROM change_log").fetchone()[0]
-    appliers[block](store, [verdict], 1, home)
-    with store._connect() as db:
-        row = db.execute(
-            "SELECT id FROM change_log WHERE id>? AND change_type LIKE 'tidy\\_%' ESCAPE '\\' "
-            "ORDER BY id LIMIT 1", (before,)).fetchone()
-    if row is None:
+    # The store hands back the id of the row this write recorded; no guessing
+    # by order, which a concurrent tidy write could break.
+    change_ids: list[int] = []
+    appliers[block](store, [verdict], 1, home, change_ids)
+    if not change_ids:
         raise NotApplied("This no longer applies")
-    return row["id"]
+    return change_ids[0]
 
 
 APPLY: dict[str, Callable] = {
