@@ -150,7 +150,7 @@ def test_pending_lists_entity_names(api, store):
 
 
 def test_corrections_card_renders_names_with_textcontent_only():
-    start = DASH.index("function renderCorrections")
+    start = DASH.index("function correctionTitle")
     end = DASH.index("function connectionItem", start)
     snippet = DASH[start:end]
     assert "c.names" in snippet and "innerHTML" not in snippet

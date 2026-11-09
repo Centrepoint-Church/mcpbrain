@@ -138,11 +138,14 @@ def test_stats_meetings_is_the_fourth_source(tmp_path):
 
 
 def test_stats_source_stale_flag(tmp_path):
+    import json
+    # Meetings (anarlog) is opt-in; a switched-off source is never stale.
+    (tmp_path / "config.json").write_text(json.dumps({"anarlog": {"enabled": True}}))
     p = tmp_path / "b.sqlite3"
     _seed(p)
     _fresh_cursors(p, hours_ago=7.5)
     out = dashboard.stats(_Store(p), str(tmp_path), _status())
-    assert all(s["stale"] is True for s in out["sources"])
+    assert all(s["stale"] is True and s["enabled"] is True for s in out["sources"])
     q = tmp_path / "c.sqlite3"
     _seed(q)
     out = dashboard.stats(_Store(q), str(tmp_path), _status())  # never synced

@@ -138,7 +138,14 @@ def test_built_wheel_ships_console_assets():
 
 def test_page_makes_no_network_calls_and_has_no_colour_literals():
     assert "fonts.googleapis" not in DASH
-    assert not re.search(r"https?://", DASH)
+    # Nothing the page loads comes from the network: no remote script, link,
+    # img or url(). The one remote address allowed is a navigation anchor to
+    # Drive ("Open in Drive" for a skipped file), opened in a new tab.
+    assert not re.search(r"<(script|img)[^>]*\bsrc=[\"']?(https?:)?//", DASH, re.I)
+    assert not re.search(r"<link[^>]*\bhref=[\"']?(https?:)?//", DASH, re.I)
+    assert not re.search(r"url\(\s*[\"']?(https?:)?//", DASH, re.I)
+    for m in re.finditer(r"https?://[^\s\"'`]*", DASH):
+        assert m.group(0).startswith("https://drive.google.com/"), m.group(0)
     assert not re.search(r"#[0-9a-fA-F]{3,6}\b", DASH)
     assert "oklch(" not in DASH
     assert "/static/console.css" in DASH and "/static/console.js" in DASH
@@ -194,3 +201,37 @@ def test_theme_keys_and_api_contract():
     for key in ("mcpbrain-mode", "mcpbrain-accent", "window.mcpConsole",
                 "applyTheme", "relTime", "api"):
         assert key in js
+
+
+def test_open_in_drive_is_a_new_tab_anchor():
+    assert 'const DRIVE_OPEN = "https://drive.google.com/open?id="' in DASH
+    assert 'target: "_blank", rel: "noopener"' in DASH
+
+
+def test_monospace_only_for_measured_values():
+    """Placeholders and prose stay in the body face; .measured is for times,
+    counts, versions and ids."""
+    assert not re.search(r'class="[^"]*\bmeasured\b[^"]*"[^>]*>\s*(not yet|none yet|never|unknown)',
+                         DASH)
+    css = (WIZARD / "console.css").read_text(encoding="utf-8")
+    rule = re.search(r"details\.more > summary::after \{[^}]*\}", css).group(0)
+    assert "font-outlier" not in rule
+
+
+def test_stale_cell_is_status_red():
+    """.measured sets a colour, so the stale tone needs its own measured
+    modifier declared after it (a generic .said--bad earlier would lose)."""
+    css = (WIZARD / "console.css").read_text(encoding="utf-8")
+    assert css.index(".measured--bad {") > css.index(".measured {")
+    assert "var(--color-bad)" in re.search(r"\.measured--bad \{[^}]*\}", css).group(0)
+    assert "measured--bad" in DASH
+
+
+def test_sources_use_the_enabled_flag_and_keep_row_results():
+    assert "s.enabled" in DASH
+    assert "sourcesActedAt" in DASH and "renderSources(force)" in DASH
+
+
+def test_restoring_is_said_in_words():
+    js = (WIZARD / "console.js").read_text(encoding="utf-8")
+    assert "mcpbrain is restoring a backup, try again in a moment." in js

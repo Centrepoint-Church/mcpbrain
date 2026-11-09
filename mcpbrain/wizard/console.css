@@ -197,6 +197,7 @@ button, input, select, textarea { font: inherit; }
 /* ---------- measured values ---------- */
 .measured { font-family: var(--font-outlier); font-size: var(--text-sm); font-variant-numeric: tabular-nums slashed-zero; color: var(--color-ink); }
 .measured--cool { color: var(--color-cool); }
+.measured--bad { color: var(--color-bad); }
 .reading { font-family: var(--font-outlier); font-weight: 400; font-size: clamp(2.6rem, 5vw, 3.6rem); letter-spacing: -0.04em; line-height: 1; color: var(--color-ink); font-variant-numeric: tabular-nums slashed-zero; }
 .meter { height: 6px; border-radius: 3px; background: var(--color-rule); overflow: hidden; margin-top: var(--space-xs); }
 .meter > span { display: block; height: 100%; width: 100%; background: var(--color-cool); transform-origin: left; transform: scaleX(var(--v, 0)); transition: transform var(--dur-long) var(--ease-out); }
@@ -244,7 +245,7 @@ button, input, select, textarea { font: inherit; }
 .items form { grid-column: 1 / -1; display: flex; gap: var(--space-xs); flex-wrap: wrap; }
 details.more > summary { cursor: pointer; list-style: none; display: inline-flex; align-items: center; gap: var(--space-xs); min-height: 32px; padding: 0; border: 0; background: transparent; color: var(--color-ink-2); font-size: var(--text-sm); font-weight: 500; text-decoration: underline; text-decoration-color: var(--color-rule-2); text-underline-offset: 0.2em; transition: color var(--dur-short) var(--ease-out); }
 details.more > summary::-webkit-details-marker { display: none; }
-details.more > summary::after { content: "+"; font-family: var(--font-outlier); color: var(--color-muted); text-decoration: none; }
+details.more > summary::after { content: "+"; font-family: var(--font-body); color: var(--color-muted); text-decoration: none; }
 details.more[open] > summary::after { content: "\2212"; }
 details.more > summary:hover { color: var(--color-accent-text); }
 details.more > summary:active { color: var(--color-ink); }

@@ -105,6 +105,9 @@
         try { data = text ? JSON.parse(text) : null; } catch (e) { data = {error: text}; }
         if (res.ok) return data;
         var msg = (data && (data.reason || data.error)) || ("Request failed (" + res.status + ")");
+        // A restored snapshot is being swapped in: every route answers 503.
+        if (res.status === 503 && data && data.error === "restoring")
+          msg = "mcpbrain is restoring a backup, try again in a moment.";
         var err = new Error(msg);
         err.status = res.status;
         err.data = data;

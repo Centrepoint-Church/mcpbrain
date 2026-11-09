@@ -328,10 +328,19 @@ def stats(store, home, status: dict, *, now: datetime | None = None) -> dict:
     sources = []
     for key in SOURCE_KEYS:
         bf = backfill.get(key) or {}
+        # A source switched off keeps its last cursor: it is listed (enabled
+        # False) but never stale, and never counts toward "stalled".
+        try:
+            from mcpbrain import config as _config  # noqa: PLC0415
+            enabled = bool(_config.source_enabled(str(home), key))
+        except Exception as exc:  # noqa: BLE001 — an unreadable config must not blank stats
+            log.warning("stats: source_enabled(%s) failed: %s", key, exc)
+            enabled = True
         entry = {
             "name": key, "label": _SOURCE_LABELS[key],
+            "enabled": enabled,
             "last_synced_at": times[key],
-            "stale": _is_stale(times[key], now),
+            "stale": enabled and _is_stale(times[key], now),
             # Meetings has no backfill: it reads the local database in full.
             "history": {"done": True if key == "anarlog" else bool(bf.get("done")),
                         "reached": bf.get("reached")},
@@ -364,7 +373,8 @@ def stats(store, home, status: dict, *, now: datetime | None = None) -> dict:
         now=now, paused=paused, stalled=status.get("stalled"),
         watchdog_limit_reached=bool(status.get("watchdog_limit_reached")),
         connections=connections, open_findings=open_findings,
-        pending_reviews=reviews, sources=sources, waiting=idx["waiting"],
+        pending_reviews=reviews, sources=[x for x in sources if x["enabled"]],
+        waiting=idx["waiting"],
         last_push_at=activity["last_push_at"])
 
     reflow = status.get("reflow")

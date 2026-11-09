@@ -23,7 +23,7 @@
     </nav>
     <div class="bar__end">
       <span class="chip chip--quiet" id="health-chip" role="status">Checking</span>
-      <span class="asof">Updated <span class="measured measured--cool" id="asof">not yet</span></span>
+      <span class="asof">Updated <span id="asof">not yet</span></span>
       <button class="btn btn--sm" type="button" id="refresh">Refresh</button>
       <button class="btn btn--sm mode" type="button" data-mode-toggle aria-label="Switch between light and dark mode">
         <svg class="sun" viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="12" r="4"/><path d="M12 2v2M12 20v2M4.93 4.93l1.41 1.41M17.66 17.66l1.41 1.41M2 12h2M20 12h2M4.93 19.07l1.41-1.41M17.66 6.34l1.41-1.41"/></svg>
@@ -81,9 +81,9 @@
       </div>
       <div class="note statusline">
         <dl>
-          <div><dt>Email synced</dt><dd class="measured measured--cool" id="st-email">not yet</dd></div>
-          <div><dt>Last enrichment</dt><dd class="measured measured--cool" id="st-enrich">not yet</dd></div>
-          <div><dt>Backup</dt><dd class="measured measured--cool" id="st-backup">not yet</dd></div>
+          <div><dt>Email synced</dt><dd id="st-email">not yet</dd></div>
+          <div><dt>Last enrichment</dt><dd id="st-enrich">not yet</dd></div>
+          <div><dt>Backup</dt><dd id="st-backup">not yet</dd></div>
         </dl>
         <div class="acts">
           <button class="btn" type="button" id="sync-all">Sync now</button>
@@ -113,7 +113,7 @@
     <div class="note">
       <div class="pager">
         <button class="btn btn--sm" type="button" id="chunks-prev">Previous</button>
-        <span id="chunks-page" class="measured"></span>
+        <span id="chunks-page"></span>
         <button class="btn btn--sm" type="button" id="chunks-next">Next</button>
       </div>
       <button class="btn" type="button" id="chunks-act" disabled>Act on selected</button>
@@ -212,6 +212,17 @@ function el(tag, attrs, ...kids){
 }
 function fill(node, ...kids){ node.replaceChildren(...kids.flat().filter(k => k != null && k !== false)); }
 function setText(id, text){ const n = $(id); if (n) n.textContent = text; }
+/* Monospace is for measured values only: a time, count, version or id. A
+   placeholder or a sentence ("not yet", "never") stays in the body face.
+   tone: "cool" (default) colours it as measured, "plain" keeps ink. */
+function val(id, text, tone){
+  const n = $(id);
+  if (!n) return;
+  n.textContent = text;
+  const m = /\d/.test(text);
+  n.classList.toggle("measured", m);
+  n.classList.toggle("measured--cool", m && tone !== "plain");
+}
 function said(node, text, kind){
   node.textContent = text || "";
   node.classList.remove("said--ok", "said--bad");
@@ -283,7 +294,7 @@ function renderReading(){
   setText("r-waiting", fmt(idx.waiting));
   setText("r-units", fmt(en.units_pending));
   setText("r-pushes", fmt(en.pushes_24h));
-  setText("r-last", en.last_push_at ? C.relTime(en.last_push_at) : "none yet");
+  val("r-last", en.last_push_at ? C.relTime(en.last_push_at) : "none yet");
   setText("r-total", fmt(idx.total));
   setText("r-eligible", fmt(idx.eligible));
   setText("r-skipped", fmt(idx.cold) + " low-signal kept out" + (idx.duplicate ? ", " + plural(idx.duplicate, "duplicate") + " counted once" : ""));
@@ -315,10 +326,10 @@ function disableRow(li){ li.querySelectorAll(".acts button").forEach(b => { b.di
 function findingItem(f, primary){
   const since = f.detected_at ? ", latest " + C.relTime(f.detected_at) : "";
   const sub = (f.count > 1 ? "Reported " + plural(f.count, "time") : "Reported once") + since
-    + (f.severity && f.severity !== "info" ? ", " + f.severity : "");
+    + (SEVERE.has(f.severity) ? ", marked as an error" : "");
   const log = f.detail ? el("details", {class: "more"}, el("summary", {text: "Show the log"}),
     el("pre", {class: "log", text: f.detail})) : null;
-  return decisionRow(f.summary || f.finding_type, sub, (out, li) => [
+  return decisionRow(f.summary || "A background check found a problem", sub, (out, li) => [
     el("button", {class: "btn", type: "button", text: "Dismiss",
       onclick: (ev) => dismissFinding(ev.currentTarget, out, li, f)}),
     el("button", {class: primary ? "btn btn--primary" : "btn", type: "button", text: "Mark fixed",
@@ -347,7 +358,7 @@ async function dismissFinding(btn, out, li, f){
 }
 
 function pendingItem(p, primary){
-  const kind = KIND_LABEL[p.kind] || p.kind;
+  const kind = KIND_LABEL[p.kind] || "Automatic change";
   const sub = kind + ", proposed " + C.relTime(p.created_at)
     + (p.kind === "consolidation" ? ". Memory consolidation waits until you decide this one." : "");
   return decisionRow(p.summary || kind, sub, (out, li) => ["apply", "decline"].map((verb, i) =>
@@ -360,11 +371,22 @@ function pendingItem(p, primary){
       })})));
 }
 
+// Error-level findings say so; the rest need no severity word.
+const SEVERE = new Set(["critical", "error"]);
+
+/* A correction's summary names entities by id: put their names in. */
+function correctionTitle(c){
+  let t = c.summary || "A graph correction";
+  const names = c.names || {};
+  for (const id of Object.keys(names).sort((a, b) => b.length - a.length))
+    t = t.split(id).join(names[id]);
+  return t;
+}
+
 function renderCorrections(list, primary){
   return list.map((c, i) => {
-    const names = Object.values(c.names || {}).join(", ");
-    const sub = "Graph correction" + (names ? " for " + names : "") + (c.reason ? ". " + c.reason : "");
-    return decisionRow(c.summary || c.op, sub, (out, li) => ["apply", "decline"].map((verb, j) =>
+    const sub = "Graph correction" + (c.reason ? ". " + c.reason : "");
+    return decisionRow(correctionTitle(c), sub, (out, li) => ["apply", "decline"].map((verb, j) =>
       el("button", {class: primary && i === 0 && j === 0 ? "btn btn--primary" : "btn", type: "button",
         text: verb === "apply" ? "Apply" : "Decline",
         onclick: (ev) => act(ev.currentTarget, out, async () => {
@@ -439,10 +461,11 @@ async function loadNeeds(force){
 
 function renderStatusLine(){
   const gmail = data.sources.find(s => s.name === "gmail");
-  setText("st-email", gmail && gmail.last_synced_at ? C.relTime(gmail.last_synced_at) : "not yet");
-  setText("st-enrich", data.enrich.last_push_at ? C.relTime(data.enrich.last_push_at) : "none yet");
+  val("st-email", gmail && gmail.last_synced_at ? C.relTime(gmail.last_synced_at) : "not yet");
+  val("st-enrich", data.enrich.last_push_at ? C.relTime(data.enrich.last_push_at) : "none yet");
   const backup = (data.connections || []).find(c => c.name === "backup");
-  setText("st-backup", backup ? (backup.detail || String(backup.state).replace(/_/g, " ")) : "not set up");
+  // The connection detail is a sentence from the server: body face.
+  setText("st-backup", backup ? (backup.detail || (backup.state === "ok" ? "running" : "needs attention")) : "not set up");
   const b = $("pause");
   b.textContent = data.system.paused ? "Resume" : "Pause";
 }
@@ -513,11 +536,15 @@ function circleTitle(c){
 }
 // ingest_skip summaries read "<kind>: <detail>"; say it in words.
 const SKIP_WHY = {unsupported_mime: "a file type mcpbrain can't read",
+  drive_unsupported_mime: "file types mcpbrain can't read", drive_extraction_empty: "no text could be read",
+  attachment_unsupported: "an attachment type mcpbrain can't read",
+  attachment_fetch_failed: "the attachment couldn't be downloaded",
+  attachment_empty: "no text could be read from the attachment",
   extraction_empty: "no text could be read from it", gmail_excluded: "excluded by your keep-out rules"};
 function skipText(summary){
   const m = /^([a-z_]+)(?::\s*([\s\S]*))?$/.exec(summary);
   if (!m) return summary;
-  const why = SKIP_WHY[m[1]] || m[1].replace(/_/g, " ");
+  const why = SKIP_WHY[m[1]] || "it couldn't be indexed";
   return m[2] ? "Skipped " + m[2] + ", " + why : "Skipped, " + why;
 }
 function rowText(c){
@@ -570,6 +597,16 @@ function renameForm(c, nameNode, out){
   return form;
 }
 
+// A skip recorded per Drive file carries the file id as ref_id (aggregated
+// rows carry "drive" or "drive:<id>", Gmail rows a message id).
+const DRIVE_OPEN = "https://drive.google.com/open?id=";
+function driveFileId(c){
+  if (c.change_type !== "ingest_skip") return "";
+  const kind = (/^([a-z_]+)/.exec(c.summary || "") || [])[1];
+  if (kind !== "unsupported_mime" && kind !== "extraction_empty") return "";
+  return /^[A-Za-z0-9_-]{10,}$/.test(c.ref_id || "") && !/^drive/.test(c.ref_id) ? c.ref_id : "";
+}
+
 /* Actions for one change: open it, Undo, and the type's own actions. */
 function rowActions(c, nameNode, out){
   const acts = [];
@@ -578,6 +615,9 @@ function rowActions(c, nameNode, out){
   if (c.change_type === "profile_updated" && c.ref_id)
     acts.push(el("a", {class: "linkbtn", href: "/graph?entity=" + encodeURIComponent(c.ref_id), text: "Merge with someone"}));
   let form = null;
+  const fid = driveFileId(c);
+  if (fid) acts.push(el("a", {class: "linkbtn", href: DRIVE_OPEN + encodeURIComponent(fid),
+    target: "_blank", rel: "noopener", text: "Open in Drive"}));
   if (c.change_type === "community_titled" && c.ref_id && !c.undone) {
     form = renameForm(c, nameNode, out);
     acts.push(el("button", {class: "linkbtn", type: "button", text: "Rename",
@@ -721,6 +761,12 @@ const CHUNKS = {
     done: () => "Queued for the next re-chunking pass. It isn't done yet."},
 };
 const PAGE_SIZE = 50;
+// The list endpoints give short reason codes; most are already words.
+const REASON = {bulk: "bulk mail", other: "kept out by an earlier rule", queued: "in the queue",
+  prioritised: "queued first", "re-included": "included by you", "reflow gave up": "re-chunking gave up",
+  promotions: "Gmail promotions", social: "Gmail social", forums: "Gmail forums",
+  table: "a table", transcript: "a transcript", summary: "a summary", draft: "a draft"};
+function reasonText(r){ return REASON[r] || r || ""; }
 let chunkKind = null, chunkPage = 1;
 
 function selectedChunks(){
@@ -757,7 +803,7 @@ async function openChunks(kind, page){
       el("td", {}, el("strong", {text: i.title || i.doc_id})),
       el("td", {text: i.source || ""}),
       el("td", {class: "measured", text: String(i.date || "").slice(0, 10)}),
-      el("td", {text: i.reason || ""}))) : el("tr", {}, el("td", {colspan: 5, class: "muted", text: "Nothing here."})));
+      el("td", {text: reasonText(i.reason)}))) : el("tr", {}, el("td", {colspan: 5, class: "muted", text: "Nothing here."})));
   } catch (e) {
     setText("chunks-page", "");
     fill($("chunks-body"), el("tr", {}, el("td", {colspan: 5}, el("span", {class: "said said--bad", text: "Could not load the list. " + errText(e)}))));
@@ -799,7 +845,9 @@ function renderGraph(){
 
 // ---- sources and system --------------------------------------------------
 
-function sourceOn(name){
+function sourceOn(s){
+  if (typeof s.enabled === "boolean") return s.enabled;
+  const name = s.name;
   if (!settings) return true;
   if (name === "anarlog") return !!(settings.anarlog && settings.anarlog.enabled);
   return !settings.sources || settings.sources[name] !== false;
@@ -810,9 +858,14 @@ function historyText(s){
   if (h.done) return h.reached ? "Full, from " + monthYear(h.reached) : "Full history";
   return h.reached ? "Backfilling, reached " + monthYear(h.reached) : "Backfilling";
 }
-function renderSources(){
+let sourcesActedAt = 0;   // a per-row result stays readable for a while
+function renderSources(force){
+  const box = $("sources");
+  // Leave the table alone while the owner is in it or just acted in it.
+  if (!force && box.getAttribute("aria-busy") === "false"
+      && (box.contains(document.activeElement) || Date.now() - sourcesActedAt < 30000)) return;
   fill($("src-body"), data.sources.map(s => {
-    const on = sourceOn(s.name);
+    const on = sourceOn(s);
     const out = el("span", {class: "said", role: "status", hidden: true});
     const last = s.last_synced_at ? C.relTime(s.last_synced_at) : "never";
     const shared = s.shared && s.shared.total
@@ -822,6 +875,7 @@ function renderSources(){
       title: on ? null : "Switched off in Settings", "aria-label": "Sync " + s.label,
       onclick: (ev) => {
         const b = ev.currentTarget;
+        sourcesActedAt = Date.now();
         act(b, out, async () => {
           try { await api("/api/sync-now", {method: "POST", body: {source: s.name}}); }
           catch (e) { if (e.status === 409) throw new Error(s.label + " is switched off in Settings."); throw e; }
@@ -832,7 +886,7 @@ function renderSources(){
     return el("tr", {},
       el("td", {}, el("strong", {text: s.label}), on ? null : el("span", {class: "muted small", text: " switched off"}), shared),
       el("td", {text: historyText(s)}),
-      el("td", {class: s.stale ? "measured nowrap said--bad" : "measured nowrap measured--cool",
+      el("td", {class: !s.last_synced_at ? "nowrap" : s.stale ? "measured nowrap measured--bad" : "measured nowrap measured--cool",
         text: s.stale ? last + ", behind" : last}),
       el("td", {}, btn, out));
   }));
@@ -869,7 +923,7 @@ function reflowChunksText(r){
 
 function renderSystem(){
   const system = data.system;
-  setText("sys-version", system.version || "unknown");
+  val("sys-version", system.version || "unknown", "plain");
   setText("sys-watchdog", fmt(system.watchdog_exits));
   // Re-chunking shows only while it runs, is blocked or has halted.
   const row = $("sys-reflow-row");
@@ -888,7 +942,7 @@ $("sys-gaveup").addEventListener("click", () => openChunks("gaveup"));
 
 // ---- refresh -------------------------------------------------------------
 
-async function loadStats(){
+async function loadStats(force){
   try {
     data = await api("/api/dashboard/stats");
   } catch (e) {
@@ -903,11 +957,11 @@ async function loadStats(){
   said($("reading-err"), "");
   said($("graph-err"), "");
   renderChip(data.health.state, data.health.reasons);
-  setText("asof", C.time(data.as_of));
+  val("asof", C.time(data.as_of));
   renderReading();
   renderStatusLine();
   renderGraph();
-  renderSources();
+  renderSources(force);
   renderSystem();
   return true;
 }
@@ -918,7 +972,7 @@ async function refresh(force){
     catch (e) { /* the Mac's own zone until the config loads */ }
   }
   try { settings = await api("/api/settings"); } catch (e) { /* keep the last switches */ }
-  await loadStats();
+  await loadStats(force);
   await Promise.all([loadNeeds(force), loadChanges(force)]);
 }
 

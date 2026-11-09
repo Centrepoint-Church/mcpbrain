@@ -261,3 +261,41 @@ def test_graph_counts_entities_without_type_column_are_unknown():
     db.execute("CREATE TABLE entities(id INTEGER PRIMARY KEY)")
     db.execute("INSERT INTO entities DEFAULT VALUES")
     assert cs.graph_counts(db)["by_type"]["unknown"] == 1
+
+
+def test_switched_off_source_is_never_stale_or_stalled(tmp_path):
+    """A source switched off in Settings keeps its old cursor: it must not turn
+    the console red. It is still listed, with enabled False."""
+    import json
+    (tmp_path / "config.json").write_text(json.dumps(
+        {"sources": {"calendar": False}, "anarlog": {"enabled": False}}))
+    p = tmp_path / "b.sqlite3"
+    old = (NOW - timedelta(hours=9)).strftime("%Y-%m-%dT%H:%M:%SZ")
+    fresh = (NOW - timedelta(minutes=5)).strftime("%Y-%m-%dT%H:%M:%SZ")
+    with sqlite3.connect(str(p)) as db:
+        db.execute("CREATE TABLE sync_cursors(source TEXT PRIMARY KEY, cursor TEXT, updated_at TEXT)")
+        db.executemany("INSERT INTO sync_cursors VALUES (?,?,?)",
+                       [("gmail", "x", fresh), ("drive", "x", fresh),
+                        ("calendar", "x", old), ("anarlog", "x", old)])
+
+    class S:
+        _path = str(p)
+
+        def list_communities(self):
+            return []
+
+        def pending_corrections(self):
+            return []
+
+    out = cs.stats(S(), str(tmp_path), {}, now=NOW)
+    by = {s["name"]: s for s in out["sources"]}
+    assert by["calendar"]["enabled"] is False and by["calendar"]["stale"] is False
+    assert by["anarlog"]["enabled"] is False and by["anarlog"]["stale"] is False
+    assert by["gmail"]["enabled"] is True
+    assert out["health"]["state"] != "stalled"
+
+    # Switched back on, the same old cursor is stalled again.
+    (tmp_path / "config.json").write_text(json.dumps({"sources": {"calendar": True}}))
+    out = cs.stats(S(), str(tmp_path), {}, now=NOW)
+    assert {s["name"]: s for s in out["sources"]}["calendar"]["stale"] is True
+    assert out["health"]["state"] == "stalled"
