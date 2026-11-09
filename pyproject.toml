@@ -1,6 +1,6 @@
 [project]
 name = "mcpbrain"
-version = "0.7.145"
+version = "0.7.146"
 requires-python = ">=3.12"
 dependencies = [
   "sqlite-vec>=0.1.6",
@@ -15,7 +15,12 @@ dependencies = [
                            # low-level server does no validation of its own (1.x's
                            # call_tool(validate_input=True) default did).
   "numpy>=1.26",
-  "nameparser>=1.1",       # HumanName title-stripping in graph_write.strip_title
+  "nameparser>=1.1,<2",    # HumanName title-stripping in graph_write.strip_title.
+                           # The <2 ceiling is deliberate: 3.0 rewrote the package
+                           # and removed HumanName, so graph_write fails at import
+                           # and nothing starts. An unbounded range let the daily
+                           # fleet re-resolve pick 3.0.1 on 2026-11-09 (0.7.145).
+                           # tests/test_nameparser_pin.py guards the range.
   "dateparser>=1.4",       # date inference in graph_write._infer_deadline
   # Binary content extractors for Drive sync
   "pymupdf>=1.27,<1.29",   # PDF text extraction (imported as `pymupdf`). Bounded

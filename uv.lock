@@ -797,7 +797,7 @@ wheels = [
 
 [[package]]
 name = "mcpbrain"
-version = "0.7.145"
+version = "0.7.146"
 source = { editable = "." }
 dependencies = [
     { name = "cryptography" },
@@ -859,7 +859,7 @@ requires-dist = [
     { name = "jsonschema", specifier = ">=4.20" },
     { name = "leidenalg", specifier = ">=0.10" },
     { name = "mcp", specifier = ">=2.0,<3" },
-    { name = "nameparser", specifier = ">=1.1" },
+    { name = "nameparser", specifier = ">=1.1,<2" },
     { name = "networkx", specifier = ">=3" },
     { name = "numpy", specifier = ">=1.26" },
     { name = "openpyxl", specifier = ">=3.1" },
