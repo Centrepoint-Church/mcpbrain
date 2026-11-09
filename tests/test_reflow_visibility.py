@@ -73,7 +73,7 @@ def test_dashboard_stats_passes_through_reflow_block(tmp_path):
         "backfill": {}, "connections": {}, "reflow": {"queued": 3},
     }
     out = dashboard.stats(_Store(), str(tmp_path), status)
-    assert out["reflow"] == {"queued": 3}
+    assert out["system"]["reflow"] == {"queued": 3}
 
 
 # -- bin/reflow.py: `status` must never write, and must never create the ----

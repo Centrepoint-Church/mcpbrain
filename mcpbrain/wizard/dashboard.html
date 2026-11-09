@@ -199,10 +199,11 @@
       </div>
       <div class="flow-v" aria-hidden="true"></div>
       <div class="stage">
-        <div class="eyebrow">Enriched</div>
+        <div class="eyebrow">In the graph</div>
         <div class="stat-num" id="s-enriched">0</div>
         <div class="meter"><span id="meter-fill"></span></div>
         <div class="meter-label" id="meter-label">0% digested into the graph</div>
+        <div class="stat-sub" id="meter-sub">0 waiting, 0 queued for Claude</div>
       </div>
     </div>
     <div class="flow-h" aria-hidden="true"><div class="line"></div><span class="head"></span></div>
@@ -211,7 +212,7 @@
       <div class="graph-inner">
         <div class="eyebrow">Knowledge graph</div>
         <div class="stat-num" id="s-entities">0</div>
-        <div class="stat-sub">entities mapped</div>
+        <div class="stat-sub">people, organisations, projects, topics and meetings</div>
         <button class="explore" onclick="location.href='/graph'">Explore graph →</button>
       </div>
     </div>
@@ -225,8 +226,8 @@
       <div class="stat-num" id="s-observations">0</div><div class="stat-sub">time-stamped facts</div></div>
     <div class="tile"><div class="eyebrow">Circles</div>
       <div class="stat-num" id="s-communities">0</div><div class="stat-sub">detected communities</div></div>
-    <div class="tile"><div class="eyebrow">Links / entity</div>
-      <div class="stat-num" id="s-density">0</div><div class="stat-sub">graph density</div></div>
+    <div class="tile"><div class="eyebrow">Unlinked</div>
+      <div class="stat-num" id="s-unlinked">0</div><div class="stat-sub">entities with no links</div></div>
   </section>
 
   <!-- detail cards -->
@@ -243,7 +244,8 @@
       <h2>Daemon</h2>
       <div class="kv"><span class="k">Version</span><span class="v" id="d-version">—</span></div>
       <div class="kv"><span class="k">State</span><span class="v" id="d-state">—</span></div>
-      <div class="kv"><span class="k">Enrichment</span><span class="v" id="d-enrich">—</span></div>
+      <div class="kv"><span class="k">Health</span><span class="v" id="d-health">—</span></div>
+      <div class="kv"><span class="k">Last push</span><span class="v" id="d-push">—</span></div>
       <div class="kv"><span class="k">Open findings</span><span class="v" id="d-findings">—</span></div>
       <div class="kv"><span class="k">Re-chunking</span><span class="v" id="d-reflow">—</span></div>
     </div>
@@ -303,42 +305,50 @@ function setNum(id, value, animate){
 
 // ---- render ----
 
+// "3 min ago" / "5 h ago" / "2 d ago" for an ISO timestamp; "never" when absent.
+function ago(iso){
+  if(!iso) return "never";
+  const t = Date.parse(iso);
+  if(isNaN(t)) return "never";
+  const m = Math.max(0, Math.round((Date.now() - t) / 60000));
+  if(m < 1) return "just now";
+  if(m < 60) return m + " min ago";
+  if(m < 48 * 60) return Math.round(m / 60) + " h ago";
+  return Math.round(m / 1440) + " d ago";
+}
+
+// Older than this and the source is shown with a warning (matches the
+// server's STALE_HOURS).
+const STALE_MS = 6 * 3600 * 1000;
+
 function renderSources(sources){
   const body = $("sources-body");
   const frag = document.createDocumentFragment();
   for(const s of (sources || [])){
+    const h = s.history || {};
+    const t = s.last_synced_at ? Date.parse(s.last_synced_at) : NaN;
+    const stale = !isNaN(t) && (Date.now() - t) > STALE_MS;
     const row = document.createElement("div");
     row.className = "row";
+    const dot = document.createElement("span");
+    dot.className = "sdot " + (stale ? "warn" : (isNaN(t) ? "idle" : "ok"));
     const name = document.createElement("span");
     name.className = "name";
-    const sub = s.done ? "history complete"
-              : (s.reached ? "backfill → " + trimDate(s.reached) : "indexing…");
-    name.innerHTML = "";
     name.appendChild(document.createTextNode(s.label));
     const small = document.createElement("small");
+    let sub = "synced " + ago(s.last_synced_at);
+    if(!h.done) sub += " · " + (h.reached ? "backfill → " + trimDate(h.reached) : "indexing…");
+    if(s.shared && s.shared.stale) sub += " · " + s.shared.stale + " of " + s.shared.total + " shared drives stale";
     small.textContent = sub;
     name.appendChild(small);
     const badge = document.createElement("span");
-    badge.className = "badge " + (s.done ? "done" : "going");
-    badge.textContent = s.done ? "complete" : "indexing";
-    row.appendChild(name); row.appendChild(badge);
+    badge.className = "badge " + (h.done ? "done" : "going");
+    badge.textContent = h.done ? "complete" : "indexing";
+    row.appendChild(dot); row.appendChild(name); row.appendChild(badge);
     frag.appendChild(row);
   }
   body.innerHTML = "";
   body.appendChild(frag);
-}
-
-function renderSpool(spool){
-  const body = $("sources-body");
-  const row = document.createElement("div");
-  row.className = "row";
-  const name = document.createElement("span");
-  name.className = "name"; name.textContent = "Spool depth";
-  const val = document.createElement("span");
-  val.className = "val";
-  val.textContent = (spool.pending || 0) + " pending · " + (spool.inbox || 0) + " inbox";
-  row.appendChild(name); row.appendChild(val);
-  body.appendChild(row);
 }
 
 const STATE_UI = {
@@ -378,14 +388,26 @@ function renderConnections(conns){
   body.appendChild(frag);
 }
 
-function renderDaemon(d){
-  paused = !!d.paused;
-  $("d-version").textContent = d.version ? "v" + d.version : "—";
+const HEALTH_TEXT = {healthy: "Healthy", paused: "Paused", stalled: "Stalled",
+                     needs_you: "Needs you", behind: "Behind"};
+const HEALTH_COLOR = {healthy: "var(--ok)", paused: "var(--idle)", stalled: "var(--err)",
+                      needs_you: "var(--warn)", behind: "var(--warn)"};
+
+function renderDaemon(data){
+  const sys = data.system || {}, h = data.health || {}, enr = data.enrich || {};
+  paused = !!sys.paused;
+  $("d-version").textContent = sys.version ? "v" + sys.version : "—";
   const st = $("d-state");
   st.textContent = paused ? "paused" : "running";
   st.style.color = paused ? "var(--idle)" : "var(--ok)";
-  $("d-enrich").textContent = d.enrich_enabled ? "on" : "off";
-  $("d-findings").textContent = fmt(d.open_findings || 0);
+  const hv = $("d-health");
+  hv.textContent = HEALTH_TEXT[h.state] || "—";
+  hv.style.color = HEALTH_COLOR[h.state] || "";
+  hv.title = (h.reasons || []).join("; ");
+  $("d-push").textContent = enr.last_push_at
+    ? ago(enr.last_push_at) + (enr.pushes_24h ? " · " + fmt(enr.pushes_24h) + " in 24h" : "")
+    : "none yet";
+  $("d-findings").textContent = fmt((data.needs_you || {}).findings || 0);
   document.body.classList.toggle("paused", paused);
   $("live-text").textContent = paused ? "paused" : "live";
 }
@@ -423,31 +445,37 @@ function reflowChunksText(r){
 }
 
 function render(data){
-  const idx = data.index || {}, g = data.graph || {}, d = data.daemon || {};
+  // Re-chunking now arrives under system.reflow (null once it has finished).
+  data = Object.assign({}, data, {reflow: (data.system || {}).reflow || null});
+  const idx = data.index || {}, g = data.graph || {}, bt = g.by_type || {},
+        enr = data.enrich || {};
 
-  setNum("s-indexed", idx.indexed || 0, firstLoad);
-  setNum("s-enriched", idx.enriched || 0, firstLoad);
-  $("s-cold-line").innerHTML = "chunks indexed"
+  setNum("s-indexed", idx.total || 0, firstLoad);
+  setNum("s-enriched", idx.enriched_eligible || 0, firstLoad);
+  $("s-cold-line").innerHTML = "chunks captured"
     + (idx.cold ? ' · <span class="skipped" title="Low-value items (promotions, tables, '
       + 'short docs) — indexed and searchable, but skipped from graph enrichment">'
       + '<b>' + fmt(idx.cold) + '</b> low-signal, skipped</span>' : "");
-  const pct = idx.enriched_pct || 0;
+  const pct = idx.pct || 0;
   const ml = $("meter-label");
   ml.textContent = pct + "% digested into the graph";
-  ml.title = "Share of eligible (warm) chunks extracted into the graph — "
+  ml.title = "Share of eligible chunks extracted into the graph — "
     + "low-signal items are excluded from the denominator.";
+  $("meter-sub").textContent = fmt(idx.waiting || 0) + " waiting, "
+    + fmt(enr.units_pending || 0) + " queued for Claude";
   requestAnimationFrame(() => { $("meter-fill").style.width = pct + "%"; });
 
-  setNum("s-entities", g.entities || 0, firstLoad);
-  setNum("s-relations", g.relations || 0, firstLoad);
-  setNum("s-observations", g.observations || 0, firstLoad);
-  setNum("s-communities", g.communities || 0, firstLoad);
-  $("s-density").textContent = (g.links_per_entity != null ? g.links_per_entity : 0);
+  const entities = ["person", "org", "project", "topic", "meeting", "event"]
+    .reduce((n, k) => n + (bt[k] || 0), 0);
+  setNum("s-entities", entities, firstLoad);
+  setNum("s-relations", g.relations_live || 0, firstLoad);
+  setNum("s-observations", g.observations_live || 0, firstLoad);
+  setNum("s-communities", g.circles || 0, firstLoad);
+  setNum("s-unlinked", g.unlinked || 0, firstLoad);
 
   renderSources(data.sources);
-  renderSpool(data.spool || {});
   renderConnections(data.connections);
-  renderDaemon(d);
+  renderDaemon(data);
   $("d-reflow").textContent = reflowText(data.reflow);
   $("d-reflow").title = reflowChunksText(data.reflow);
 

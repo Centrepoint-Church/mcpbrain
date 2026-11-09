@@ -215,3 +215,17 @@ def test_post_dashboard_no_store_returns_503(tmp_path):
                 assert "dashboard not available" in payload["error"]
     finally:
         srv.stop()
+
+
+# ---------------------------------------------------------------------------
+# The shipped page reads the corrected stats payload
+# ---------------------------------------------------------------------------
+
+def test_dashboard_page_reads_corrected_fields():
+    from pathlib import Path
+    html = (Path(__file__).resolve().parents[1] / "mcpbrain" / "wizard"
+            / "dashboard.html").read_text()
+    for gone in ("enriched_pct", "links_per_entity", "enrich_enabled", "Spool depth"):
+        assert gone not in html
+    for present in ("idx.pct", "data.health", "last_synced_at"):
+        assert present in html

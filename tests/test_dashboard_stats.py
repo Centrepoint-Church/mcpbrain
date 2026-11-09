@@ -7,43 +7,59 @@ import json
 import sqlite3
 import urllib.error
 import urllib.request
+from datetime import datetime, timedelta, timezone
 
 from mcpbrain import dashboard
 from mcpbrain.control_api import ControlServer
 
 
-def _seed(path, *, entities=0, relations=0, observations=0, cold=0, warm=0):
-    """Seed the graph tables + chunks so _graph_counts has rows to count."""
+def _seed(path, *, chunks=(), entities=(), relations=(), payload_at=()):
+    """Seed chunks, graph tables and enrich_payloads.
+
+    chunks: (enrich_state, enriched) tuples. entities: (id, type) tuples.
+    relations: (a, b) tuples. payload_at: `at` strings for enrich_payloads.
+    """
     with sqlite3.connect(str(path)) as db:
-        db.execute("CREATE TABLE entities(id INTEGER PRIMARY KEY)")
-        db.execute("CREATE TABLE entity_relations(id INTEGER PRIMARY KEY)")
-        db.execute("CREATE TABLE entity_observations(id INTEGER PRIMARY KEY)")
-        db.execute("CREATE TABLE chunks(rowid INTEGER PRIMARY KEY, enrich_state TEXT)")
-        for _ in range(entities):
-            db.execute("INSERT INTO entities DEFAULT VALUES")
-        for _ in range(relations):
-            db.execute("INSERT INTO entity_relations DEFAULT VALUES")
-        for _ in range(observations):
-            db.execute("INSERT INTO entity_observations DEFAULT VALUES")
-        for _ in range(cold):
-            db.execute("INSERT INTO chunks(enrich_state) VALUES('cold')")
-        for _ in range(warm):
-            db.execute("INSERT INTO chunks(enrich_state) VALUES('')")
+        db.execute("CREATE TABLE chunks(rowid INTEGER PRIMARY KEY, enrich_state TEXT, enriched INTEGER)")
+        db.execute("CREATE TABLE entities(id TEXT PRIMARY KEY, name TEXT, type TEXT)")
+        db.execute("CREATE TABLE entity_relations(id INTEGER PRIMARY KEY, entity_a TEXT, "
+                   "entity_b TEXT, invalidated_at TEXT)")
+        db.execute("CREATE TABLE entity_observations(id INTEGER PRIMARY KEY, entity_id TEXT, "
+                   "invalidated_at TEXT)")
+        db.execute("CREATE TABLE sync_cursors(source TEXT PRIMARY KEY, cursor TEXT, updated_at TEXT)")
+        db.execute("CREATE TABLE enrich_payloads(file_id TEXT PRIMARY KEY, at TEXT)")
+        db.executemany("INSERT INTO chunks(enrich_state, enriched) VALUES(?,?)", list(chunks))
+        db.executemany("INSERT INTO entities VALUES(?,?,?)", [(i, i, t) for i, t in entities])
+        db.executemany("INSERT INTO entity_relations(entity_a, entity_b) VALUES(?,?)", list(relations))
+        db.executemany("INSERT INTO enrich_payloads VALUES(?,?)",
+                       [(f"f{i}", at) for i, at in enumerate(payload_at)])
+
+
+def _fresh_cursors(path, hours_ago=0.2):
+    when = (datetime.now(timezone.utc) - timedelta(hours=hours_ago)).strftime("%Y-%m-%d %H:%M:%S")
+    with sqlite3.connect(str(path)) as db:
+        for src in ("gmail", "drive", "calendar", "anarlog"):
+            db.execute("INSERT INTO sync_cursors VALUES(?,?,?)", (src, "x", when))
 
 
 class _Store:
-    def __init__(self, path, communities=0):
+    def __init__(self, path, communities=0, corrections=0, corrections_error=False):
         self._path = str(path)
         self._communities = communities
+        self._corrections = corrections
+        self._corrections_error = corrections_error
 
     def list_communities(self):
         return [{"community_id": i} for i in range(self._communities)]
 
+    def pending_corrections(self, limit=50):
+        if self._corrections_error:
+            raise RuntimeError("graph_corrections table missing")
+        return [{"id": i} for i in range(self._corrections)]
+
 
 def _status(**over):
     base = {
-        "chunk_count": 100,
-        "enriched_count": 61,
         "spool": {"pending": 1, "inbox": 3},
         "backfill": {
             "gmail": {"reached": "2019-03-01T00:00:00+00:00", "done": False},
@@ -59,8 +75,11 @@ def _status(**over):
         },
         "paused": False,
         "version": "0.7.77",
-        "enrich_enabled": True,
-        "open_findings": 2,
+        "open_findings": 0,
+        "stalled": None,
+        "watchdog_exits": 0,
+        "watchdog_limit_reached": False,
+        "reflow": None,
     }
     base.update(over)
     return base
@@ -68,30 +87,123 @@ def _status(**over):
 
 # --- dashboard.stats() --------------------------------------------------------
 
-def test_stats_index_and_graph_counts(tmp_path):
+def test_stats_regression_153_percent(tmp_path):
+    """56 cold-but-enriched chunks used to be added to the numerator only,
+    giving 153%. 56 cold/enriched + 44 cold + 96 done + 4 waiting is 96%."""
     p = tmp_path / "b.sqlite3"
-    _seed(p, entities=50, relations=125, observations=90, cold=12, warm=88)
-    out = dashboard.stats(_Store(p, communities=7), str(tmp_path), _status())
-
-    # enriched_pct is measured against ELIGIBLE (warm) chunks: 61 / (100-12) = 69%.
-    # queue_state is "working" when pending > 0; eligible = 100 - 12 - 61 = 27.
-    assert out["index"] == {"indexed": 100, "enriched": 61, "cold": 12, "enriched_pct": 69, "queue": "working"}
-    assert out["graph"]["entities"] == 50
-    assert out["graph"]["relations"] == 125
-    assert out["graph"]["observations"] == 90
-    assert out["graph"]["communities"] == 7
-    assert out["graph"]["links_per_entity"] == 2.5  # 125 / 50
+    _seed(p, chunks=[("cold", 1)] * 56 + [("cold", 0)] * 44 + [("", 1)] * 96 + [("", 0)] * 4)
+    out = dashboard.stats(_Store(p), str(tmp_path), _status())
+    assert out["index"] == {"total": 200, "eligible": 100, "cold": 100, "duplicate": 0,
+                            "enriched_eligible": 96, "waiting": 4, "pct": 96}
 
 
-def test_stats_sources_from_backfill(tmp_path):
+def test_stats_top_level_keys_exact(tmp_path):
     p = tmp_path / "b.sqlite3"
     _seed(p)
     out = dashboard.stats(_Store(p), str(tmp_path), _status())
-    srcs = {s["name"]: s for s in out["sources"]}
-    assert [s["name"] for s in out["sources"]] == ["gmail", "drive", "calendar"]
-    assert srcs["gmail"] == {"name": "gmail", "label": "Gmail",
-                             "reached": "2019-03-01T00:00:00+00:00", "done": False}
-    assert srcs["drive"]["done"] is True
+    assert list(out) == ["as_of", "index", "enrich", "graph", "sources", "health",
+                         "needs_you", "connections", "system"]
+    assert "spool" not in out and "daemon" not in out and "reflow" not in out
+    assert "links_per_entity" not in out["graph"]
+    assert out["system"] == {"version": "0.7.77", "paused": False,
+                             "watchdog_exits": 0, "reflow": None}
+
+
+def test_stats_graph_counts_are_knowledge_not_bookkeeping(tmp_path):
+    p = tmp_path / "b.sqlite3"
+    _seed(p, entities=[("acme-a", "person"), ("acme-b", "org"), ("acme-t", "thread"),
+                       ("acme-u", None)], relations=[("acme-a", "acme-b")])
+    out = dashboard.stats(_Store(p, communities=7), str(tmp_path), _status())
+    g = out["graph"]
+    assert g["by_type"]["person"] == 1 and g["by_type"]["thread"] == 1
+    assert g["by_type"]["unknown"] == 1
+    assert g["relations_live"] == 1
+    assert g["unlinked"] == 2
+    assert g["circles"] == 7
+
+
+def test_stats_meetings_is_the_fourth_source(tmp_path):
+    p = tmp_path / "b.sqlite3"
+    _seed(p)
+    _fresh_cursors(p)
+    out = dashboard.stats(_Store(p), str(tmp_path), _status())
+    srcs = out["sources"]
+    assert [s["name"] for s in srcs] == ["gmail", "drive", "calendar", "anarlog"]
+    assert srcs[3]["label"] == "Meetings"
+    assert srcs[0]["last_synced_at"] is not None
+    assert srcs[0]["history"] == {"done": False, "reached": "2019-03-01T00:00:00+00:00"}
+    assert srcs[1]["shared"] == {"total": 0, "stale": 0}
+    assert "shared" not in srcs[0]
+
+
+def test_stats_reports_a_starved_queue(tmp_path):
+    p = tmp_path / "b.sqlite3"
+    _seed(p, chunks=[("", 0)] * 5)
+    out = dashboard.stats(_Store(p), str(tmp_path), _status(spool={"pending": 0, "inbox": 0}))
+    assert out["enrich"]["queue_state"] == "starved"
+    assert out["enrich"]["units_pending"] == 0
+    assert out["index"]["waiting"] == 5
+    assert out["health"]["state"] == "behind"
+
+
+def test_stats_queue_working_and_idle(tmp_path):
+    p = tmp_path / "b.sqlite3"
+    _seed(p, chunks=[("", 0)])
+    out = dashboard.stats(_Store(p), str(tmp_path), _status())
+    assert out["enrich"]["queue_state"] == "working"
+    p2 = tmp_path / "c.sqlite3"
+    _seed(p2, chunks=[("", 1)])
+    out = dashboard.stats(_Store(p2), str(tmp_path), _status(spool={"pending": 0}))
+    assert out["enrich"]["queue_state"] == "idle"
+
+
+def test_stats_enrich_activity(tmp_path):
+    p = tmp_path / "b.sqlite3"
+    recent = (datetime.now(timezone.utc) - timedelta(hours=1)).strftime("%Y-%m-%d %H:%M:%S")
+    _seed(p, payload_at=[recent, "2020-01-01 00:00:00"])
+    out = dashboard.stats(_Store(p), str(tmp_path), _status())
+    assert out["enrich"]["pushes_24h"] == 1
+    assert out["enrich"]["last_push_at"].startswith(recent[:10])
+
+
+def test_stats_pending_corrections_failure_degrades_to_zero(tmp_path):
+    p = tmp_path / "b.sqlite3"
+    _seed(p)
+    out = dashboard.stats(_Store(p, corrections_error=True), str(tmp_path), _status())
+    assert out["needs_you"]["reviews"] == 0
+
+
+def test_stats_needs_you_and_health(tmp_path):
+    p = tmp_path / "b.sqlite3"
+    _seed(p)
+    _fresh_cursors(p)
+    status = _status(open_findings=2)
+    status["connections"]["google"] = {"state": "needs_action", "detail": "Reconnect"}
+    out = dashboard.stats(_Store(p, corrections=3), str(tmp_path), status)
+    ny = out["needs_you"]
+    assert ny["findings"] == 2 and ny["reviews"] == 3
+    assert [c["name"] for c in ny["connections"]] == ["google"]
+    assert out["health"]["state"] == "needs_you"
+
+
+def test_stats_stale_source_is_stalled(tmp_path):
+    p = tmp_path / "b.sqlite3"
+    _seed(p)
+    _fresh_cursors(p, hours_ago=7.5)
+    out = dashboard.stats(_Store(p), str(tmp_path), _status())
+    assert out["health"]["state"] == "stalled"
+    assert "Gmail has not synced for 7 hours" in out["health"]["reasons"]
+
+
+def test_stats_reflow_only_while_active(tmp_path):
+    p = tmp_path / "b.sqlite3"
+    _seed(p)
+    done = {"halted": None, "queued": 0, "remaining": 0, "owners_done": 9}
+    out = dashboard.stats(_Store(p), str(tmp_path), _status(reflow=done))
+    assert out["system"]["reflow"] is None
+    halted = dict(done, halted="integrity")
+    out = dashboard.stats(_Store(p), str(tmp_path), _status(reflow=halted))
+    assert out["system"]["reflow"] == halted
 
 
 def test_stats_connections_ordered_and_no_clickup(tmp_path):
@@ -105,73 +217,14 @@ def test_stats_connections_ordered_and_no_clickup(tmp_path):
                                       "state": "ok", "detail": "Connected"}
 
 
-def test_stats_daemon_and_spool_passthrough(tmp_path):
-    p = tmp_path / "b.sqlite3"
-    _seed(p)
-    out = dashboard.stats(_Store(p), str(tmp_path), _status(paused=True, open_findings=5))
-    assert out["daemon"] == {"paused": True, "version": "0.7.77",
-                             "enrich_enabled": True, "open_findings": 5}
-    assert out["spool"] == {"pending": 1, "inbox": 3}
-
-
 def test_stats_degrades_on_empty_store(tmp_path):
-    # No graph tables at all — every count degrades to 0, pct guards div-by-zero.
     p = tmp_path / "empty.sqlite3"
     with sqlite3.connect(str(p)):
         pass
-    out = dashboard.stats(_Store(p), str(tmp_path),
-                          _status(chunk_count=0, enriched_count=0))
-    assert out["index"]["enriched_pct"] == 0
-    assert out["graph"]["entities"] == 0
-    assert out["graph"]["links_per_entity"] == 0.0
-
-
-def test_stats_pct_zero_when_all_cold(tmp_path):
-    # Every indexed chunk is low-signal → no eligible chunks → pct 0, no div error.
-    p = tmp_path / "b.sqlite3"
-    _seed(p, cold=40)
-    out = dashboard.stats(_Store(p), str(tmp_path),
-                          _status(chunk_count=40, enriched_count=0))
-    assert out["index"]["cold"] == 40
-    assert out["index"]["enriched_pct"] == 0
-
-
-def test_stats_eligible_clamps_at_zero_rather_than_going_negative(tmp_path):
-    """`eligible = max(0, indexed - cold - enriched)` must actually clamp: a
-    store snapshot where enriched_count exceeds (indexed - cold) -- e.g. two
-    status()/graph reads taken at slightly different instants during a busy
-    cycle -- must read as "nothing outstanding" (idle), not silently go
-    negative and feed a nonsensical value into queue_state. Nothing in the
-    suite drove `stats()` with enriched > indexed - cold; the existing tests
-    only exercise the ordinary enriched <= indexed - cold case.
-    """
-    p = tmp_path / "b.sqlite3"
-    _seed(p, cold=5)
-    out = dashboard.stats(_Store(p), str(tmp_path),
-                          _status(chunk_count=10, enriched_count=20,
-                                  spool={"pending": 0, "inbox": 0}))
-    # eligible = max(0, 10 - 5 - 20) = max(0, -15) = 0 -> nothing outstanding,
-    # nothing queued -> idle (NOT "starved", which a negative eligible read as
-    # "== 0" would coincidentally still pass by luck -- the discriminator is
-    # the queue_state call actually receiving 0, not a negative number).
-    assert out["index"]["queue"] == "idle"
-
-
-def test_stats_queued_defaults_to_zero_when_spool_key_is_absent(tmp_path):
-    """`queued = status.get("spool", {}).get("pending", 0)` must default to 0
-    when the status snapshot has no "spool" key at all (not just when spool
-    is present but empty) -- otherwise a missing key would raise instead of
-    degrading."""
-    p = tmp_path / "b.sqlite3"
-    _seed(p)
-    status = _status(chunk_count=100, enriched_count=0)
-    del status["spool"]
-    out = dashboard.stats(_Store(p), str(tmp_path), status)
-    # queued defaults to 0, eligible = 100 - 0 - 0 = 100 -> nothing queued but
-    # plenty outstanding -> starved (proves `queued` really did read 0, not
-    # crash and not silently default to something truthy).
-    assert out["index"]["queue"] == "starved"
-    assert out["spool"] == {"pending": 0, "inbox": 0}
+    out = dashboard.stats(_Store(p), str(tmp_path), _status())
+    assert out["index"]["pct"] == 0
+    assert out["graph"]["by_type"]["person"] == 0
+    assert out["health"]["state"] == "healthy"
 
 
 # --- GET /api/dashboard/stats route ------------------------------------------
@@ -189,16 +242,16 @@ def _get(url, token):
 
 def test_stats_route_returns_payload(tmp_path):
     p = tmp_path / "b.sqlite3"
-    _seed(p, entities=10, relations=20, observations=5, cold=2, warm=8)
+    _seed(p, entities=[(f"acme-{i}", "person") for i in range(10)])
     srv = ControlServer(_RouteDaemon(), str(tmp_path), store=_Store(p, communities=3))
     srv.start()
     try:
         code, body = _get(f"http://127.0.0.1:{srv.port}/api/dashboard/stats", srv.token)
         assert code == 200
-        assert set(body) >= {"index", "graph", "sources", "spool", "connections",
-                             "daemon", "as_of"}
-        assert body["graph"]["entities"] == 10
-        assert body["graph"]["communities"] == 3
+        assert list(body) == ["as_of", "index", "enrich", "graph", "sources", "health",
+                              "needs_you", "connections", "system"]
+        assert body["graph"]["by_type"]["person"] == 10
+        assert body["graph"]["circles"] == 3
         assert [c["name"] for c in body["connections"]] == \
             ["google", "claude", "backup", "records", "enrichment"]
     finally:
