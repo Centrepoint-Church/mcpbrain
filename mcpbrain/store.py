@@ -1754,6 +1754,23 @@ class Store:
             db.execute("CREATE INDEX IF NOT EXISTS idx_gc_dedup ON graph_corrections(dedup_key)")
             db.execute("CREATE INDEX IF NOT EXISTS idx_gc_applied_order "
                        "ON graph_corrections(applied_order)")
+            # Automatic changes held for the owner's review ("ask me first").
+            # payload is what auto_changes.APPLY[kind] needs to make the change
+            # later; change_log_id is the undoable change approval recorded.
+            # status: pending | applied | declined.
+            db.execute(f"""CREATE TABLE IF NOT EXISTS pending_changes(
+                id            INTEGER PRIMARY KEY AUTOINCREMENT,
+                kind          TEXT NOT NULL,
+                target        TEXT NOT NULL DEFAULT '',
+                summary       TEXT DEFAULT '',
+                payload       TEXT NOT NULL DEFAULT '{{}}',
+                status        TEXT NOT NULL DEFAULT 'pending',
+                created_at    TEXT DEFAULT CURRENT_TIMESTAMP,
+                decided_at    TEXT DEFAULT '',
+                change_log_id INTEGER){_S}""")
+            db.execute("CREATE INDEX IF NOT EXISTS idx_pc_status ON pending_changes(status)")
+            db.execute("CREATE INDEX IF NOT EXISTS idx_pc_kind_target "
+                       "ON pending_changes(kind, target)")
             # "These two are different entities": consulted by every merge path.
             # a < b always (the writer sorts), so one row per unordered pair.
             db.execute(f"""CREATE TABLE IF NOT EXISTS entity_distinct_pairs(
@@ -7027,11 +7044,19 @@ class Store:
                 (row["id"], cutoff))
             return cur.rowcount
 
-    def open_findings_count(self) -> int:
+    def open_findings_count(self, exclude_types: tuple = ()) -> int:
+        sql = "SELECT COUNT(*) FROM proactive_findings WHERE resolved_at IS NULL"
+        if exclude_types:
+            sql += f" AND finding_type NOT IN ({','.join('?' * len(exclude_types))})"
+        with self._connect() as db:
+            row = db.execute(sql, tuple(exclude_types)).fetchone()
+            return row[0] if row else 0
+
+    def pending_changes_count(self) -> int:
+        """Automatic changes waiting for the owner's review."""
         with self._connect() as db:
             row = db.execute(
-                "SELECT COUNT(*) FROM proactive_findings WHERE resolved_at IS NULL"
-            ).fetchone()
+                "SELECT COUNT(*) FROM pending_changes WHERE status='pending'").fetchone()
             return row[0] if row else 0
 
     def get_finding(self, finding_id) -> dict | None:

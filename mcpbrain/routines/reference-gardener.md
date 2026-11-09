@@ -2,10 +2,11 @@
 
 Weekly scheduled task. Reviews what changed in the brain this week and develops the user's reference and context world-model.
 
-Operates in two modes:
+The owner picks the mode in the console (Settings > Automatic changes > reference and context files), read here with `config.auto_change_mode(home, "reference")`:
 
-- **auto-apply** (`gardener_auto_apply: true` in config): applies changes directly in two lanes — drift (reference files) and constitution (context/identity.md, context/preferences.md) — and writes a changelog.
-- **propose-only** (default): writes a proposals file to `reference/_proposals/` for human review.
+- **apply** (the default): applies changes directly in two lanes — drift (reference files) and constitution (context/identity.md, context/preferences.md) — and writes a changelog.
+- **ask**: makes the same `brain_gardener_apply` calls; the tool runs every guard and queues each change for the owner to approve or decline in the console instead of writing it.
+- **off**: makes no changes this run.
 
 ## Setup
 
@@ -14,11 +15,13 @@ home=$(mcpbrain home)
 records="$home/records"
 today=$(date +%Y-%m-%d)
 proposals_file="$records/reference/_proposals/$today.md"
-auto_apply=$(python3 -c "
+mode=$(python3 -c "
 from mcpbrain import config
-print('true' if config.gardener_auto_apply_enabled('$home') else 'false')
-" 2>/dev/null || echo false)
+print(config.auto_change_mode('$home', 'reference'))
+" 2>/dev/null || echo off)
 ```
+
+If `mode = off`, stop here: log a `brain_note` "Reference-gardener skipped: automatic reference changes are off." and make no changes.
 
 ## Step 1 — Gather evidence
 
@@ -70,11 +73,11 @@ Never attribute a role from text you wrote, inferred from context, or derived fr
 
 If nothing has changed that warrants an update, stop here and do not write a proposals file. Log a `brain_note`: "Reference-gardener ran — no changes to propose."
 
-## Step 3 — Apply or propose
+## Step 3 — Apply or queue
 
-### If `auto_apply = true`
+### Both modes (`mode = apply` or `mode = ask`)
 
-Apply every change through the **`brain_gardener_apply`** tool — never by editing the
+Send every change through the **`brain_gardener_apply`** tool — never by editing the
 files and running `git` yourself. The tool routes the write through the role-attribution
 guard, the per-run change cap, and the correct commit tag, and returns the result so you
 get immediate enforcement feedback. Pass the **full new content** of the file each call.
@@ -119,6 +122,13 @@ it. `owner_confirmation` is only for a role the owner confirmed to you directly 
 pass the confirmed wording as the quote. If you cannot cite a real source, **leave the role
 out** — a missing role is better than a wrong one.
 
+In `ask` mode a call that passes every guard returns
+`{"applied": false, "queued": true, "status": "queued for review ..."}`: the change waits
+in the owner's console (Needs you) and is written only if they approve it. A guard
+failure (`"error"`) is reported the same way in both modes; fix and resend as above.
+
+### If `mode = apply`: write a changelog
+
 **Write a changelog** (what was applied, not what to approve):
 
 ```bash
@@ -154,42 +164,15 @@ git add "reference/_proposals/$today.md"
 git commit -m "reference-gardener: changelog $today"
 ```
 
-### If `auto_apply = false`
+### If `mode = ask`
 
-Write proposals to `$proposals_file`:
-
-```markdown
-# Reference update proposals — <today>
-
-Reviewed by: mcpbrain-reference-gardener
-Source evidence: brain_search, brain_graph, brain_actions
-
-## reference/projects.md
-
-### Add
-- **Project Name** — <1-sentence description, status, team>
-
-### Update
-- **Project Name** — current says "X"; evidence suggests "Y" (source: thread from <date>)
-
-(same pattern for other files — omit sections with no changes)
-
----
-To apply: review each proposal, then in a Claude session say "apply the proposals from reference/_proposals/<today>.md".
-```
-
-Commit:
-
-```bash
-mkdir -p "$records/reference/_proposals"
-cd "$records"
-git add "reference/_proposals/$today.md"
-git commit -m "reference-gardener: proposals $today"
-```
+Write no changelog or proposals file: each queued change is already listed in the
+owner's console with Apply and Decline, and approving writes and commits it exactly as
+apply mode would.
 
 ## Step 4 — Surface
 
 Call `brain_note` with a summary:
 
-- auto-apply mode: `"Reference-gardener: applied N changes ($today) — see reference/_proposals/$today.md for changelog."`
-- propose-only mode: `"Reference-gardener: N proposals ready at reference/_proposals/$today.md — review and apply any that look right."`
+- apply mode: `"Reference-gardener: applied N changes ($today) — see reference/_proposals/$today.md for changelog."`
+- ask mode: `"Reference-gardener: N changes queued for your review in the console ($today)."`

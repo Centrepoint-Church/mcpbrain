@@ -987,8 +987,17 @@ def _merge_review_block(store, *, cap: int = _MERGE_REVIEW_CAP) -> list:
     deterministic resolve tier still runs every cycle elsewhere; this block only
     covers the LLM-adjudication tier.
     """
+    from mcpbrain import auto_changes, config
+    mode = config.auto_change_mode(str(config.app_dir()), "tidy")
+    if mode == "off":
+        return []       # graph tidy-up is off: merges would be dropped unread
     pairs = _candidate_pairs(store.entities_for_resolution(),
                              distinct=store.distinct_pair_set())
+    if mode == "ask":
+        # A pair waiting for review, or one the owner declined, isn't re-asked.
+        skip = auto_changes.pending_targets(store, "tidy", include_declined=True)
+        pairs = [(a, b) for a, b in pairs
+                 if "pair:" + "|".join(sorted((a["id"], b["id"]))) not in skip]
     return [_merge_pair(a, b) for a, b in pairs[:cap]]
 
 

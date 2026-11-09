@@ -375,6 +375,23 @@ def _undo_entity_suppressed(store, home, row):
     _graph_changed()
 
 
+def _undo_finding_dismissed(store, home, row):
+    """Reopen the findings a dismiss closed, if they are still closed by it."""
+    p = _need_payload(row)
+    ids = [int(i) for i in (p["before"].get("ids") or [])]
+    verdict = p["after"].get("verdict")
+    if not ids:
+        raise Refused(NOT_UNDOABLE)
+    marks = ",".join("?" * len(ids))
+    with store._connect(write=True) as db:
+        cur = db.execute(
+            f"UPDATE proactive_findings SET resolved_at=NULL, verdict=NULL "
+            f"WHERE id IN ({marks}) AND resolved_at IS NOT NULL AND verdict IS ?",
+            (*ids, verdict))
+        if cur.rowcount == 0:
+            raise Refused(CHANGED_SINCE)
+
+
 def _graph_changed() -> None:
     try:
         from mcpbrain import entity_resource
@@ -396,6 +413,7 @@ UNDO: dict[str, Callable] = {
     "tidy_merge": _undo_tidy_merge,
     "tidy_org_rewrite": _undo_tidy_org_rewrite,
     "capture_action_update": _undo_action_status,
+    "finding_dismissed": _undo_finding_dismissed,
     # legacy revert_ref forms
     "action_snoozed": _undo_snooze,
     "role_corrected": _undo_role,

@@ -834,14 +834,96 @@ def make_brain_memory_write():
     return brain_memory_write
 
 
+def _gardener_target(home: str, payload: dict):
+    """(repo, relpath, Path) for a gardener payload, or ValueError for a lane or
+    filename the writers would refuse."""
+    from pathlib import Path
+    from mcpbrain import config as _cfg
+    lane, filename = payload.get("lane"), payload.get("filename") or ""
+    if lane not in ("reference", "context"):
+        raise ValueError(f"unknown lane {lane!r} (expected 'reference' or 'context')")
+    if "/" in filename or "\\" in filename or not filename:
+        raise ValueError(f"filename must be a basename, not a path: {filename!r}")
+    repo = _cfg.records_dir(home)
+    rel = f"{lane}/{filename}"
+    return repo, rel, Path(repo) / rel
+
+
+def _gardener_role_error(store, payload: dict) -> str | None:
+    if payload.get("lane") == "context" and payload.get("asserts_person_role"):
+        return _verify_role_attribution(
+            store, payload.get("attribution_source") or "",
+            payload.get("attribution_quote") or "", payload.get("attribution_doc_id") or "")
+    return None
+
+
+def gardener_check(store, home: str, payload: dict) -> str:
+    """Run every guard a gardener write would, without writing. Returns the
+    file's current content (what an approval later must still find there).
+    Raises ValueError / FileNotFoundError on a write the writer would refuse."""
+    from mcpbrain import config as _cfg, records_write
+    _repo, rel, target = _gardener_target(home, payload)
+    err = _gardener_role_error(store, payload)
+    if err:
+        raise ValueError(err)
+    if not target.is_file():
+        raise FileNotFoundError(f"{payload['lane']} file not found: {target}")
+    content = payload.get("content") or ""
+    if not content.endswith("\n"):
+        content += "\n"
+    records_write._enforce_change_cap(target, content, _cfg.gardener_max_changed_lines(home))
+    return target.read_text()
+
+
+def gardener_write(store, home: str, payload: dict) -> tuple[bool, int]:
+    """Write one gardener change through the role-attribution guard and the
+    per-run change cap, commit it, and record an undoable `gardener_write`
+    change. Returns (committed, change_log id or 0). This is what apply mode and
+    an approved review both run (auto_changes.APPLY["reference"]).
+
+    payload: {lane, filename, content, asserts_person_role?, attribution_source?,
+    attribution_quote?, attribution_doc_id?}. Raises ValueError /
+    FileNotFoundError / OSError / CalledProcessError like the writers do."""
+    from mcpbrain import records_write, config as _cfg
+    repo, rel, target = _gardener_target(home, payload)
+    err = _gardener_role_error(store, payload)
+    if err:
+        raise ValueError(err)
+    cap = _cfg.gardener_max_changed_lines(home)
+    filename, content = payload["filename"], payload.get("content") or ""
+    # Read before the write so the change row can carry what it replaced.
+    before = target.read_text() if target.is_file() else None
+    if payload["lane"] == "reference":
+        committed = records_write.write_gardener_reference(
+            repo, filename, content, max_changed_lines=cap)
+    else:
+        asserts = bool(payload.get("asserts_person_role"))
+        committed = records_write.write_gardener_context(
+            repo, filename, content,
+            asserts_person_role=asserts,
+            attribution_source=(payload.get("attribution_source") or None),
+            attribution_doc_id=(payload.get("attribution_doc_id") or None),
+            max_changed_lines=cap)
+    if not committed:
+        return False, 0
+    from mcpbrain.change_undo import revert_json
+    cid = store.record_change(
+        "gardener_write", ref_id=rel, summary=f"Gardener updated {rel}",
+        source="gardener",
+        revert_ref=revert_json({"path": rel, "content": before},
+                               {"path": rel, "content": target.read_text()}))
+    return True, cid
+
+
 @tool(
     "brain_gardener_apply",
     description=(
-        "Apply a reference-gardener change directly to the records repo through "
-        "the role-attribution guard and per-run change cap. Synchronous (not "
-        "queued): commits immediately and returns the result so the gardener gets "
-        "enforcement feedback. Use only from the reference-gardener routine in "
-        "auto-apply mode."
+        "Apply a reference-gardener change to the records repo through the "
+        "role-attribution guard and per-run change cap. Synchronous: in apply mode "
+        "it commits immediately; in ask-first mode it runs the same guards and "
+        "queues the change for the owner's review instead (queued: true). Either "
+        "way the result comes back at once so the gardener gets enforcement "
+        "feedback. Use only from the reference-gardener routine."
     ),
     input_schema={
         "type": "object",
@@ -870,6 +952,9 @@ def make_brain_memory_write():
         "properties": {
             "applied": {"type": "boolean"},
             "committed": {"type": "boolean"},
+            "queued": {"type": "boolean"},
+            "pending_id": {"type": "integer"},
+            "status": {"type": "string"},
             "error": {"type": "string"},
         },
         "required": ["applied"],
@@ -881,9 +966,15 @@ def make_brain_gardener_apply(store):
                                    attribution_source: str = "",
                                    attribution_quote: str = "",
                                    attribution_doc_id: str = "") -> dict:
-        """Apply a reference-gardener change directly to the records repo, through the
-        deterministic guard. NOT queued — the write + commit happen synchronously so the
-        gardener gets immediate enforcement feedback.
+        """Apply a reference-gardener change to the records repo, through the
+        deterministic guard. The mode for reference changes
+        (config.auto_change_mode(home, "reference")) decides what happens:
+
+        - apply: write + commit synchronously; returns {"applied": True, "committed": bool}
+        - ask: run every guard, then queue the change for the owner's review in
+          the console; returns {"applied": False, "queued": True, "pending_id",
+          "status": "queued for review ..."}
+        - off: write nothing; returns {"applied": False, "error": ...}
 
         lane: 'reference' (drift) or 'context' (constitution). filename: basename of an
         existing file in that dir. content: full new file content.
@@ -894,46 +985,31 @@ def make_brain_gardener_apply(store):
         required. For owner_statement/signature, attribution_doc_id must point at a stored
         chunk and the quote is checked to actually appear in it — a fabricated or inferred
         attribution is rejected. owner_confirmation needs only the confirmed quote.
-        Returns {"applied": bool, "committed": bool} or {"applied": False, "error": ...}.
         """
         import subprocess
-        from pathlib import Path
-        from mcpbrain import records_write, config as _cfg
+        from mcpbrain import auto_changes, config as _cfg
         home = str(config.app_dir())
-        repo = _cfg.records_dir(home)
-        cap = _cfg.gardener_max_changed_lines(home)
-        rel = f"{lane}/{filename}"
-        target = Path(repo) / rel
-        # Read before the write so the change row can carry what it replaced.
-        # The writers reject a non-basename filename, so nothing outside the
-        # lane dir is ever recorded.
-        before = target.read_text() if target.is_file() else None
+        payload = {"lane": lane, "filename": filename, "content": content,
+                   "asserts_person_role": bool(asserts_person_role),
+                   "attribution_source": attribution_source,
+                   "attribution_quote": attribution_quote,
+                   "attribution_doc_id": attribution_doc_id}
+        mode = _cfg.auto_change_mode(home, "reference")
+        if mode == "off":
+            return {"applied": False,
+                    "error": "automatic reference and context changes are off "
+                             "(console Settings > Automatic changes); nothing written"}
         try:
-            if lane == "reference":
-                committed = records_write.write_gardener_reference(
-                    repo, filename, content, max_changed_lines=cap)
-            elif lane == "context":
-                if asserts_person_role:
-                    err = _verify_role_attribution(
-                        store, attribution_source, attribution_quote, attribution_doc_id)
-                    if err:
-                        return {"applied": False, "error": err}
-                committed = records_write.write_gardener_context(
-                    repo, filename, content,
-                    asserts_person_role=asserts_person_role,
-                    attribution_source=(attribution_source or None),
-                    attribution_doc_id=(attribution_doc_id or None),
-                    max_changed_lines=cap)
-            else:
-                return {"applied": False, "error": f"unknown lane {lane!r} "
-                        "(expected 'reference' or 'context')"}
-            if committed:
-                from mcpbrain.change_undo import revert_json
-                store.record_change(
-                    "gardener_write", ref_id=rel, summary=f"Gardener updated {rel}",
-                    source="gardener",
-                    revert_ref=revert_json({"path": rel, "content": before},
-                                           {"path": rel, "content": target.read_text()}))
+            if mode == "ask":
+                base = gardener_check(store, home, payload)
+                rel = f"{lane}/{filename}"
+                pid = auto_changes.propose(store, "reference", rel, f"Update {rel}",
+                                           {**payload, "base": base})
+                return {"applied": False, "committed": False, "queued": True,
+                        "pending_id": pid,
+                        "status": "queued for review: the owner approves or declines "
+                                  "it in the console"}
+            committed, _cid = gardener_write(store, home, payload)
             return {"applied": True, "committed": committed}
         except (ValueError, FileNotFoundError, OSError) as exc:
             return {"applied": False, "error": str(exc)}

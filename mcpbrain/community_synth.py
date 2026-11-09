@@ -68,39 +68,48 @@ def build_community_requests(store, *, cap: int = 10, member_sample: int = 40) -
 
 
 def set_community_title(store, cid, title: str, summary: str | None = None, *,
-                        source: str) -> bool:
+                        source: str) -> int:
     """Set a circle's title (and summary; None keeps the current one) and record
     an undoable `community_titled` change holding the prior pair, in one
-    transaction. Returns False when the community does not exist."""
+    transaction. Returns the change_log id, or 0 when the community does not
+    exist."""
     from mcpbrain.change_undo import revert_json
     with store._connect(write=True) as db:
         prior = db.execute("SELECT title, summary FROM community_summaries "
                            "WHERE community_id=? ORDER BY level LIMIT 1", (cid,)).fetchone()
         if prior is None:
-            return False
+            return 0
         new_summary = (prior["summary"] or "") if summary is None else summary
         db.execute("UPDATE community_summaries SET title=?, summary=? WHERE community_id=?",
                    (title, new_summary, cid))
-        store.record_change_tx(
+        return store.record_change_tx(
             db, "community_titled", ref_id=str(cid),
             summary=f"Title set for community {cid}: {title}", source=source,
             revert_ref=revert_json(
                 {"title": prior["title"] or "", "summary": prior["summary"] or ""},
                 {"title": title, "summary": new_summary}))
-    return True
 
 
-def drain_communities(store, inbox_obj: dict) -> dict:
+def drain_communities(store, inbox_obj: dict, *, home=None) -> dict:
     """Write LLM-generated titles/summaries back to community_summaries.
 
     Expects inbox_obj["community_synthesis"] to be a list of:
         {community_id, title, summary}
     Skips items with no title or where the community_id doesn't exist.
     Records one change_log entry per community written.
-    Returns {"communities_written": N}.
+
+    The "circles" automatic-change mode decides what happens: apply writes,
+    ask queues each title for the owner's review, off drops the block.
+    Returns {"communities_written": N} (plus "proposed": N in ask mode).
     """
+    from mcpbrain import auto_changes, config
     items = inbox_obj.get("community_synthesis") or []
+    home = str(home or config.app_dir())
+    mode = config.auto_change_mode(home, "circles")
+    if mode == "off":
+        return {"communities_written": 0}
     written = 0
+    proposed = 0
 
     for item in items:
         cid = item.get("community_id")
@@ -111,12 +120,31 @@ def drain_communities(store, inbox_obj: dict) -> dict:
             log.debug("community_synthesis: skipping community_id=%s (no title)", cid)
             continue
 
-        if not set_community_title(store, cid, title, summary, source="community_synthesis"):
+        payload = {"community_id": cid, "title": title, "summary": summary}
+        if mode == "ask":
+            if not _community_exists(store, cid):
+                log.debug("community_synthesis: community_id=%s not found, skipping", cid)
+                continue
+            auto_changes.propose(store, "circles", str(cid),
+                                 f'Name a circle "{title}"', payload)
+            proposed += 1
+            continue
+        try:
+            auto_changes.APPLY["circles"](store, home, payload)
+        except auto_changes.NotApplied:
             log.debug("community_synthesis: community_id=%s not found, skipping", cid)
             continue
         written += 1
 
+    if mode == "ask":
+        return {"communities_written": 0, "proposed": proposed}
     return {"communities_written": written}
+
+
+def _community_exists(store, cid) -> bool:
+    with store._connect() as db:
+        return db.execute("SELECT 1 FROM community_summaries WHERE community_id=?",
+                          (cid,)).fetchone() is not None
 
 
 # Register with drain.py so it is called automatically when this module is imported.

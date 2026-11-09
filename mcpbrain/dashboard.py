@@ -325,6 +325,54 @@ def changes_digest(store) -> dict:
         return {"changes": [], "findings": []}
 
 
+# Findings listed elsewhere in Needs you: pending changes by /api/pending and
+# proposed graph corrections by /api/corrections/pending. Each item shows once.
+REVIEW_FINDING_TYPES = ("pending_change", "graph_correction")
+_SEVERITY_ORDER = {"critical": 0, "error": 0, "warning": 1, "warn": 1}
+
+
+def findings_view(store) -> list[dict]:
+    """Open findings for Needs you, one row per (finding_type, summary) with a
+    count. The row carries the newest finding's id, detail and time; an action
+    on that id covers the whole group (close_finding_group). Most severe first,
+    newest first within a severity."""
+    groups: dict[tuple, dict] = {}
+    for f in store.open_findings():
+        if f["finding_type"] in REVIEW_FINDING_TYPES:
+            continue
+        key = (f["finding_type"], f.get("summary") or "")
+        g = groups.get(key)
+        count = (g["count"] if g else 0) + 1
+        if g is None or (f.get("detected_at") or "", f["id"]) > (g["detected_at"], g["id"]):
+            g = {"id": f["id"], "finding_type": f["finding_type"],
+                 "summary": f.get("summary") or "", "detail": f.get("detail") or "",
+                 "severity": f.get("severity") or "info",
+                 "detected_at": f.get("detected_at") or ""}
+        g["count"] = count
+        groups[key] = g
+    rows = sorted(groups.values(), key=lambda g: (g["detected_at"], g["id"]), reverse=True)
+    return sorted(rows, key=lambda g: _SEVERITY_ORDER.get(g["severity"], 2))
+
+
+def close_finding_group(store, finding_id: int, *, dismiss: bool) -> list[int] | None:
+    """Resolve an open finding and every open finding grouped with it (same
+    type and summary). Mark fixed resolves with no verdict, so the finding
+    reopens if the problem comes back; dismiss stores 'dismissed_by_human', so
+    it never reopens. Returns the ids closed, or None when `finding_id` is not
+    an open finding."""
+    with store._connect() as db:
+        f = db.execute("SELECT finding_type, summary FROM proactive_findings "
+                       "WHERE id=? AND resolved_at IS NULL", (finding_id,)).fetchone()
+        if f is None:
+            return None
+        ids = [r[0] for r in db.execute(
+            "SELECT id FROM proactive_findings WHERE resolved_at IS NULL "
+            "AND finding_type=? AND COALESCE(summary,'')=?",
+            (f["finding_type"], f["summary"] or ""))]
+    verdict = "dismissed_by_human" if dismiss else None
+    return [i for i in ids if store.resolve_finding(i, verdict=verdict)]
+
+
 def inbox_today(store, limit: int = 20) -> list[dict]:
     """Return emails needing attention: reply_needed=1 OR request/decision type, last 7 days."""
     cutoff = (datetime.now(_PERTH) - timedelta(days=7)).date().isoformat()

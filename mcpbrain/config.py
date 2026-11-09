@@ -576,6 +576,61 @@ def bandit_auto_apply_enabled(home) -> bool:
     return bool(read_config(home).get("bandit_auto_apply", False))
 
 
+# --- Automatic changes: apply, ask first, or off --------------------------------
+
+AUTO_CHANGE_KINDS = ("profiles", "circles", "reference", "voice", "consolidation",
+                     "tidy", "draft_style")
+_AUTO_CHANGE_MODES = ("apply", "ask", "off")
+# Draft style tuning has no review step: it either changes the threshold or
+# reports what it would change.
+_DRAFT_STYLE_MODES = ("apply", "advise", "off")
+
+
+def auto_change_modes(kind: str) -> tuple[str, ...]:
+    """The modes `kind` accepts. ValueError for an unknown kind."""
+    if kind not in AUTO_CHANGE_KINDS:
+        raise ValueError(f"unknown automatic change kind: {kind!r}")
+    return _DRAFT_STYLE_MODES if kind == "draft_style" else _AUTO_CHANGE_MODES
+
+
+def _legacy_auto_change_mode(cfg: dict, kind: str) -> str:
+    """The mode the older per-feature switches imply, so an install that never
+    touched `auto_changes` behaves exactly as before."""
+    if kind == "reference":
+        return "apply" if bool(cfg.get("gardener_auto_apply", True)) else "ask"
+    if kind == "voice":
+        return "apply" if bool(cfg.get("voice_auto_apply", True)) else "ask"
+    if kind == "consolidation":
+        return "apply" if bool(cfg.get("consolidation", True)) else "off"
+    if kind == "draft_style":
+        return "apply" if bool(cfg.get("bandit_auto_apply", False)) else "advise"
+    return "apply"   # profiles, circles, tidy: no switch before this one
+
+
+def auto_change_mode(home, kind: str) -> str:
+    """What the daemon does with an automatic change of `kind`:
+
+    - "apply": make it and record it in What changed, with Undo
+    - "ask": queue it in Needs you; nothing changes until it is approved
+    - "off": don't make it
+    - "advise" (draft_style only): report the recommendation, change nothing
+
+    `auto_changes: {kind: mode}` in config wins; otherwise the older switch
+    decides (gardener_auto_apply, voice_auto_apply, consolidation,
+    bandit_auto_apply). An invalid value is ignored with a warning.
+    """
+    allowed = auto_change_modes(kind)
+    cfg = read_config(home)
+    block = cfg.get("auto_changes")
+    if isinstance(block, dict) and kind in block:
+        mode = block[kind]
+        if mode in allowed:
+            return mode
+        log.warning("auto_changes.%s=%r is not one of %s; using the default",
+                    kind, mode, list(allowed))
+    return _legacy_auto_change_mode(cfg, kind)
+
+
 def drift_monitor_enabled(home) -> bool:
     """Whether the nightly embedding-drift monitor runs (S4).
 

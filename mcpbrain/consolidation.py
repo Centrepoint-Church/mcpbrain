@@ -56,7 +56,7 @@ def _unconsolidated_salience(store) -> float:
 def should_consolidate(store, home: str) -> bool:
     """True when enough unconsolidated salience has accumulated to run a pass."""
     from mcpbrain import config
-    if not config.consolidation_enabled(home):
+    if config.auto_change_mode(home, "consolidation") == "off":
         return False
     return _unconsolidated_salience(store) >= CONSOLIDATION_THRESHOLD
 
@@ -460,6 +460,87 @@ def _promote_sources(store, cluster: list[dict], prior_tiers: dict[str, str]) ->
             db.execute("UPDATE chunks SET memory_tier='hot' WHERE doc_id=?", (c["doc_id"],))
 
 
+def _apply_cluster(store, home: str, cluster: list[dict], summary: str, *,
+                   notes: list, prior_tiers: dict, graduated: list) -> bool:
+    """Write one cluster's note, promote its sources and graduate it, adding
+    what changed to the undo lists. True when a note was written."""
+    doc_id = _write_note(store, cluster, summary, written=notes)
+    if not doc_id:
+        return False
+    # Mark source chunks as consolidated (promote to hot tier so they
+    # aren't re-clustered next pass).
+    _promote_sources(store, cluster, prior_tiers)
+    log.info("consolidation: wrote semantic note %s from %d sources",
+             doc_id, len(cluster))
+    _graduate_note(store, home, cluster, summary, graduated=graduated)
+    return True
+
+
+def _record_pass(store, home: str, *, written: int, clusters: int, notes: list,
+                 prior_tiers: dict, graduated: list) -> int:
+    """Record the pass as one `consolidation_pass` change (undoable when it
+    wrote notes). Returns the change_log id."""
+    from mcpbrain import config
+    revert_ref = ""
+    if notes:
+        from mcpbrain.change_undo import revert_json
+        revert_ref = revert_json(
+            {"notes": notes, "tiers": prior_tiers, "graduated": graduated},
+            {"notes": notes, "tiers": {d: "hot" for d in prior_tiers},
+             "graduated": graduated,
+             # What each graduated file held when written, so undo can refuse
+             # to delete one edited since.
+             "graduated_content": _file_contents(config.records_dir(home), graduated)})
+    return store.record_change(
+        "consolidation_pass",
+        summary=f"Consolidated {written} semantic notes from {clusters} clusters",
+        source="consolidation",
+        revert_ref=revert_ref,
+    )
+
+
+def chunks_for_proposal(store, doc_ids: list[str]) -> list[dict] | None:
+    """The cluster a queued proposal names, re-read from the store. None when
+    any source is gone or already consolidated (hot/core) since the proposal."""
+    import json as _json
+    if not doc_ids:
+        return None
+    marks = ",".join("?" * len(doc_ids))
+    with store._connect() as db:
+        rows = {r["doc_id"]: r for r in db.execute(
+            f"SELECT doc_id, text, metadata, salience, memory_tier FROM chunks "
+            f"WHERE doc_id IN ({marks})", list(doc_ids)).fetchall()}
+    cluster = []
+    for d in doc_ids:
+        r = rows.get(d)
+        if r is None or (r["memory_tier"] or "") in ("hot", "core"):
+            return None
+        try:
+            meta = _json.loads(r["metadata"] or "{}")
+        except Exception:
+            meta = {}
+        cluster.append({"doc_id": d, "text": r["text"], "metadata": meta,
+                        "salience": float(r["salience"] or 0.0)})
+    return cluster
+
+
+def apply_proposal(store, home: str, doc_ids: list[str], summary: str) -> int:
+    """Write one queued (ask-first) cluster note exactly as apply mode would.
+    Returns the consolidation_pass change id, or 0 when the sources changed
+    since the proposal or no note was written."""
+    cluster = chunks_for_proposal(store, doc_ids)
+    if cluster is None:
+        return 0
+    notes: list[str] = []
+    prior_tiers: dict[str, str] = {}
+    graduated: list[str] = []
+    if not _apply_cluster(store, home, cluster, summary, notes=notes,
+                          prior_tiers=prior_tiers, graduated=graduated):
+        return 0
+    return _record_pass(store, home, written=1, clusters=1, notes=notes,
+                        prior_tiers=prior_tiers, graduated=graduated)
+
+
 def consolidate(store, home: str, *, cap: int = _CONSOLIDATION_CAP,
                 threshold: float = CONSOLIDATION_THRESHOLD, embedder=None) -> dict:
     """Run one consolidation pass.
@@ -467,11 +548,22 @@ def consolidate(store, home: str, *, cap: int = _CONSOLIDATION_CAP,
     embedder (optional): the local bge embedder; when supplied, clustering is
     embedding-based (semantic) rather than lexical word-overlap.
 
-    Returns {"clusters_found": N, "notes_written": M, "skipped": K}.
+    The "consolidation" automatic-change mode decides what happens: apply
+    writes the notes; ask queues one review per note (nothing is written, and
+    no new pass runs while one waits); off does nothing.
+
+    Returns {"clusters_found": N, "notes_written": M, "skipped": K}, plus
+    "proposed": P in ask mode.
     """
-    from mcpbrain import config
-    if not config.consolidation_enabled(home):
+    from mcpbrain import auto_changes, config
+    mode = config.auto_change_mode(home, "consolidation")
+    if mode == "off":
         return {"clusters_found": 0, "notes_written": 0, "skipped": 0}
+    if mode == "ask" and auto_changes.pending_targets(store, "consolidation"):
+        # A pass already waits for review: its sources are still unconsolidated,
+        # so a new pass would re-cluster them and spend LLM calls on a duplicate.
+        log.debug("consolidation: a pass is waiting for review — skipping")
+        return {"clusters_found": 0, "notes_written": 0, "skipped": 1, "proposed": 0}
 
     acc = _unconsolidated_salience(store)
     if acc < threshold:
@@ -487,6 +579,7 @@ def consolidate(store, home: str, *, cap: int = _CONSOLIDATION_CAP,
              "embedding" if embedder is not None else "lexical")
 
     written = 0
+    proposed = 0
     # What this pass changes, for undo: the note chunks it adds, each source
     # chunk's tier before promotion, and any memory file it graduates.
     notes: list[str] = []
@@ -497,30 +590,23 @@ def consolidate(store, home: str, *, cap: int = _CONSOLIDATION_CAP,
         summary = _call_claude(prompt)
         if not summary:
             continue
-        doc_id = _write_note(store, cluster, summary, written=notes)
-        if doc_id:
+        if mode == "ask":
+            doc_ids = [c["doc_id"] for c in cluster]
+            target = hashlib.sha256("|".join(sorted(doc_ids)).encode()).hexdigest()[:16]
+            first = summary.split("\n")[0].strip()
+            auto_changes.propose(
+                store, "consolidation", target,
+                f"Consolidate {len(cluster)} items into a note: {first[:100]}",
+                {"doc_ids": doc_ids, "summary": summary})
+            proposed += 1
+            continue
+        if _apply_cluster(store, home, cluster, summary, notes=notes,
+                          prior_tiers=prior_tiers, graduated=graduated):
             written += 1
-            # Mark source chunks as consolidated (promote to hot tier so they
-            # aren't re-clustered next pass).
-            _promote_sources(store, cluster, prior_tiers)
-            log.info("consolidation: wrote semantic note %s from %d sources",
-                     doc_id, len(cluster))
-            _graduate_note(store, home, cluster, summary, graduated=graduated)
 
-    revert_ref = ""
-    if notes:
-        from mcpbrain.change_undo import revert_json
-        revert_ref = revert_json(
-            {"notes": notes, "tiers": prior_tiers, "graduated": graduated},
-            {"notes": notes, "tiers": {d: "hot" for d in prior_tiers},
-             "graduated": graduated,
-             # What each graduated file held when written, so undo can refuse
-             # to delete one edited since.
-             "graduated_content": _file_contents(config.records_dir(home), graduated)})
-    store.record_change(
-        "consolidation_pass",
-        summary=f"Consolidated {written} semantic notes from {len(clusters)} clusters",
-        source="consolidation",
-        revert_ref=revert_ref,
-    )
+    if mode == "ask":
+        return {"clusters_found": len(clusters), "notes_written": 0, "skipped": 0,
+                "proposed": proposed}
+    _record_pass(store, home, written=written, clusters=len(clusters), notes=notes,
+                 prior_tiers=prior_tiers, graduated=graduated)
     return {"clusters_found": len(clusters), "notes_written": written, "skipped": 0}

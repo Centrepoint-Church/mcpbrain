@@ -169,13 +169,13 @@ def step(store, arm_value: float, *, outcome: str) -> None:
 # Advisory report
 # ---------------------------------------------------------------------------
 
-def _record_applied(store, current: float, recommended: float) -> None:
-    """Record the auto-apply as an undoable `bandit_applied` change. Never
-    raises: the threshold is already written, and bookkeeping must not turn
-    that into a reported failure."""
+def _record_applied(store, current: float, recommended: float) -> int:
+    """Record the auto-apply as an undoable `bandit_applied` change and return
+    its id. Never raises (0 on failure): the threshold is already written, and
+    bookkeeping must not turn that into a reported failure."""
     try:
         from mcpbrain.change_undo import revert_json
-        store.record_change(
+        return store.record_change(
             "bandit_applied", ref_id="recall_max_distance",
             summary=f"Recall threshold {current:.2f} -> {recommended:.2f}",
             source="threshold_bandit",
@@ -183,6 +183,17 @@ def _record_applied(store, current: float, recommended: float) -> None:
                                    {"recall_max_distance": recommended}))
     except Exception as exc:  # noqa: BLE001
         log.warning("bandit: could not record auto-apply: %s", exc)
+        return 0
+
+
+def apply_threshold(store, home: str, recommended: float) -> int:
+    """Set recall_max_distance to `recommended` and record the undoable change.
+    Returns the change_log id (0 if only the bookkeeping failed). The one
+    apply path for draft style tuning (auto_changes.APPLY["draft_style"])."""
+    from mcpbrain import config
+    current = config.recall_max_distance(home)
+    config.write_config(home, {"recall_max_distance": recommended})
+    return _record_applied(store, current, recommended)
 
 
 def advisory_report(store, home: str) -> dict:
@@ -246,16 +257,17 @@ def advisory_report(store, home: str) -> dict:
                     "Set bandit_auto_apply=true in config to auto-apply."
                 )
 
-        # Auto-apply only when explicitly enabled AND signal exists
+        # Auto-apply only when the draft_style mode is "apply" AND signal
+        # exists; "advise" and "off" write nothing.
         auto_apply = bool(
             has_signal
-            and config.bandit_auto_apply_enabled(home)
+            and config.auto_change_mode(home, "draft_style") == "apply"
             and abs(recommended - current) >= 0.01
         )
         if auto_apply:
             try:
-                config.write_config(home, {"recall_max_distance": recommended})
-                _record_applied(store, current, recommended)
+                from mcpbrain import auto_changes
+                auto_changes.APPLY["draft_style"](store, home, {"recommended": recommended})
                 log.info("bandit: auto-applied threshold %.2f → %.2f", current, recommended)
                 advisory += f" [AUTO-APPLIED: {current:.2f} → {recommended:.2f}]"
             except Exception as exc:

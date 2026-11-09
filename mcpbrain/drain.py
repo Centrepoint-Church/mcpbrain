@@ -36,7 +36,10 @@ import os
 from contextlib import nullcontext
 from pathlib import Path
 
-from mcpbrain import config, orgs, review_apply
+from mcpbrain import config, orgs
+# The tidy-up appliers run via auto_changes.run_tidy; drain.review_apply stays
+# importable for callers and tests that reach the appliers through it.
+from mcpbrain import review_apply  # noqa: F401
 from mcpbrain.contract import (
     normalise_org, sanitize_batch, validate_batch_wrapper, validate_extraction,
 )
@@ -153,32 +156,28 @@ def _grounding_filter(extraction: dict) -> tuple[dict, int]:
 # when the key is present; failures are isolated (log + continue). Registered by
 # block modules at import time.
 BLOCK_DRAINERS: dict = {}
-BLOCK_DRAINERS["review_orphan"] = lambda store, data: review_apply.apply_orphan_verdicts(
-    store, data.get("review_orphan") or [],
-    cap=config.review_max_apply_per_run(str(config.app_dir()))
-)
-BLOCK_DRAINERS["review_missing_org"] = lambda store, data: review_apply.apply_missing_org_verdicts(
-    store, data.get("review_missing_org") or [],
-    cap=config.review_max_apply_per_run(str(config.app_dir()))
-)
-BLOCK_DRAINERS["review_ownerless"] = lambda store, data: review_apply.apply_ownerless_verdicts(
-    store, data.get("review_ownerless") or [],
-    cap=config.review_max_apply_per_run(str(config.app_dir()))
-)
-BLOCK_DRAINERS["review_org"] = lambda store, data: review_apply.apply_org_verdicts(
-    store, data.get("review_org") or [],
-    cap=config.review_max_apply_per_run(str(config.app_dir()))
-)
-# Curator fuzzy-merge adjudication (org layer): the subagent's pushed
-# 'org_merge_review' answers ({pair_id, same, canonical}) are applied by the
-# curator-scoped applier. Registered here so the org merges land on push, same
-# as the local merge_answers path and the review_* families.
-def _drain_org_merge_review(store, data):
-    from mcpbrain import org_curate
-    return org_curate.apply_org_merge_answers(
-        store, data.get("org_merge_review") or [],
-        cap=config.review_max_apply_per_run(str(config.app_dir())))
-BLOCK_DRAINERS["org_merge_review"] = _drain_org_merge_review
+
+
+def _tidy_drainer(block: str):
+    """Graph tidy-up verdicts go through auto_changes.run_tidy, which applies,
+    queues for review, or drops them by the "tidy" automatic-change mode, capped
+    by review_max_apply_per_run."""
+    def _drain(store, data):
+        from mcpbrain import auto_changes
+        home = str(config.app_dir())
+        return auto_changes.run_tidy(store, home, block, data.get(block) or [],
+                                     cap=config.review_max_apply_per_run(home))
+    return _drain
+
+
+for _block in ("review_orphan", "review_missing_org", "review_ownerless", "review_org",
+               # Curator fuzzy-merge adjudication (org layer): the subagent's pushed
+               # 'org_merge_review' answers ({pair_id, same, canonical}) are applied
+               # by the curator-scoped applier (org_curate.apply_org_merge_answers),
+               # so the org merges land on push, same as the local merge_answers
+               # path and the review_* families.
+               "org_merge_review"):
+    BLOCK_DRAINERS[_block] = _tidy_drainer(_block)
 
 
 def _home(home) -> Path:
@@ -709,11 +708,12 @@ def drain(store, *, home=None, apply=None, embedder=None, budget=None,
                                     if _file_key_from_doc_id(d) == _f])
 
             try:
-                _merge_result = review_apply.apply_duplicate_verdicts(
-                    store, data.get("merge_answers") or [],
-                    cap=config.review_max_apply_per_run(str(config.app_dir()))
-                )
-                summary["merges"] += _merge_result["merged"]
+                from mcpbrain import auto_changes
+                _merge_result = auto_changes.run_tidy(
+                    store, str(config.app_dir()), "merge_answers",
+                    data.get("merge_answers") or [],
+                    cap=config.review_max_apply_per_run(str(config.app_dir())))
+                summary["merges"] += _merge_result.get("merged", 0)
             except Exception as exc:
                 log.error("drain: merge-answer processing failed in %s: %s", path.name, exc)
                 file_ok = False

@@ -126,7 +126,7 @@ def apply_suggestions(store, home: str,
 
     store.set_voice_analyser_state("last_applied_at", _now_iso())
     from mcpbrain.change_undo import revert_json
-    store.record_change(
+    change_id = store.record_change(
         "voice_apply",
         summary=f"Applied {len(pending)} voice suggestions to voice.md",
         source="voice_apply",
@@ -145,4 +145,34 @@ def apply_suggestions(store, home: str,
         log.warning("voice_apply: git commit failed (suggestions still applied): %s", exc)
 
     log.info("voice_apply: applied %d suggestions", len(pending))
-    return {"applied": len(pending), "skipped": 0, "blocked": None}
+    return {"applied": len(pending), "skipped": 0, "blocked": None, "change_id": change_id}
+
+
+def run_auto(store, home: str) -> dict:
+    """The daemon's automatic voice step, by the "voice" automatic-change mode:
+
+    - apply: apply_suggestions (cooldown and line cap as always)
+    - ask: queue one review for the suggestions apply would take now. The
+      suggestions themselves stay 'pending' in their own table; the review row
+      only names their ids, and approving runs apply_suggestions on them. A
+      later cycle refreshes that one review rather than adding another.
+    - off: change nothing
+    """
+    from mcpbrain import auto_changes, config
+    mode = config.auto_change_mode(home, "voice")
+    if mode == "off":
+        return {"applied": 0, "skipped": 0, "blocked": "automatic voice changes are off"}
+    if mode == "apply":
+        return apply_suggestions(store, home)
+    allowed, reason = can_apply(store, home)
+    if not allowed:
+        return {"applied": 0, "queued": 0, "blocked": reason}
+    ids = [s["id"] for s in store.pending_voice_suggestions()
+           if float(s.get("confidence") or 0.0) >= _MIN_CONFIDENCE][:_MAX_DIFF_LINES]
+    if not ids:
+        return {"applied": 0, "queued": 0, "blocked": None}
+    n = len(ids)
+    auto_changes.propose(store, "voice", "context/voice.md",
+                         f"Add {n} line{'s' if n != 1 else ''} to your voice file",
+                         {"suggestion_ids": ids})
+    return {"applied": 0, "queued": 1, "blocked": None}

@@ -169,6 +169,23 @@ class ControlServer:
                     except Exception as exc:
                         log.exception("changes feed failed")
                         return h_json(self, 500, {"error": str(exc)})
+                if self.path == "/api/settings":
+                    from mcpbrain import settings_api
+                    return h_json(self, 200, settings_api.get_settings(server.home))
+                if self.path in ("/api/pending", "/api/findings"):
+                    if server.store is None:
+                        return h_json(self, 503, {"error": "dashboard not available"})
+                    try:
+                        if self.path == "/api/pending":
+                            from mcpbrain import auto_changes
+                            items = auto_changes.list_pending(server.store)
+                        else:
+                            from mcpbrain import dashboard as dash
+                            items = dash.findings_view(server.store)
+                        return h_json(self, 200, {"items": items})
+                    except Exception as exc:
+                        log.exception("%s failed", self.path)
+                        return h_json(self, 500, {"error": str(exc)})
                 if self.path.split("?")[0] == "/api/graph/canvas":
                     if server.store is None:
                         return h_json(self, 503, {"error": "dashboard not available"})
@@ -383,6 +400,43 @@ class ControlServer:
         h.send_response(200); h.send_header("Content-Type", "text/javascript")
         h.send_header("Content-Length", str(len(data))); h.end_headers(); h.wfile.write(data)
 
+    def _close_finding(self, h, finding_id: int, *, dismiss: bool):
+        """POST /api/findings/<id>/fixed|dismiss. Acts on the finding and every
+        open finding grouped with it (same type and summary). A review item
+        (pending change, proposed correction) is declined instead: its own
+        queue is where it lives."""
+        from mcpbrain import auto_changes, dashboard as dash
+        from mcpbrain import graph_corrections as gc
+        from mcpbrain.change_undo import revert_json
+        f = self.store.get_finding(finding_id)
+        if f and not f["resolved_at"] and str(f["ref_id"]).isdigit():
+            if f["finding_type"] == auto_changes.FINDING_TYPE:
+                out = auto_changes.decide(self.store, str(self.home), int(f["ref_id"]),
+                                          approve=False)
+                return h_json(h, 200 if out["ok"] else 409, {"ok": out["ok"], "declined": True})
+            if f["finding_type"] == gc.FINDING_TYPE:
+                ok = gc.decline(self.store, int(f["ref_id"]))["status"] == "declined"
+                return h_json(h, 200 if ok else 409, {"ok": ok, "declined": True})
+        with self.store._connect() as db:
+            row = db.execute("SELECT summary FROM proactive_findings WHERE id=?",
+                             (finding_id,)).fetchone()
+        label = ((row["summary"] if row else "") or (f or {}).get("finding_type") or "finding")
+        ids = dash.close_finding_group(self.store, finding_id, dismiss=dismiss)
+        if not ids:
+            return h_json(h, 404, {"error": "finding not found or already closed"})
+        if len(ids) > 1:
+            label += f" (x{len(ids)})"
+        if dismiss:
+            self.store.record_change(
+                "finding_dismissed", ref_id=str(finding_id), source="dashboard",
+                summary=f"Dismissed: {label}",
+                revert_ref=revert_json({"ids": ids, "verdict": None},
+                                       {"ids": ids, "verdict": "dismissed_by_human"}))
+        else:
+            self.store.record_change("finding_fixed", ref_id=str(finding_id),
+                                     summary=f"Marked fixed: {label}", source="dashboard")
+        return h_json(h, 200, {"ok": True, "closed": len(ids)})
+
     def _handle_post(self, h):
         # Clamp Content-Length to a non-negative int. A negative or unparseable
         # value would otherwise slip past the size cap below and turn the
@@ -580,6 +634,30 @@ class ControlServer:
                 out = gc.decline(self.store, cid)
                 return h_json(h, 200 if out["status"] == "declined" else 404, out)
 
+            if h.path == "/api/settings":
+                from mcpbrain import settings_api
+                out = settings_api.apply_settings(self.home, body)
+                if not out["ok"]:
+                    return h_json(h, 400, {"error": out["error"]})
+                return h_json(h, 200, out)
+
+            m = re.match(r"^/api/pending/(\d+)/(apply|decline)$", h.path)
+            if m:
+                if self.store is None:
+                    return h_json(h, 503, {"error": "dashboard not available"})
+                from mcpbrain import auto_changes
+                out = auto_changes.decide(self.store, str(self.home), int(m.group(1)),
+                                          approve=(m.group(2) == "apply"))
+                if out["ok"]:
+                    return h_json(h, 200, {"ok": True})
+                return h_json(h, 404 if out["reason"] == auto_changes.NOT_FOUND else 409, out)
+
+            m = re.match(r"^/api/findings/(\d+)/(fixed|dismiss)$", h.path)
+            if m:
+                if self.store is None:
+                    return h_json(h, 503, {"error": "dashboard not available"})
+                return self._close_finding(h, int(m.group(1)), dismiss=(m.group(2) == "dismiss"))
+
             m = re.match(r"^/api/dashboard/findings/(\d+)/dismiss$", h.path)
             if m:
                 if self.store is None:
@@ -595,6 +673,14 @@ class ControlServer:
                     if gc.decline(self.store, int(finding["ref_id"]))["status"] == "declined":
                         self.store.record_change("finding_dismissed", ref_id=str(finding_id))
                         return h_json(h, 200, {"dismissed": True, "correction": "declined"})
+                from mcpbrain import auto_changes
+                if finding and finding["finding_type"] == auto_changes.FINDING_TYPE and \
+                        not finding["resolved_at"] and str(finding["ref_id"]).isdigit():
+                    # Same for a change held for review: dismissing declines it,
+                    # and decide() resolves this finding.
+                    if auto_changes.decide(self.store, str(self.home), int(finding["ref_id"]),
+                                           approve=False)["ok"]:
+                        return h_json(h, 200, {"dismissed": True, "change": "declined"})
                 from mcpbrain.agent_errs import FINDING_TYPE as _AGENT_STDERR_FINDING_TYPE
                 verdict = (None if finding and finding["finding_type"] == _AGENT_STDERR_FINDING_TYPE
                            else "dismissed_by_human")

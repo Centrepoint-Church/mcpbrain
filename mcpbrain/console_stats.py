@@ -312,11 +312,17 @@ def stats(store, home, status: dict, *, now: datetime | None = None) -> dict:
     except Exception as exc:  # noqa: BLE001 — degrade, never break the payload
         log.warning("stats: list_communities failed: %s", exc)
         circles = 0
+    # Reviews waiting in Needs you: proposed graph corrections plus automatic
+    # changes held under "ask me first" (auto_changes).
     try:
         reviews = len(store.pending_corrections())
     except Exception as exc:  # noqa: BLE001
         log.warning("stats: pending_corrections failed: %s", exc)
         reviews = 0
+    try:
+        reviews += int(store.pending_changes_count())
+    except Exception as exc:  # noqa: BLE001
+        log.warning("stats: pending_changes_count failed: %s", exc)
 
     backfill = status.get("backfill") or {}
     sources = []
@@ -345,6 +351,13 @@ def stats(store, home, status: dict, *, now: datetime | None = None) -> dict:
     spool = status.get("spool") or {}
     units_pending = int(spool.get("pending") or 0)
     open_findings = int(status.get("open_findings") or 0)
+    # Each Needs-you item shows once: a pending change or proposed correction
+    # also carries a finding, but it is counted (and listed) as a review.
+    try:
+        from mcpbrain.dashboard import REVIEW_FINDING_TYPES  # noqa: PLC0415
+        open_findings = int(store.open_findings_count(exclude_types=REVIEW_FINDING_TYPES))
+    except Exception:  # noqa: BLE001 — fall back to the status snapshot's total
+        pass
     paused = bool(status.get("paused"))
 
     verdict = health(

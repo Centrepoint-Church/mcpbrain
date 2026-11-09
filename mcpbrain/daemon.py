@@ -919,6 +919,22 @@ def _mac_user_is_active() -> bool:
 _CONFIRMABLE_TOOLS = frozenset({"brain_graph_correct"})
 
 
+
+def _requests_for_mode(store, kind: str, build, key: str) -> list:
+    """Block requests for an automatic-change kind, by its mode: none when off
+    (nothing would be written), and in ask mode none for an item whose earlier
+    answer waits for review or was declined (declining means don't ask again
+    while in ask mode; apply mode requests it as usual)."""
+    from mcpbrain import auto_changes
+    mode = config.auto_change_mode(str(app_dir()), kind)
+    if mode == "off":
+        return []
+    reqs = build(store)
+    if mode == "ask":
+        skip = auto_changes.pending_targets(store, kind, include_declined=True)
+        reqs = [r for r in reqs if str(r.get(key)) not in skip]
+    return reqs
+
 class Daemon:
     """Owns the store-writing loop: sync -> embed on an interval, with
     pause/resume and a single-writer lock.
@@ -3859,15 +3875,18 @@ class Daemon:
             log.warning("voice_analyse failed: %s", exc, exc_info=True)
             return {"voice_analyse": False, "error": str(exc)}
 
-        if config.voice_auto_apply_enabled(home):
-            try:
-                from mcpbrain.voice_apply import apply_suggestions
-                apply_result = apply_suggestions(self._store, home)
-                log.info("voice_auto_apply: applied=%d blocked=%s",
-                         apply_result.get("applied", 0), apply_result.get("blocked"))
-                summary["auto_applied"] = apply_result.get("applied", 0)
-            except Exception as exc:  # noqa: BLE001
-                log.warning("voice_auto_apply failed: %s", exc, exc_info=True)
+        # Apply, ask first or off: config.auto_change_mode(home, "voice").
+        try:
+            from mcpbrain.voice_apply import run_auto
+            apply_result = run_auto(self._store, home)
+            log.info("voice_auto_apply: applied=%d queued=%d blocked=%s",
+                     apply_result.get("applied", 0), apply_result.get("queued", 0),
+                     apply_result.get("blocked"))
+            summary["auto_applied"] = apply_result.get("applied", 0)
+            if apply_result.get("queued"):
+                summary["queued"] = apply_result["queued"]
+        except Exception as exc:  # noqa: BLE001
+            log.warning("voice_auto_apply failed: %s", exc, exc_info=True)
 
         self._last_voice_analyse = now
         return summary
@@ -4484,6 +4503,12 @@ class Daemon:
             from mcpbrain import review
             from mcpbrain import config as _config
             home = str(_config.app_dir())
+            mode = _config.auto_change_mode(home, "tidy")
+            if mode == "off":
+                # Graph tidy-up is off: don't ask the AI about findings nobody
+                # will act on.
+                self._last_review = now
+                return {"skipped": "off"}
             cap = _config.review_max_apply_per_run(home)
             kind_to_block_key = {
                 "lint:orphan_entity": "review_orphan",
@@ -4495,6 +4520,11 @@ class Daemon:
             }
             units = review.build_review_units(
                 self._store, kinds=list(kind_to_block_key), cap=cap)
+            if mode == "ask":
+                # A finding whose verdict already waits for review is not re-asked.
+                from mcpbrain import auto_changes
+                waiting = auto_changes.pending_targets(self._store, "tidy")
+                units = [u for u in units if f"finding:{u['finding_id']}" not in waiting]
             by_block: dict[str, list] = {}
             for u in units:
                 block_key = kind_to_block_key.get(u["packet"].get("finding_type"))
@@ -4786,8 +4816,10 @@ class Daemon:
             from mcpbrain.community_synth import build_community_requests
             from mcpbrain.memory_distil import build_distil_requests
 
-            profile_reqs = build_profile_requests(self._store)
-            community_reqs = build_community_requests(self._store)
+            profile_reqs = _requests_for_mode(
+                self._store, "profiles", build_profile_requests, "entity_id")
+            community_reqs = _requests_for_mode(
+                self._store, "circles", build_community_requests, "community_id")
             distil_reqs = build_distil_requests(self._store)
             with self._stash_lock:
                 self._pending_blocks.update({
