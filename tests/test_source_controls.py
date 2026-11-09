@@ -282,7 +282,8 @@ def _chunk(store, doc_id, *, thread, labels="INBOX", subject="Hall B", body=None
 
 
 def test_reinclude_keeps_promotions_chunk_eligible_through_prepare(tmp_path, monkeypatch):
-    """Review Focus 4: the salience and derived gates must not re-cold it."""
+    """Review Focus 4: the salience gate must not re-cold an included chunk.
+    A derived chunk (here a draft) is refused and stays cold (final review)."""
     from mcpbrain import prepare
     monkeypatch.setenv("MCPBRAIN_HOME", str(tmp_path))
     _cfg(tmp_path, {"salience_gate": True})
@@ -294,29 +295,28 @@ def test_reinclude_keeps_promotions_chunk_eligible_through_prepare(tmp_path, mon
     state = {c["doc_id"] for c in s.unenriched_chunks()}
     assert "promo-1" not in state and "draft-1" not in state   # both went cold
 
-    assert s.reinclude_chunks(["promo-1", "draft-1"]) == 2
+    assert s.reinclude_chunks(["promo-1", "draft-1"]) == {"changed": 1, "skipped": 1}
     prepare.prepare_units(s, thread_cap=10, char_budget=100000,
                           resolution_due=False, home=str(tmp_path))
     with s._connect() as db:
         rows = {r["doc_id"]: dict(r) for r in db.execute(
             "SELECT doc_id, enrich_state, enrich_attempts FROM chunks")}
     assert rows["promo-1"]["enrich_state"] != "cold"
-    assert rows["draft-1"]["enrich_state"] != "cold"
+    assert rows["draft-1"]["enrich_state"] == "cold"
     meta = s.get_chunk("promo-1")["metadata"]
     assert meta["force_enrich"] is True
     units = [json.loads(p.read_text())
              for p in (tmp_path / "enrich_queue" / "units").glob("*.json")]
     tids = {t["thread_id"] for u in units if u["kind"] == "thread" for t in u["threads"]}
-    assert {"t-promo", "t-draft"} <= tids
+    assert "t-promo" in tids and "t-draft" not in tids
 
 
 def test_reinclude_resets_enrich_columns(tmp_path):
     s = _store(tmp_path)
     _chunk(s, "c1", thread="t1")
     s.set_enrich_state(["c1"], "cold")
-    s.mark_enriched(["c1"])
     s.bump_enrich_attempts(["c1"])
-    assert s.reinclude_chunks(["c1", "missing"]) == 1
+    assert s.reinclude_chunks(["c1", "missing"]) == {"changed": 1, "skipped": 0}
     with s._connect() as db:
         r = dict(db.execute("SELECT enriched, enriched_version, enrich_state, "
                             "enrich_attempts FROM chunks WHERE doc_id='c1'").fetchone())
@@ -389,7 +389,9 @@ def test_cold_and_waiting_lists_page_with_reason(tmp_path):
     assert page1["total"] == 5 and page1["page"] == 1
     assert [i["doc_id"] for i in page1["items"]] == ["p4", "p3"]
     it = page1["items"][0]
-    assert set(it) == {"doc_id", "title", "source", "date", "reason"}
+    assert set(it) == {"doc_id", "title", "source", "date", "reason", "enriched",
+                       "includable"}
+    assert it["includable"] is True and it["enriched"] is False
     assert it["title"] == "Sale 4" and it["source"] == "gmail" and it["reason"] == "promotions"
     page3 = sc.list_cold(s, str(tmp_path), page=3, page_size=2)
     assert [i["doc_id"] for i in page3["items"]] == ["p0"]
@@ -484,7 +486,7 @@ def test_reinclude_and_prioritise_routes(srv):
     _chunk(s, "w1", thread="tw")
     _chunk(s, "w2", thread="tw2")
     code, body = _call(server, "/api/chunks/reinclude", {"doc_ids": ["p1"]})
-    assert code == 200 and body == {"ok": True, "changed": 1}
+    assert code == 200 and body == {"ok": True, "changed": 1, "skipped": 0}
     assert s.get_chunk("p1")["metadata"]["force_enrich"] is True
     code, body = _call(server, "/api/chunks/prioritise", {"doc_ids": ["w1"]})
     assert code == 200 and body == {"ok": True, "changed": 1}

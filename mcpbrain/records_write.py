@@ -5,13 +5,52 @@ appends/creates one file and commits it BY NAME (never `git add -A`), keeping
 the daemon's commits isolated from the gardener's hygiene commits.
 """
 from __future__ import annotations
+import functools
 import logging
 import os
 import subprocess
+import threading
+from contextlib import contextmanager
 from datetime import datetime, timezone
 from pathlib import Path
 
 log = logging.getLogger(__name__)
+
+# One lock for every records-repo git write in this process: the daemon's
+# writers (drain captures, consolidation, voice, cadences) and the console's
+# undo paths (change_undo, on the HTTP thread). Two `git add`/`commit` runs at
+# once fight over .git/index.lock; serialised, they never do. Reentrant, so a
+# writer that holds it can call another locked writer.
+_REPO_LOCK = threading.RLock()
+LOCK_TIMEOUT_S = 30.0
+BUSY = "The records folder is busy saving another change. Try again in a minute."
+
+
+class RecordsBusy(RuntimeError):
+    """The records lock was not free within LOCK_TIMEOUT_S; str() is BUSY."""
+
+    def __init__(self) -> None:
+        super().__init__(BUSY)
+
+
+@contextmanager
+def repo_lock():
+    """Hold the records-repo write lock, or raise RecordsBusy after
+    LOCK_TIMEOUT_S. Wrap any read-check-then-write of a records file in it."""
+    if not _REPO_LOCK.acquire(timeout=LOCK_TIMEOUT_S):
+        raise RecordsBusy()
+    try:
+        yield
+    finally:
+        _REPO_LOCK.release()
+
+
+def _locked(fn):
+    @functools.wraps(fn)
+    def wrapper(*args, **kwargs):
+        with repo_lock():
+            return fn(*args, **kwargs)
+    return wrapper
 
 def _git(repo: str, *args: str) -> subprocess.CompletedProcess:
     # Force stable English git output (LC_ALL=C, LANGUAGE="") so a localized
@@ -32,6 +71,7 @@ def _has_staged(repo: str, relpath: str) -> bool:
         check=False, capture_output=True, env=env)
     return result.returncode != 0
 
+@_locked
 def _commit_file(repo: str, relpath: str, message: str) -> bool:
     """Stage relpath by name and commit only if something is staged.
 
@@ -43,6 +83,7 @@ def _commit_file(repo: str, relpath: str, message: str) -> bool:
     _git(repo, "commit", "-m", message)
     return True
 
+@_locked
 def append_decision(repo: str, *, text: str, rationale: str = "", owner: str = "",
                     supersedes: str = "") -> bool:
     p = Path(repo) / "state" / "decisions.md"
@@ -62,6 +103,7 @@ def append_decision(repo: str, *, text: str, rationale: str = "", owner: str = "
         p.write_text(original[:insert] + row + original[insert:])
     return _commit_file(repo, "state/decisions.md", f"decision: {text[:60]}")
 
+@_locked
 def append_continuity(repo: str, *, text: str, today: str | None = None) -> bool:
     p = Path(repo) / "state" / "hot.md"
     today = today or datetime.now(timezone.utc).strftime("%Y-%m-%d")
@@ -141,6 +183,7 @@ def _enforce_change_cap(p: Path, new_content: str, max_changed_lines: int | None
         )
 
 
+@_locked
 def write_gardener_reference(repo: str, filename: str, new_content: str, *,
                              max_changed_lines: int | None = None) -> bool:
     """Write reference/<filename> for the drift lane.
@@ -164,6 +207,7 @@ def write_gardener_reference(repo: str, filename: str, new_content: str, *,
                         f"gardener: apply drift (reference/{filename})")
 
 
+@_locked
 def write_gardener_context(repo: str, filename: str, new_content: str, *,
                            asserts_person_role: bool = False,
                            attribution_source: str | None = None,
@@ -212,6 +256,7 @@ def write_gardener_context(repo: str, filename: str, new_content: str, *,
     return _commit_file(repo, f"context/{filename}", message)
 
 
+@_locked
 def write_memory(repo: str, *, slug: str, description: str, body: str,
                  memory_type: str = "project") -> bool:
     """Write memory/<slug>.md and a MEMORY.md pointer, committing both by name.
@@ -247,6 +292,7 @@ def write_memory(repo: str, *, slug: str, description: str, body: str,
     return True
 
 
+@_locked
 def restore_file(repo: str, relpath: str, content: str | None, message: str) -> bool:
     """Put one records-repo file back to `content` (None removes it) and commit
     it by name as its own commit. Used by change_undo to reverse a voice or
@@ -261,6 +307,7 @@ def restore_file(repo: str, relpath: str, content: str | None, message: str) -> 
     return _commit_file(repo, relpath, message)
 
 
+@_locked
 def remove_memory(repo: str, slug: str, message: str) -> bool:
     """Remove memory/<slug>.md and its MEMORY.md pointer, committing both by
     name. The reverse of write_memory, used by change_undo to take back a

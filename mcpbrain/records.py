@@ -315,16 +315,18 @@ def ensure_records_repo(repo_dir: str, *, git_name: str = "mcpbrain",
                 p.parent.mkdir(parents=True, exist_ok=True)
                 p.write_text(_render_template(tmpl, profile), encoding="utf-8")
                 newly_written.append(rel)
-    if fresh:
-        _git(repo_dir, "add", "-A")
-        staged = _git(repo_dir, "diff", "--cached", "--quiet", check=False).returncode != 0
-        if staged:
-            _git(repo_dir, "commit", "-m", "scaffold: initialize records repo")
-    elif newly_written:
-        _git(repo_dir, "add", *newly_written)
-        staged = _git(repo_dir, "diff", "--cached", "--quiet", check=False).returncode != 0
-        if staged:
-            _git(repo_dir, "commit", "-m", "scaffold: add missing scaffold files")
+    from mcpbrain.records_write import repo_lock  # the one records git lock
+    with repo_lock():
+        if fresh:
+            _git(repo_dir, "add", "-A")
+            staged = _git(repo_dir, "diff", "--cached", "--quiet", check=False).returncode != 0
+            if staged:
+                _git(repo_dir, "commit", "-m", "scaffold: initialize records repo")
+        elif newly_written:
+            _git(repo_dir, "add", *newly_written)
+            staged = _git(repo_dir, "diff", "--cached", "--quiet", check=False).returncode != 0
+            if staged:
+                _git(repo_dir, "commit", "-m", "scaffold: add missing scaffold files")
     _ENSURED.add(repo_key)
     return repo_dir
 

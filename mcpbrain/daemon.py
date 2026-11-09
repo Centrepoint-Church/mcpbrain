@@ -4517,14 +4517,7 @@ class Daemon:
                 self._last_review = now
                 return {"skipped": "off"}
             cap = _config.review_max_apply_per_run(home)
-            kind_to_block_key = {
-                "lint:orphan_entity": "review_orphan",
-                "lint:missing_org": "review_missing_org",
-                "lint:ownerless_action": "review_ownerless",
-                "lint:ambiguous_org": "review_org",
-                "lint:duplicate_org": "review_org",
-                "org_unrecognised": "review_org",
-            }
+            kind_to_block_key = review.TIDY_BLOCK_KEYS
             units = review.build_review_units(
                 self._store, kinds=list(kind_to_block_key), cap=cap)
             if mode == "ask":
@@ -5268,10 +5261,56 @@ class Daemon:
             supervised = (win_supervised(str(app_dir()))
                           if sys.platform == "win32" else True)
         self._record_watchdog_exit()
+        if self._restart_with_login_start_off():
+            return
         if supervised:
             self._exit_for_restart()
         else:
             self._spawn_replacement()
+
+    def _restart_with_login_start_off(self) -> bool:
+        """Restart without relying on the login agent's supervision, when the
+        owner switched "Start when I log in" off. Returns False (the caller
+        takes the usual path) when login start is on or on other platforms.
+
+        With login start off the launchd plist has KeepAlive false and the
+        Windows task is disabled, so a bare exit would leave the daemon dead
+        until someone starts it by hand.
+        - darwin: agents.restart_agent (`launchctl kickstart -k`), which
+          relaunches a loaded job whatever its KeepAlive says. If that fails,
+          spawn a successor rather than exit into nothing.
+        - win32: the detached start-after helper (system_ops), which waits for
+          this process to exit and then runs agents.start_agent (it enables
+          the disabled task, runs it and disables it again); then exit.
+        `_agent_restart` and `_spawn_detached` are injectable for tests."""
+        home = str(app_dir())
+        if sys.platform not in ("darwin", "win32") or config.start_at_login(home):
+            return False
+        if sys.platform == "darwin":
+            restart = getattr(self, "_agent_restart", None)
+            if restart is None:
+                from mcpbrain import agents
+                restart = agents.restart_agent
+            try:
+                restart("darwin")
+            except Exception:  # noqa: BLE001 — never leave the daemon dead
+                log.exception("watchdog: launchctl kickstart failed; spawning a successor")
+                self._spawn_replacement()
+            return True
+        spawn = getattr(self, "_spawn_detached", None)
+        if spawn is None:
+            from mcpbrain import system_ops
+            spawn = system_ops._spawn_detached
+        argv = [sys.executable, "-m", "mcpbrain.system_ops", "start-after",
+                str(os.getpid()), home]
+        try:
+            spawn(argv)
+        except Exception:  # noqa: BLE001 — without the helper, spawn our own successor
+            log.exception("watchdog: could not spawn the start helper; spawning a successor")
+            self._spawn_replacement()
+            return True
+        self._exit_for_restart()
+        return True
 
     def _maintenance_loop(self) -> None:
         """Run due cadence passes on our own clock, independent of the bulk cycle.

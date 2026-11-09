@@ -19,6 +19,28 @@ def _note(change_ids: list | None, change: dict) -> None:
         change_ids.append(change["change_log_id"])
 
 
+def _entity_name(store, entity_id: str) -> str:
+    """The entity's name for a change summary, written at apply time so the
+    feed reads in words (the change keeps the id as its ref_id)."""
+    try:
+        e = store.get_entity(entity_id)
+    except Exception:  # noqa: BLE001 — a summary must never block the write
+        e = None
+    return (e or {}).get("name") or "an unnamed entity"
+
+
+def _action_text(store, action_id) -> str:
+    try:
+        with store._connect() as db:
+            r = db.execute("SELECT text FROM actions WHERE id=?", (action_id,)).fetchone()
+    except Exception:  # noqa: BLE001
+        r = None
+    text = " ".join(str((r and r[0]) or "").split())
+    if not text:
+        return "an action"
+    return text if len(text) <= 80 else text[:77].rstrip() + "..."
+
+
 def apply_orphan_verdicts(store, verdicts: list[dict], *, cap: int,
                           change_ids: list | None = None) -> dict:
     """Apply a batch of orphan-finding verdicts.
@@ -59,7 +81,7 @@ def apply_orphan_verdicts(store, verdicts: list[dict], *, cap: int,
                 result["capped"] += 1
                 continue
             change = {"change_type": "tidy_suppress", "source": "review_orphan",
-                      "summary": f"Hid orphan entity {ref_id}"}
+                      "summary": f"Hid {_entity_name(store, ref_id)}, which has no links"}
             if store.suppress_entity(ref_id, reason=verdict.get("reason", ""), change=change):
                 _note(change_ids, change)
                 store.resolve_finding(finding_id, verdict="suppress")
@@ -125,7 +147,7 @@ def apply_missing_org_verdicts(
                 result["capped"] += 1
                 continue
             change = {"change_type": "tidy_org", "source": "review_missing_org",
-                      "summary": f"Set org of {ref_id} to {org}"}
+                      "summary": f"Set organisation of {_entity_name(store, ref_id)} to {org}"}
             if store.update_entity_org(ref_id, org, change=change):
                 _note(change_ids, change)
                 store.resolve_finding(finding_id, verdict="assign")
@@ -190,7 +212,7 @@ def apply_ownerless_verdicts(store, verdicts: list[dict], *, cap: int,
                 result["capped"] += 1
                 continue
             change = {"change_type": "tidy_owner", "source": "review_ownerless",
-                      "summary": f"Set owner of action {ref_id} to {owner}"}
+                      "summary": f"Set owner of {_action_text(store, ref_id)} to {owner}"}
             if store.assign_action_owner(
                     ref_id, owner, owner_entity_id=verdict.get("owner_entity_id", ""),
                     change=change):
@@ -304,7 +326,7 @@ def apply_org_verdicts(
                 result["capped"] += 1
                 continue
             change = {"change_type": "tidy_org", "source": "review_org",
-                      "summary": f"Set org of {ref_id} to {canonical_org}"}
+                      "summary": f"Set organisation of {_entity_name(store, ref_id)} to {canonical_org}"}
             if store.update_entity_org(ref_id, canonical_org, change=change):
                 _note(change_ids, change)
                 store.resolve_finding(finding_id, verdict="canonicalize")
@@ -436,7 +458,8 @@ def apply_duplicate_verdicts(store, answers: list[dict], *, cap: int,
 
         winner, loser = _pick_winner(a, b)
         change = {"change_type": "tidy_merge", "source": "merge_review",
-                  "summary": f"Merged {loser['id']} into {winner['id']}"}
+                  "summary": (f"Merged {loser.get('name') or 'an unnamed entity'} into "
+                             f"{winner.get('name') or 'an unnamed entity'}")}
         try:
             store.merge_entities(loser["id"], winner["id"],
                                  canonical_name=ans.get("canonical") or None,

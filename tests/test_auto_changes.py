@@ -750,7 +750,8 @@ def test_findings_list_groups_and_excludes_reviews(server):
     code, out = _req(srv, "GET", "/api/findings")
     assert code == 200
     items = out["items"]
-    assert {i["finding_type"] for i in items} == {"agent_stderr", "lint:orphan_entity"}
+    # lint:orphan_entity is graph tidy-up's input, never a Needs-you item.
+    assert {i["finding_type"] for i in items} == {"agent_stderr"}
     stderr = next(i for i in items if i["finding_type"] == "agent_stderr")
     assert stderr["count"] == 2 and stderr["detail"] in ("trace a", "trace b")
     assert set(stderr) == {"id", "finding_type", "summary", "detail", "severity",

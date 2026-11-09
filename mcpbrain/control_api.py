@@ -189,9 +189,11 @@ class ControlServer:
                     from mcpbrain import change_undo
                     q = urllib.parse.parse_qs(urllib.parse.urlparse(self.path).query)
                     try:
-                        hours = max(1, int(q.get("hours", ["24"])[0]))
+                        hours = int(q.get("hours", ["24"])[0])
                     except (TypeError, ValueError):
                         return h_json(self, 400, {"error": "hours must be an integer"})
+                    if not 1 <= hours <= 720:
+                        return h_json(self, 400, {"error": "hours must be between 1 and 720"})
                     try:
                         if self.path.split("?")[0] == "/api/changes":
                             items = change_undo.feed(server.store, hours=hours)
@@ -810,9 +812,12 @@ class ControlServer:
                     out = self.store.retry_reflow_gave_up(doc_ids=ids)
                     return h_json(h, 200, {"ok": True, **out})
                 if h.path == "/api/chunks/reinclude":
-                    changed = self.store.reinclude_chunks(ids)
-                else:
-                    changed = self.store.prioritise_chunks(ids)
+                    # Derived chunks are refused and counted as skipped.
+                    from mcpbrain import source_controls
+                    out = self.store.reinclude_chunks(
+                        ids, rules=source_controls.rules_for(self.store, self.home))
+                    return h_json(h, 200, {"ok": True, **out})
+                changed = self.store.prioritise_chunks(ids)
                 return h_json(h, 200, {"ok": True, "changed": changed})
 
             if h.path == "/api/settings":

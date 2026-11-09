@@ -361,10 +361,11 @@ def stats(store, home, status: dict, *, now: datetime | None = None) -> dict:
     units_pending = int(spool.get("pending") or 0)
     open_findings = int(status.get("open_findings") or 0)
     # Each Needs-you item shows once: a pending change or proposed correction
-    # also carries a finding, but it is counted (and listed) as a review.
+    # also carries a finding, but it is counted (and listed) as a review. The
+    # lint findings graph tidy-up consumes are its input, never counted.
     try:
-        from mcpbrain.dashboard import REVIEW_FINDING_TYPES  # noqa: PLC0415
-        open_findings = int(store.open_findings_count(exclude_types=REVIEW_FINDING_TYPES))
+        from mcpbrain.dashboard import NOT_NEEDS_YOU_TYPES  # noqa: PLC0415
+        open_findings = int(store.open_findings_count(exclude_types=NOT_NEEDS_YOU_TYPES))
     except Exception:  # noqa: BLE001 — fall back to the status snapshot's total
         pass
     paused = bool(status.get("paused"))

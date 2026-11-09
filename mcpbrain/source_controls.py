@@ -5,7 +5,9 @@ of the graph (cold) with the rule that did it, chunks waiting for enrichment
 (in queue order), and chunks whose reflow gave up. Acting on them is
 Store.reinclude_chunks / Store.prioritise_chunks.
 
-Each item is {doc_id, title, source, date, reason}; each list is
+Each item is {doc_id, title, source, date, reason}; a cold item also carries
+`enriched` (it is already in the graph) and `includable` (False for a chunk
+made from other items, which Store.reinclude_chunks refuses). Each list is
 {"items", "total", "page"}.
 """
 from __future__ import annotations
@@ -117,25 +119,33 @@ def _item(row: dict, reason: str) -> dict:
             "reason": reason}
 
 
-def _page(store, kind: str, page: int, page_size: int, reason_of) -> dict:
+def _page(store, kind: str, page: int, page_size: int, reason_of, extra=None) -> dict:
     page = max(1, int(page))
     page_size = max(1, min(int(page_size), MAX_PAGE_SIZE))
     rows, total = store.chunk_list_page(kind, offset=(page - 1) * page_size,
                                         limit=page_size)
-    return {"items": [_item(r, reason_of(r)) for r in rows], "total": total, "page": page}
+    items = [{**_item(r, reason_of(r)), **(extra(r) if extra else {})} for r in rows]
+    return {"items": items, "total": total, "page": page}
 
 
-def _rules(store, home) -> sc.Rules:
+def rules_for(store, home) -> sc.Rules:
+    """The owner's source-class rules (brief prefixes, Drive folders, own
+    addresses, generated labels), as prepare's derived gate reads them."""
     return sc.Rules.from_config(
         str(home), generated_label_ids=sc.cached_generated_label_ids(store))
 
 
 def list_cold(store, home, *, page: int = 1, page_size: int = PAGE_SIZE) -> dict:
-    """Chunks kept out of the graph, newest first, each with its rule."""
-    rules = _rules(store, home)
+    """Chunks kept out of the graph, newest first, each with its rule, whether
+    it is already in the graph (enriched before it went cold) and whether it
+    can be included (not made from other items)."""
+    rules = rules_for(store, home)
     return _page(store, "cold", page, page_size,
                  lambda r: cold_reason(r["metadata"], r["enrich_state"],
-                                       rules=rules, doc_id=r["doc_id"]))
+                                       rules=rules, doc_id=r["doc_id"]),
+                 lambda r: {"enriched": bool(r.get("enriched")),
+                            "includable": not sc.is_derived(r["doc_id"], r["metadata"],
+                                                            rules)})
 
 
 def list_waiting(store, home, *, page: int = 1, page_size: int = PAGE_SIZE) -> dict:

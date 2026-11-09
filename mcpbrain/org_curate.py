@@ -463,7 +463,8 @@ def _apply_merge_verdicts(store, verdicts, *, cap, change_ids: list | None = Non
             continue
         winner, loser = _pick_winner(a, b)
         change = {"change_type": "tidy_merge", "source": "org_merge_review",
-                  "summary": f"Merged {loser['id']} into {winner['id']}"}
+                  "summary": (f"Merged {loser.get('name') or 'an unnamed organisation'} into "
+                             f"{winner.get('name') or 'an unnamed organisation'}")}
         store.merge_entities(loser["id"], winner["id"],
                              canonical_name=v.get("canonical") or None, method="curator",
                              change=change)

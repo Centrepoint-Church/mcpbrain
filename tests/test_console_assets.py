@@ -258,3 +258,41 @@ def test_whatchanged_words_a_restore():
     assert 'entity_unsuppressed: ["entity restored to the graph"' in DASH
     ents = DASH[DASH.index("const ENTITY_TYPES"):].split(");", 1)[0]
     assert '"entity_unsuppressed"' in ents
+
+
+# --- final review fixes ------------------------------------------------------
+
+def test_entity_types_hold_only_entity_ids():
+    """tidy_owner's ref_id is an action id, tidy_org_rewrite's an org name:
+    neither opens in the graph."""
+    ents = DASH[DASH.index("const ENTITY_TYPES"):].split(");", 1)[0]
+    assert '"tidy_owner"' not in ents and '"tidy_org_rewrite"' not in ents
+    assert '"tidy_suppress"' in ents and '"tidy_org"' in ents
+
+
+def test_cold_list_offers_include_only_where_it_can():
+    body = DASH[DASH.index("async function openChunks"):]
+    body = body[:body.index("document.querySelectorAll(\"[data-chunks]\")")]
+    assert "offered(kind, i)" in body
+    assert "already in the graph" in DASH
+    assert "made from other items, so it can't be added" in DASH
+    # Select all ticks only the checkboxes rendered, i.e. includable rows.
+    assert 'querySelectorAll("input[type=checkbox]:not(:disabled)")' in DASH
+
+
+def test_feed_words_a_folded_skip_count():
+    assert 'skipText(c.summary || "", c.count || 1)' in DASH
+
+
+def test_alias_edits_reread_settings_before_posting():
+    """Two tabs: each add/remove starts from the server's current list."""
+    html = (WIZARD / "settings.html").read_text(encoding="utf-8")
+    add = html[html.index("async function addAlias"):]
+    add = add[:add.index("\n}\n")]
+    assert "await currentAliases()" in add
+    rm = html[html.index("function renderAliases"):]
+    rm = rm[:rm.index("\n}\n")]
+    assert "await currentAliases()" in rm
+    helper = html[html.index("async function currentAliases"):]
+    helper = helper[:helper.index("\n}\n")]
+    assert 'api("/api/settings")' in helper

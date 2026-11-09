@@ -104,7 +104,7 @@
     <div class="scroll-x">
       <table class="table">
         <thead><tr>
-          <th scope="col"><input type="checkbox" id="chunks-all" aria-label="Select every item on this page"></th>
+          <th scope="col"><input type="checkbox" id="chunks-all" aria-label="Select every item on this page you can act on"></th>
           <th scope="col">Item</th><th scope="col">Source</th><th scope="col">Date</th><th scope="col">Why</th>
         </tr></thead>
         <tbody id="chunks-body"></tbody>
@@ -460,10 +460,13 @@ const TYPE_LABEL = {
   entity_suppressed: ["entity hidden", "entities hidden"],
   entity_unsuppressed: ["entity restored to the graph", "entities restored to the graph"],
   fact_added: ["fact added", "facts added"],
+  chunks_reincluded: ["inclusion in the graph", "inclusions in the graph"],
+  chunks_prioritised: ["queue reorder", "queue reorders"],
 };
 // Changes whose ref_id is an entity id: they open in the graph by it.
-const ENTITY_TYPES = new Set(["profile_updated", "tidy_suppress", "tidy_org", "tidy_org_rewrite",
-  "tidy_owner", "tidy_merge", "entity_edited", "entity_merged", "entity_suppressed",
+// (tidy_owner's ref_id is an action id and tidy_org_rewrite's an org name.)
+const ENTITY_TYPES = new Set(["profile_updated", "tidy_suppress", "tidy_org",
+  "tidy_merge", "entity_edited", "entity_merged", "entity_suppressed",
   "entity_unsuppressed", "fact_added"]);
 
 function circleTitle(c){
@@ -477,10 +480,12 @@ const SKIP_WHY = {unsupported_mime: "a file type mcpbrain can't read",
   attachment_fetch_failed: "the attachment couldn't be downloaded",
   attachment_empty: "no text could be read from the attachment",
   extraction_empty: "no text could be read from it", gmail_excluded: "excluded by your keep-out rules"};
-function skipText(summary){
+// The feed folds skips of one kind in one hour into a row with a count.
+function skipText(summary, count){
   const m = /^([a-z_]+)(?::\s*([\s\S]*))?$/.exec(summary);
-  if (!m) return summary;
+  if (!m) return count > 1 ? "Skipped " + plural(count, "item") : summary;
   const why = SKIP_WHY[m[1]] || "it couldn't be indexed";
+  if (count > 1) return "Skipped " + plural(count, "item") + ", " + why;
   return m[2] ? "Skipped " + m[2] + ", " + why : "Skipped, " + why;
 }
 function rowText(c){
@@ -489,7 +494,7 @@ function rowText(c){
     return t ? "Circle named " + t : c.summary;
   }
   if (c.change_type === "profile_updated") return "Profile rewritten";
-  if (c.change_type === "ingest_skip") return skipText(c.summary || "");
+  if (c.change_type === "ingest_skip") return skipText(c.summary || "", c.count || 1);
   return c.summary || (TYPE_LABEL[c.change_type] || [c.change_type])[0];
 }
 
@@ -685,9 +690,10 @@ $("added-btn").addEventListener("click", async (ev) => {
 
 const CHUNKS = {
   cold: {path: "/api/chunks/cold", title: "Kept out of the graph",
-    intro: "Low-signal items mcpbrain indexed but did not enrich. They stay searchable. Include any that matter and they join the enrichment queue.",
+    intro: "Items mcpbrain indexed but keeps out of the graph. They stay searchable. Include low-signal items that matter and they join the enrichment queue. Items made from other items, such as summaries and consolidated notes, can't be added, and items enriched before they were kept out are already in the graph.",
     act: "Include in the graph", post: "/api/chunks/reinclude",
-    done: (n) => plural(n, "item") + " included. They join the enrichment queue."},
+    done: (n, out) => plural(n, "item") + " included. They join the enrichment queue."
+      + (out && out.skipped ? " " + plural(out.skipped, "item") + " made from other items left out." : "")},
   waiting: {path: "/api/chunks/waiting", title: "Waiting for enrichment",
     intro: "In the order the hourly enrichment task takes them.",
     act: "Queue first", post: "/api/chunks/prioritise",
@@ -705,6 +711,14 @@ const REASON = {bulk: "bulk mail", other: "kept out by an earlier rule", queued:
   table: "a table", transcript: "a transcript", summary: "a summary", draft: "a draft"};
 function reasonText(r){ return REASON[r] || r || ""; }
 let chunkKind = null, chunkPage = 1;
+// The cold list offers Include only on items that can be added and are not
+// in the graph yet; the others say why in the reason column.
+function offered(kind, i){
+  return kind !== "cold" || (i.includable !== false && !i.enriched);
+}
+function notOffered(i){
+  return i.includable === false ? "made from other items, so it can't be added" : "already in the graph";
+}
 
 function selectedChunks(){
   return [...$("chunks-body").querySelectorAll("input[type=checkbox]:checked")].map(b => b.value);
@@ -736,11 +750,14 @@ async function openChunks(kind, page){
     $("chunks-prev").disabled = chunkPage <= 1;
     $("chunks-next").disabled = chunkPage >= pages;
     fill($("chunks-body"), items.length ? items.map(i => el("tr", {},
-      el("td", {}, el("input", {type: "checkbox", value: i.doc_id, "aria-label": "Select " + (i.title || i.doc_id), onchange: syncChunkAct})),
+      el("td", {}, offered(kind, i)
+        ? el("input", {type: "checkbox", value: i.doc_id, "aria-label": "Select " + (i.title || i.doc_id), onchange: syncChunkAct})
+        : null),
       el("td", {}, el("strong", {text: i.title || i.doc_id})),
       el("td", {text: i.source || ""}),
       el("td", {class: "measured", text: String(i.date || "").slice(0, 10)}),
-      el("td", {text: reasonText(i.reason)}))) : el("tr", {}, el("td", {colspan: 5, class: "muted", text: "Nothing here."})));
+      el("td", {}, reasonText(i.reason),
+        offered(kind, i) ? null : el("span", {class: "muted small", text: ", " + notOffered(i)})))) : el("tr", {}, el("td", {colspan: 5, class: "muted", text: "Nothing here."})));
   } catch (e) {
     setText("chunks-page", "");
     fill($("chunks-body"), el("tr", {}, el("td", {colspan: 5}, el("span", {class: "said said--bad", text: "Could not load the list. " + errText(e)}))));
@@ -761,7 +778,7 @@ $("chunks-act").addEventListener("click", (ev) => {
     $("chunks-body").querySelectorAll("input[type=checkbox]:checked").forEach(b => { b.checked = false; b.disabled = true; });
     $("chunks-all").checked = false;
     const n = typeof out.changed === "number" ? out.changed : ids.length;
-    return cfg.done(n);
+    return cfg.done(n, out);
   });
 });
 

@@ -212,13 +212,18 @@ Later phases, not built in the prototype: Schedule (the `cadences` block: sync f
 
 ### 10. Plan-time decisions (2026-11-09)
 
-Mapping the code for the plan changed five things. These override earlier sections where they disagree.
+Mapping the code for the plan changed five things (1 to 5); the final review recorded two more (6 and 7). These override earlier sections where they disagree.
 
 1. **Undo storage.** Nothing reads `revert_ref` today, and `prune_change_log` keeps only the newest 500 rows each cycle. Undoable changes store `{"before": …, "after": …}` JSON in `revert_ref`; the prune keeps any row with a non-empty `revert_ref` for 30 days. Undo refuses with a plain reason when the item has changed again since (`after` no longer matches).
 2. **Graph tidy-up is an automatic change.** The daily review (orphans hidden, missing organisations set, owners assigned, duplicates merged) applies AI verdicts with no change record and no switch. It gets its own row in Automatic changes (Apply, Ask me first, Off), and "Most changes applied in one pass" (`review_max_apply_per_run`, 50) sits under it, not as a general cap.
 3. **Catch-up enrichment is removed, not built.** `/api/enrich-backfill/start|cancel` import a module deleted in an earlier commit, and the backlog is already queued; the limit is the hourly task's drain rate. The two endpoints and the Settings row are removed.
 4. **Keep-out wording matches behaviour.** Subject starts and Drive folders keep today's behaviour: indexed and searchable, kept out of the graph. Sender and Gmail-label exclusions are new and skip indexing entirely, each skip recorded. Settings says which is which.
 5. **Restart and start-at-login.** The daemon picks a new port and token on every start, so the open page cannot follow a restart; the Restart control says so and points at the menu bar. Start at login rewrites the daemon's launch agent and takes effect at next login; the menu bar app gains "Start mcpbrain" for when the daemon is not running. Settings writes go through a new allowlisted `/api/settings` that deep-merges nested blocks (today's `/api/config` replaces a nested block wholesale and accepts any key).
+
+Deviations recorded at the final whole-branch review (2026-11-09). These override section 6 and the system footer in section 2f:
+
+6. **Freshness comes from the store, not `daemon.status()`.** The planned wall-clock `last_*_at` fields on `daemon.status()` were not added. Source freshness reads each source's `sync_cursors` row and enrichment freshness reads `enrich_payloads` (last push, pushes in 24 h), so the figures survive a daemon restart and need no in-memory clock.
+7. **No daemon uptime in the system footer.** Uptime was dropped from the footer and from `stats().system`; the footer shows the version, watchdog restarts and how enrichment runs, plus re-chunking while it runs. The backup restore point age is not in the footer either; backup state shows on the Encrypted backup connection row in Settings. An uptime figure resets on every restart and said nothing the health strip does not.
 
 ## Delivery order
 

@@ -3,6 +3,19 @@ adjudicator can decide without fetching. See docs/superpowers/plans/
 2026-07-02-session-4-brain-review-cadence.md."""
 from mcpbrain import orgs
 
+# The lint findings graph tidy-up reads, and the review block each feeds
+# (daemon._run_review). They are the tidy-up's input, not owner items: the
+# console's Needs you never lists or counts them, whatever the tidy mode.
+TIDY_BLOCK_KEYS = {
+    "lint:orphan_entity": "review_orphan",
+    "lint:missing_org": "review_missing_org",
+    "lint:ownerless_action": "review_ownerless",
+    "lint:ambiguous_org": "review_org",
+    "lint:duplicate_org": "review_org",
+    "org_unrecognised": "review_org",
+}
+TIDY_FINDING_TYPES = tuple(TIDY_BLOCK_KEYS)
+
 
 def _entity_sub(store, eid):
     with store._connect() as db:

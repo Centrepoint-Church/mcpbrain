@@ -331,6 +331,13 @@ function derivedNames(){
   for (const n of [short, full, full.split(/\s+/)[0] || ""]) if (n && !out.includes(n)) out.push(n);
   return out;
 }
+/* The whole alias list is posted, so each add or remove starts from the
+   server's current list: an edit made in another tab is kept, not lost. */
+async function currentAliases(){
+  const s = await api("/api/settings");
+  if (s) settings = s;
+  return (settings && settings.owner_aliases) || [];
+}
 function renderAliases(){
   const derived = derivedNames();
   const extra = (settings && settings.owner_aliases) || [];
@@ -338,10 +345,13 @@ function renderAliases(){
   extra.forEach(a => {
     tags.push(el("span", {class: "tag"}, a + " ", el("button", {class: "tag__x", type: "button", text: "Remove", "aria-label": "Remove " + a,
       onclick: async (ev) => {
-        ev.currentTarget.disabled = true;
-        const next = extra.filter(x => x !== a);
+        const btn = ev.currentTarget;
+        btn.disabled = true;
+        let next;
+        try { next = (await currentAliases()).filter(x => x !== a); }
+        catch (e) { said($("alias-said"), "Not saved. " + errText(e), "bad"); btn.disabled = false; return; }
         if (await saveSettings({owner_aliases: next}, $("alias-said"), "Removed and saved.")) renderAliases();
-        else ev.currentTarget.disabled = false;
+        else btn.disabled = false;
       }})));
   });
   if (!tags.length) tags.push(el("span", {class: "muted small", text: "Save your name to see the names derived from it."}));
@@ -351,14 +361,19 @@ async function addAlias(){
   const inp = $("alias-new");
   const v = inp.value.trim();
   if (!v) { inp.focus(); return; }
-  const extra = (settings && settings.owner_aliases) || [];
+  $("alias-add").disabled = true;
+  let extra;
+  try { extra = await currentAliases(); }
+  catch (e) { said($("alias-said"), "Not saved. " + errText(e), "bad"); $("alias-add").disabled = false; return; }
   const lower = v.toLowerCase();
   if (derivedNames().includes(lower) || extra.some(x => x.toLowerCase() === lower)) {
     said($("alias-said"), "That name is already on the list.", null);
+    renderAliases();
+    $("alias-add").disabled = false;
     return;
   }
-  $("alias-add").disabled = true;
-  if (await saveSettings({owner_aliases: [...extra, v]}, $("alias-said"), "Added and saved.")) { inp.value = ""; renderAliases(); }
+  if (await saveSettings({owner_aliases: [...extra, v]}, $("alias-said"), "Added and saved.")) inp.value = "";
+  renderAliases();
   $("alias-add").disabled = false;
 }
 $("alias-add").addEventListener("click", addAlias);

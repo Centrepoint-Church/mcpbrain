@@ -89,6 +89,18 @@ def is_evidence(cls: SourceClass) -> bool:
     return cls in EVIDENCE
 
 
+def is_derived(doc_id: str, meta: dict, rules: "Rules | None" = None) -> bool:
+    """True when a chunk is made from other items (a session note, brief,
+    draft, consolidated note or summary, or a superseded draft), so it can
+    never be graph evidence. Ignores `force_enrich`: the owner's re-include is
+    refused for these (Store.reinclude_chunks), whatever the flag says."""
+    meta = meta if isinstance(meta, dict) else {}
+    if meta.get("superseded"):
+        return True
+    cls = classify(doc_id or "", meta, rules if rules is not None else Rules())
+    return not (cls is SourceClass.DUPLICATE or is_evidence(cls))
+
+
 def _addrs(header) -> list[str]:
     return [a.strip().lower() for _, a in getaddresses([str(header or "")]) if a.strip()]
 

@@ -140,6 +140,16 @@ def _log_change_tx(db, change_type: str, *, ref_id: str = "", summary: str = "",
         (change_type, ref_id, summary, detail, revert_ref, source)).lastrowid
 
 
+def _chunk_enrich_snapshot(row, meta: dict) -> dict:
+    """The enrichment columns and re-include flag of one chunk row, as the
+    chunks_reincluded change records them (and its undo compares them)."""
+    return {"enrich_state": row["enrich_state"] or "",
+            "enriched": int(row["enriched"] or 0),
+            "enriched_version": int(row["enriched_version"] or 0),
+            "enrich_attempts": int(row["enrich_attempts"] or 0),
+            "force_enrich": meta.get("force_enrich")}
+
+
 class EntityHidden(Exception):
     """A write that needs a visible entity was asked for a suppressed one."""
 
@@ -6735,28 +6745,43 @@ class Store:
         docs = set(self.doc_ids_for_messages(msg_ids)) | set(rel_docs) | cal_docs
         return sorted(docs)
 
-    def reinclude_chunks(self, doc_ids) -> int:
+    def reinclude_chunks(self, doc_ids, *, rules=None) -> dict:
         """Put skipped chunks back into the enrichment queue, for good.
 
-        The owner's "re-include" from the console's cold list: enrich_state is
-        cleared, enriched/enriched_version/enrich_attempts reset to 0, and
-        `metadata.force_enrich = true` is stamped so prepare's salience and
-        derived gates (should_enrich / _is_derived) do not cold-mark the chunk
-        again on the next pass. The flag is kept when the chunk is rewritten
-        later -- a source refetch through upsert_chunk, a cache import, or a
-        reflow re-chunk (carried along the plan's remap) -- so the re-include
-        sticks. Returns the number of chunks changed (unknown ids are ignored).
-        One transaction."""
+        The owner's "Include in the graph" from the console's cold list.
+        A chunk made from other items (source_class.is_derived: consolidated
+        note, summary or brief including the owner's own automated mail,
+        session note, draft, superseded draft) is refused and counted as
+        skipped: a derived chunk is never evidence (prepare.derived_cold).
+        `rules` (source_class.Rules) carries the owner's brief rules.
+
+        Otherwise enrich_state is cleared and `metadata.force_enrich = true`
+        is stamped so prepare's salience gate does not cold-mark the chunk
+        again. A chunk not yet enriched also gets enriched/enriched_version/
+        enrich_attempts reset to 0 so it joins the queue; an already-enriched
+        chunk keeps them (it is in the graph already, so re-including it must
+        not spend enrichment again). The flag is kept when the chunk is
+        rewritten later -- a source refetch through upsert_chunk, a cache
+        import, or a reflow re-chunk (carried along the plan's remap) -- so
+        the re-include sticks.
+
+        Records one undoable `chunks_reincluded` change_log row (the prior
+        columns and flag of every changed chunk) in the same transaction.
+        Returns {"changed", "skipped"}; unknown ids are ignored."""
+        from mcpbrain import source_class as _sc
         ids = [d for d in dict.fromkeys(doc_ids or []) if d]
+        out = {"changed": 0, "skipped": 0}
         if not ids:
-            return 0
-        changed = 0
+            return out
+        before: dict = {}
+        after: dict = {}
         with self._connect(write=True) as db:
             for i in range(0, len(ids), 500):
                 part = ids[i:i + 500]
                 ph = ",".join("?" * len(part))
-                rows = db.execute(f"SELECT doc_id, metadata FROM chunks "
-                                  f"WHERE doc_id IN ({ph})", part).fetchall()
+                rows = db.execute(
+                    f"SELECT doc_id, metadata, enrich_state, enriched, enriched_version, "
+                    f"enrich_attempts FROM chunks WHERE doc_id IN ({ph})", part).fetchall()
                 for r in rows:
                     try:
                         meta = json.loads(r["metadata"] or "{}")
@@ -6764,19 +6789,43 @@ class Store:
                         meta = {}
                     if not isinstance(meta, dict):
                         meta = {}
+                    if _sc.is_derived(r["doc_id"], meta, rules):
+                        out["skipped"] += 1
+                        continue
+                    prior = _chunk_enrich_snapshot(r, meta)
                     meta["force_enrich"] = True
-                    db.execute("UPDATE chunks SET enrich_state='', enriched=0, "
-                               "enriched_version=0, enrich_attempts=0, metadata=? "
-                               "WHERE doc_id=?", (json.dumps(meta), r["doc_id"]))
-                    changed += 1
-        return changed
+                    if int(r["enriched"] or 0):
+                        db.execute("UPDATE chunks SET enrich_state='', metadata=? "
+                                   "WHERE doc_id=?", (json.dumps(meta), r["doc_id"]))
+                        now = {**prior, "enrich_state": "", "force_enrich": True}
+                    else:
+                        db.execute("UPDATE chunks SET enrich_state='', enriched=0, "
+                                   "enriched_version=0, enrich_attempts=0, metadata=? "
+                                   "WHERE doc_id=?", (json.dumps(meta), r["doc_id"]))
+                        now = {"enrich_state": "", "enriched": 0, "enriched_version": 0,
+                               "enrich_attempts": 0, "force_enrich": True}
+                    before[r["doc_id"]] = prior
+                    after[r["doc_id"]] = now
+                    out["changed"] += 1
+            if out["changed"]:
+                from mcpbrain.change_undo import revert_json
+                n = out["changed"]
+                self.record_change_tx(
+                    db, "chunks_reincluded",
+                    ref_id=next(iter(before)) if n == 1 else "",
+                    summary=f"Included {n} item{'' if n == 1 else 's'} in the graph",
+                    revert_ref=revert_json({"chunks": before}, {"chunks": after}),
+                    source="dashboard")
+        return out
 
     def prioritise_chunks(self, doc_ids) -> int:
         """Move waiting chunks to the front of the enrichment queue
         (priority=1; unenriched_chunks orders priority DESC). Only chunks still
         waiting (enriched=0) are touched, so the count is what actually moved:
         an already-enriched chunk is not re-queued by this (a reflow that gave
-        up is retried with retry_reflow_gave_up instead)."""
+        up is retried with retry_reflow_gave_up instead). Records a
+        `chunks_prioritised` change_log row when anything moved; it carries no
+        revert_ref, so it is not undoable (the summary says so)."""
         ids = [d for d in dict.fromkeys(doc_ids or []) if d]
         if not ids:
             return 0
@@ -6787,6 +6836,12 @@ class Store:
                 ph = ",".join("?" * len(part))
                 changed += db.execute(f"UPDATE chunks SET priority=1 WHERE enriched=0 "
                                       f"AND doc_id IN ({ph})", part).rowcount
+            if changed:
+                self.record_change_tx(
+                    db, "chunks_prioritised",
+                    summary=(f"Moved {changed} item{'' if changed == 1 else 's'} to the "
+                             "front of the enrichment queue (can't be undone)"),
+                    source="dashboard")
         return changed
 
     # The console's chunk lists (source_controls): which chunks each names.
@@ -6799,12 +6854,12 @@ class Store:
 
     def chunk_list_page(self, kind: str, *, offset: int, limit: int) -> tuple[list[dict], int]:
         """One page of the named chunk list, and the list's total.
-        Rows: {doc_id, metadata (dict), enrich_state, priority}."""
+        Rows: {doc_id, metadata (dict), enrich_state, priority, enriched}."""
         where, order = self._CHUNK_LISTS[kind]
         with self._connect() as db:
             total = db.execute(f"SELECT COUNT(*) FROM chunks WHERE {where}").fetchone()[0]
             rows = db.execute(
-                f"SELECT doc_id, metadata, enrich_state, priority FROM chunks "
+                f"SELECT doc_id, metadata, enrich_state, priority, enriched FROM chunks "
                 f"WHERE {where} ORDER BY {order} LIMIT ? OFFSET ?",
                 (int(limit), int(offset))).fetchall()
         out = []
@@ -6815,7 +6870,8 @@ class Store:
                 meta = {}
             out.append({"doc_id": r["doc_id"], "metadata": meta if isinstance(meta, dict) else {},
                         "enrich_state": r["enrich_state"] or "",
-                        "priority": int(r["priority"] or 0)})
+                        "priority": int(r["priority"] or 0),
+                        "enriched": bool(r["enriched"])})
         return out, int(total)
 
     def reset_enriched(self, doc_ids) -> int:

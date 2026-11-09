@@ -108,14 +108,17 @@ def _undo_consolidation(store, home, row):
     # Check every graduated file before changing anything: a file edited since
     # (by hand or by the gardener) must not be deleted. A row without recorded
     # content can't prove that, so it refuses too.
-    for rel in grads:
-        fp = Path(repo) / rel
-        if not isinstance(recorded, dict) or rel not in recorded:
-            raise Refused(CHANGED_SINCE)
-        if fp.exists() and fp.read_text() != recorded[rel]:
-            raise Refused(CHANGED_SINCE)
-    for rel in grads:
-        records_write.remove_memory(repo, Path(rel).stem, "undo: consolidation")
+    # Under the records lock (shared with the daemon's records writers), so
+    # the check and the removal see the same files and git never races.
+    with records_write.repo_lock():
+        for rel in grads:
+            fp = Path(repo) / rel
+            if not isinstance(recorded, dict) or rel not in recorded:
+                raise Refused(CHANGED_SINCE)
+            if fp.exists() and fp.read_text() != recorded[rel]:
+                raise Refused(CHANGED_SINCE)
+        for rel in grads:
+            records_write.remove_memory(repo, Path(rel).stem, "undo: consolidation")
     after_tiers = after.get("tiers") or {}
     with store._connect(write=True) as db:
         for doc_id, tier in (before.get("tiers") or {}).items():
@@ -137,10 +140,12 @@ def _undo_records_file(message: str, relpath_of: Callable[[dict], str]):
         if not re.fullmatch(r"(reference|context)/[^/\\]+", rel or ""):
             raise Refused(NOT_UNDOABLE)
         fp = Path(repo) / rel
-        current = fp.read_text() if fp.exists() else None
-        if current != after.get("content"):
-            raise Refused(CHANGED_SINCE)
-        records_write.restore_file(repo, rel, before.get("content"), message)
+        # Check and restore under the records lock the daemon's writers share.
+        with records_write.repo_lock():
+            current = fp.read_text() if fp.exists() else None
+            if current != after.get("content"):
+                raise Refused(CHANGED_SINCE)
+            records_write.restore_file(repo, rel, before.get("content"), message)
     return _undo
 
 
@@ -447,6 +452,46 @@ def _undo_finding_dismissed(store, home, row):
             raise Refused(CHANGED_SINCE)
 
 
+def _undo_chunks_reincluded(store, home, row):
+    """Put every re-included chunk back exactly as it was (enrich_state,
+    enriched, enriched_version, enrich_attempts and the force_enrich flag), if
+    every one still reads as the re-include left it. One that enrichment, a
+    later re-include or a refetch has moved on refuses the whole undo."""
+    from mcpbrain.store import _chunk_enrich_snapshot
+    p = _need_payload(row)
+    before = p["before"].get("chunks") or {}
+    after = p["after"].get("chunks") or {}
+    if not before or set(before) != set(after):
+        raise Refused(NOT_UNDOABLE)
+    with store._connect(write=True) as db:
+        metas = {}
+        for doc_id, wrote in after.items():
+            cur = db.execute("SELECT metadata, enrich_state, enriched, enriched_version, "
+                             "enrich_attempts FROM chunks WHERE doc_id=?",
+                             (doc_id,)).fetchone()
+            if cur is None:
+                raise Refused(CHANGED_SINCE)
+            try:
+                meta = json.loads(cur["metadata"] or "{}")
+            except (TypeError, ValueError):
+                meta = {}
+            meta = meta if isinstance(meta, dict) else {}
+            if _chunk_enrich_snapshot(cur, meta) != wrote:
+                raise Refused(CHANGED_SINCE)
+            metas[doc_id] = meta
+        for doc_id, prior in before.items():
+            meta = metas[doc_id]
+            if prior.get("force_enrich") is None:
+                meta.pop("force_enrich", None)
+            else:
+                meta["force_enrich"] = prior["force_enrich"]
+            db.execute("UPDATE chunks SET enrich_state=?, enriched=?, enriched_version=?, "
+                       "enrich_attempts=?, metadata=? WHERE doc_id=?",
+                       (prior.get("enrich_state") or "", int(prior.get("enriched") or 0),
+                        int(prior.get("enriched_version") or 0),
+                        int(prior.get("enrich_attempts") or 0), json.dumps(meta), doc_id))
+
+
 def _graph_changed() -> None:
     try:
         from mcpbrain import entity_resource
@@ -471,6 +516,7 @@ UNDO: dict[str, Callable] = {
     "finding_dismissed": _undo_finding_dismissed,
     "entity_unsuppressed": _undo_entity_unsuppressed,
     "fact_added": _undo_fact_added,
+    "chunks_reincluded": _undo_chunks_reincluded,
     # legacy revert_ref forms
     "action_snoozed": _undo_snooze,
     "role_corrected": _undo_role,
@@ -521,6 +567,12 @@ def undo(store, home, change_id: int) -> dict:
         UNDO[row["change_type"]](store, home, row)
     except Refused as exc:
         return {"ok": False, "reason": str(exc)}
+    except RuntimeError as exc:
+        from mcpbrain import records_write
+        if isinstance(exc, records_write.RecordsBusy):
+            return {"ok": False, "reason": records_write.BUSY}
+        log.exception("change_undo: undo of change %s failed", row["id"])
+        return {"ok": False, "reason": f"Undo failed: {exc}"}
     except Exception as exc:  # noqa: BLE001 -- surface, don't crash the route
         log.exception("change_undo: undo of change %s failed", row["id"])
         return {"ok": False, "reason": f"Undo failed: {exc}"}
@@ -537,32 +589,59 @@ def _sql_stamp(dt: datetime) -> str:
     return dt.astimezone(timezone.utc).strftime("%Y-%m-%d %H:%M:%S")
 
 
+_SKIP = "ingest_skip"
+# An ingest_skip summary reads "<kind>: <detail>"; its kind is the part before
+# the colon (the whole summary when there is none).
+_SKIP_KIND_SQL = ("CASE WHEN instr(COALESCE(summary,''), ':') > 0 "
+                  "THEN substr(summary, 1, instr(summary, ':') - 1) "
+                  "ELSE COALESCE(summary,'') END")
+
+
 def feed(store, *, hours: int = 24, now=None, limit: int = 500) -> list[dict]:
     """The last `hours` of changes, newest first. Rows of the same type made in
     the same minute share a `group`, so the page can fold a burst (six profiles
-    in one drain) into one line."""
+    in one drain) into one line.
+
+    Ingest skips are folded here, server-side: one row per skip kind per hour,
+    carrying `count` (and the newest skip's summary; its ref_id only when the
+    row stands for a single skip). A heavy skip day (thousands of unreadable
+    files) therefore cannot push the day's other changes past `limit`. Every
+    row carries `count` (1 for an ordinary change)."""
     now = now or datetime.now(timezone.utc)
     cutoff = _sql_stamp(now - timedelta(hours=hours))
     upper = _sql_stamp(now)
     with store._connect() as db:
         rows = [dict(r) for r in db.execute(
-            "SELECT * FROM change_log WHERE change_type != ? AND created_at >= ? "
+            "SELECT * FROM change_log WHERE change_type NOT IN (?, ?) AND created_at >= ? "
             "AND created_at <= ? ORDER BY id DESC LIMIT ?",
-            (_UNDONE, cutoff, upper, limit))]
+            (_UNDONE, _SKIP, cutoff, upper, limit))]
+        skips = [dict(r) for r in db.execute(
+            f"SELECT c.*, g.n AS skip_count FROM (SELECT MAX(id) AS id, COUNT(*) AS n "
+            f"FROM change_log WHERE change_type=? AND created_at >= ? AND created_at <= ? "
+            f"GROUP BY {_SKIP_KIND_SQL}, substr(created_at, 1, 13)) g "
+            f"JOIN change_log c ON c.id = g.id ORDER BY c.id DESC LIMIT ?",
+            (_SKIP, cutoff, upper, limit))]
         undone = {r[0] for r in db.execute(
             "SELECT ref_id FROM change_log WHERE change_type=?", (_UNDONE,))}
     out = []
-    for r in rows:
+    for r in sorted(rows + skips, key=lambda x: x["id"], reverse=True)[:limit]:
         is_undone = str(r["id"]) in undone
+        count = int(r.get("skip_count") or 1)
+        if r["change_type"] == _SKIP:
+            kind = (r.get("summary") or "").split(":", 1)[0]
+            group = f"{_SKIP}:{kind}@{(r.get('created_at') or '')[:13]}"
+        else:
+            group = f"{r['change_type']}@{(r.get('created_at') or '')[:16]}"
         out.append({
             "id": r["id"],
             "change_type": r["change_type"],
             "summary": r.get("summary") or "",
-            "ref_id": r.get("ref_id") or "",
+            "ref_id": (r.get("ref_id") or "") if count == 1 else "",
             "created_at": r.get("created_at") or "",
             "undoable": _is_undoable(r) and not is_undone,
             "undone": is_undone,
-            "group": f"{r['change_type']}@{(r.get('created_at') or '')[:16]}",
+            "group": group,
+            "count": count,
         })
     return out
 

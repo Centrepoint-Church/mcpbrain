@@ -17,6 +17,7 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 from mcpbrain import clickup, config
+from mcpbrain import review as _review
 
 log = logging.getLogger(__name__)
 
@@ -328,6 +329,11 @@ def changes_digest(store) -> dict:
 # Findings listed elsewhere in Needs you: pending changes by /api/pending and
 # proposed graph corrections by /api/corrections/pending. Each item shows once.
 REVIEW_FINDING_TYPES = ("pending_change", "graph_correction")
+# Findings that are never Needs-you items: the reviews above, plus the lint
+# findings graph tidy-up consumes (review.TIDY_FINDING_TYPES). With tidy-up off
+# or ask-first those would otherwise flood the list, and in ask mode duplicate
+# the pending row; marking one fixed would also break the later Apply.
+NOT_NEEDS_YOU_TYPES = REVIEW_FINDING_TYPES + _review.TIDY_FINDING_TYPES
 _SEVERITY_ORDER = {"critical": 0, "error": 0, "warning": 1, "warn": 1}
 
 
@@ -338,7 +344,7 @@ def findings_view(store) -> list[dict]:
     newest first within a severity."""
     groups: dict[tuple, dict] = {}
     for f in store.open_findings():
-        if f["finding_type"] in REVIEW_FINDING_TYPES:
+        if f["finding_type"] in NOT_NEEDS_YOU_TYPES:
             continue
         key = (f["finding_type"], f.get("summary") or "")
         g = groups.get(key)
