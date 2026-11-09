@@ -48,9 +48,9 @@
   --lt-type-person: oklch(30% 0.007 250); --lt-type-org: oklch(42% 0.07 235); --lt-type-project: oklch(48% 0.09 165);
   --lt-type-topic: oklch(58% 0.06 200); --lt-type-meeting: oklch(55% 0.11 20);
   --lt-type-document: oklch(64% 0.007 250); --lt-type-thread: oklch(72% 0.006 250); --lt-type-unknown: oklch(80% 0.005 250);
-  --lt-type-event: oklch(68% 0.08 20); --lt-type-origin: oklch(64% 0.05 255);
+  --lt-type-event: oklch(72% 0.07 20); --lt-type-origin: oklch(64% 0.05 255);
   --lt-circle-1: oklch(42% 0.07 235); --lt-circle-2: oklch(50% 0.09 165); --lt-circle-3: oklch(58% 0.11 20);
-  --lt-circle-4: oklch(62% 0.07 200); --lt-circle-5: oklch(55% 0.09 255); --lt-circle-6: oklch(36% 0.06 165);
+  --lt-circle-4: oklch(60% 0.09 270); --lt-circle-5: oklch(74% 0.05 235); --lt-circle-6: oklch(36% 0.06 165);
 
   /* dark values */
   --dk-paper: oklch(17.5% 0.004 250); --dk-paper-2: oklch(21% 0.005 250); --dk-paper-3: oklch(14.5% 0.004 250);
@@ -67,9 +67,9 @@
   --dk-type-person: oklch(90% 0.007 250); --dk-type-org: oklch(66% 0.06 235); --dk-type-project: oklch(70% 0.09 165);
   --dk-type-topic: oklch(80% 0.05 200); --dk-type-meeting: oklch(74% 0.09 20);
   --dk-type-document: oklch(60% 0.007 250); --dk-type-thread: oklch(52% 0.006 250); --dk-type-unknown: oklch(45% 0.005 250);
-  --dk-type-event: oklch(64% 0.07 20); --dk-type-origin: oklch(70% 0.05 255);
+  --dk-type-event: oklch(56% 0.07 20); --dk-type-origin: oklch(70% 0.05 255);
   --dk-circle-1: oklch(66% 0.06 235); --dk-circle-2: oklch(72% 0.09 165); --dk-circle-3: oklch(74% 0.09 20);
-  --dk-circle-4: oklch(82% 0.05 200); --dk-circle-5: oklch(70% 0.08 255); --dk-circle-6: oklch(58% 0.07 165);
+  --dk-circle-4: oklch(70% 0.08 270); --dk-circle-5: oklch(84% 0.04 235); --dk-circle-6: oklch(58% 0.07 165);
 
   /* graph canvas: graph.html reads these through readPalette() (light or
    * dark follows the --color-* and --type-* values in force on :root) */

@@ -398,13 +398,17 @@ def _undo_entity_unsuppressed(store, home, row):
 
 
 def _undo_fact_added(store, home, row):
-    """Remove the fact the owner added, if it still reads as it was written:
-    same entity, attribute and value, still current and not invalidated."""
+    """Remove the fact the owner added and reopen the manual fact it closed,
+    if both still read as the change left them: the new one current with the
+    same entity, attribute and value; each closed one still closed on that
+    day and not invalidated."""
     p = _need_payload(row)
     wrote = p["after"].get("fact") or {}
     oid = wrote.get("id")
     if not oid:
         raise Refused(NOT_UNDOABLE)
+    closed = [int(i) for i in (p["before"].get("closed") or [])]
+    closed_on = p["after"].get("closed_on")
     with store._connect(write=True) as db:
         cur = db.execute(
             "SELECT entity_id, attribute, value, valid_to, invalidated_at "
@@ -413,7 +417,16 @@ def _undo_fact_added(store, home, row):
                 or (cur["attribute"], cur["value"]) != (wrote.get("attribute"), wrote.get("value"))
                 or cur["valid_to"] is not None or cur["invalidated_at"] is not None):
             raise Refused(CHANGED_SINCE)
+        for cid in closed:
+            old = db.execute("SELECT valid_to, invalidated_at FROM entity_observations "
+                             "WHERE id=?", (cid,)).fetchone()
+            if old is None or old["valid_to"] != closed_on or old["invalidated_at"] is not None:
+                raise Refused(CHANGED_SINCE)
         db.execute("DELETE FROM entity_observations WHERE id=?", (oid,))  # admin-delete-ok
+        if closed:
+            marks = ",".join("?" * len(closed))
+            db.execute(f"UPDATE entity_observations SET valid_to=NULL WHERE id IN ({marks})",
+                       closed)
     _graph_changed()
 
 

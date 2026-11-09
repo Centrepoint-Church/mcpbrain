@@ -76,8 +76,8 @@ def graph_canvas(store, *, min_conn: int = 7, org: str = "", community: str = ""
                         and _table_exists(db, "observation_sources")):
                     return dict(_EMPTY)
                 from mcpbrain.change_undo import ADDED_SINCE_IDS_SQL, added_cutoff
-                where.append(f"e.id IN ({ADDED_SINCE_IDS_SQL})")
-                params["cutoff"] = added_cutoff(int(since_hours))
+                where.append("e.id IN (" + ADDED_SINCE_IDS_SQL.replace(":cutoff", ":added_cutoff") + ")")
+                params["added_cutoff"] = added_cutoff(int(since_hours))
             if has_supp:
                 where.append("s.entity_id IS NULL")
             if org:
@@ -90,7 +90,11 @@ def graph_canvas(store, *, min_conn: int = 7, org: str = "", community: str = ""
                     return dict(_EMPTY)
                 where.append("ec.community_id = :community")
             if types:
-                where.append("e.type IN (" + ",".join(f":t{i}" for i in range(len(types))) + ")")
+                # graph_types reports an empty or missing type as 'unknown', so
+                # asking for 'unknown' also matches those rows.
+                type_expr = ("COALESCE(NULLIF(e.type, ''), 'unknown')" if "unknown" in types
+                             else "e.type")
+                where.append(f"{type_expr} IN (" + ",".join(f":t{i}" for i in range(len(types))) + ")")
                 for i, t in enumerate(types):
                     params[f"t{i}"] = t
             if recency_days and int(recency_days) > 0:
@@ -228,6 +232,25 @@ def graph_types(store) -> list[dict]:
         return []
 
 
+def hidden_count(store) -> int:
+    """How many entities are hidden from the graph (a suppression whose
+    entity still exists, as list_suppressed lists them)."""
+    path = store._path if hasattr(store, "_path") else store.path
+    try:
+        db = _open_ro(Path(path))
+        try:
+            if not _table_exists(db, "entity_suppressions"):
+                return 0
+            return int(db.execute(
+                "SELECT COUNT(*) FROM entity_suppressions s "
+                "JOIN entities e ON e.id = s.entity_id").fetchone()[0])
+        finally:
+            db.close()
+    except sqlite3.Error as exc:
+        log.warning("hidden_count: read failed (%s)", exc)
+        return 0
+
+
 def _rel_filters(db, alias: str = "") -> tuple[str, str]:
     """(extra WHERE, ORDER prefix) for strength reads of entity_relations.
 
@@ -237,11 +260,16 @@ def _rel_filters(db, alias: str = "") -> tuple[str, str]:
     row, i.e. its strength predates source counting (+1 per sighting) — never
     outranks a source-counted one. legacy_strength is only the saved prior
     value (ruling I8): a legacy row that gains a real source is source-counted.
-    An origin='org' row is never legacy (M9). Column/table aware: a store that predates them reads as before."""
+    An origin='org' row is never legacy (M9). Invalidated (superseded) rows
+    are excluded too. Column/table aware: a store that predates them reads as before."""
     from mcpbrain.graph_write import legacy_relation_sql
     cols = {r["name"] for r in db.execute("PRAGMA table_info(entity_relations)")}
-    where = (f" AND COALESCE({alias + '.' if alias else 'entity_relations.'}derived, 0) = 0"
-             if "derived" in cols else "")
+    col = alias + "." if alias else "entity_relations."
+    where = f" AND COALESCE({col}derived, 0) = 0" if "derived" in cols else ""
+    # Live links only: a superseded relation (an old employer) is history the
+    # drawer doesn't count, so no map or relation view draws it either.
+    if "invalidated_at" in cols:
+        where += f" AND {col}invalidated_at IS NULL"
     order = ""
     if "id" in cols and _table_exists(db, "relation_sources"):
         order = f"{legacy_relation_sql(alias, has_origin='origin' in cols)}, "
@@ -253,13 +281,18 @@ def _table_exists(db, name):
                       (name,)).fetchone() is not None
 
 
+# The relation filter's word for "links with no relation name" (stored as ''
+# or NULL): an empty query value would read as "no filter".
+EMPTY_RELATION = "_none"
+
+
 def graph_ego(store, entity_id: str, hops: int = 1, relation: str = "") -> dict | None:
     """One entity plus its N-hop neighbourhood, ignoring the min-connections/org/
     type filters entirely. Used to jump to a search hit that graph_canvas()'s
     degree floor would otherwise hide from the map. relation, when given,
     follows and returns only links of that relation (the drawer's "works_at 12"
-    group opened in the graph). Returns None if the entity is unknown or
-    suppressed."""
+    group opened in the graph); EMPTY_RELATION follows the unnamed ones.
+    Returns None if the entity is unknown or suppressed."""
     hops = max(0, min(3, int(hops)))
     path = store._path if hasattr(store, "_path") else store.path
     try:
@@ -275,7 +308,9 @@ def graph_ego(store, entity_id: str, hops: int = 1, relation: str = "") -> dict 
 
             rel_where, _ = _rel_filters(db)
             rel_params: tuple = ()
-            if relation:
+            if relation == EMPTY_RELATION:
+                rel_where += " AND COALESCE(relation, '') = ''"
+            elif relation:
                 rel_where += " AND relation = ?"
                 rel_params = (relation,)
             seen = {entity_id}
@@ -324,14 +359,7 @@ def graph_ego(store, entity_id: str, hops: int = 1, relation: str = "") -> dict 
             """, node_ids).fetchall()
 
             found_ids = {r["id"] for r in rows}
-            nodes = [{
-                "id": r["id"], "name": r["name"], "type": r["type"] or "person",
-                "org": r["org"], "email_count": r["email_count"],
-                "email_addr": r["email_addr"], "connections": r["degree"],
-                "community": r["community_id"],
-                "first_seen": r["first_seen"], "last_seen": r["last_seen"],
-                "origin": r["origin"],
-            } for r in rows]
+            nodes = _node_rows(rows)
             if entity_id not in found_ids:
                 return None  # existed above, but excluded here (e.g. race with a suppress)
 
@@ -346,13 +374,7 @@ def graph_ego(store, entity_id: str, hops: int = 1, relation: str = "") -> dict 
                     links.append({"source": r["source"], "target": r["target"],
                                   "relation": r["relation"], "strength": r["strength"]})
 
-            communities: dict = {}
-            for r in rows:
-                cid = r["community_id"]
-                if cid is not None and str(cid) not in communities:
-                    communities[str(cid)] = r["community_title"] or f"Community {cid}"
-
-            return {"nodes": nodes, "links": links, "communities": communities}
+            return {"nodes": nodes, "links": links, "communities": _community_titles(rows)}
         finally:
             db.close()
     except sqlite3.Error as exc:
@@ -629,8 +651,10 @@ def add_fact(store, entity_id: str, attribute, value) -> dict:
     {"ok": True, "change_id": N, "entity": <entity_detail>} on success;
     {"ok": False, "error": "invalid", "reason": ...} for an empty attribute or
     value, or one too long; {"ok": False, "error": "not_found"} for an unknown
-    entity. Written source='manual' with high confidence, like a role set
-    through graph_corrections, so entity_detail shows it."""
+    entity; {"ok": False, "error": "hidden", "reason": ...} for a hidden one.
+    Written source='manual' with high confidence and superseding the current
+    manual fact of the same attribute, like a role set through
+    graph_corrections, so entity_detail shows it."""
     attribute = " ".join(str(attribute or "").split())
     value = " ".join(str(value or "").split())
     if not attribute:
@@ -648,8 +672,13 @@ def add_fact(store, entity_id: str, attribute, value) -> dict:
         return {"ok": False, "error": "not_found"}
     change = {"change_type": "fact_added", "source": "dashboard",
               "summary": f"Added a fact to {ent.get('name') or entity_id}: {attribute} {value}"}
-    if store.add_manual_observation(entity_id, attribute, value, change=change) is None:
-        return {"ok": False, "error": "not_found"}
+    from mcpbrain.store import EntityHidden
+    try:
+        if store.add_manual_observation(entity_id, attribute, value, change=change) is None:
+            return {"ok": False, "error": "not_found"}
+    except EntityHidden:
+        return {"ok": False, "error": "hidden",
+                "reason": "It is hidden from the graph. Restore it in Settings first."}
     try:
         from mcpbrain import entity_resource
         entity_resource.invalidate_cache()

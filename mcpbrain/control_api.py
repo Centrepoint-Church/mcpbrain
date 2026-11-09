@@ -294,8 +294,13 @@ class ControlServer:
                     if server.store is None:
                         return h_json(self, 503, {"error": "dashboard not available"})
                     from mcpbrain import contract, graph_view
-                    return h_json(self, 200, {"types": graph_view.graph_types(server.store),
-                                              "classified": sorted(contract.ENTITY_TYPES)})
+                    try:
+                        return h_json(self, 200, {"types": graph_view.graph_types(server.store),
+                                                  "classified": sorted(contract.ENTITY_TYPES),
+                                                  "hidden": graph_view.hidden_count(server.store)})
+                    except Exception as exc:
+                        log.exception("graph types failed")
+                        return h_json(self, 500, {"error": str(exc)})
                 if self.path.split("?")[0] == "/api/graph/suppressed":
                     if server.store is None:
                         return h_json(self, 503, {"error": "dashboard not available"})
@@ -1042,6 +1047,8 @@ class ControlServer:
                     return h_json(h, 200, out)
                 if out.get("error") == "not_found":
                     return h_json(h, 404, {"ok": False, "reason": "No such entity"})
+                if out.get("error") == "hidden":
+                    return h_json(h, 409, {"ok": False, "reason": out["reason"]})
                 return h_json(h, 400, {"ok": False, "reason": out.get("reason") or "Not saved"})
             m = re.match(r"^/api/graph/entity/([^/?]+)/restore$", h.path)
             if m:

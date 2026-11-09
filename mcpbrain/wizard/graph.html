@@ -219,7 +219,10 @@ let palette = readPalette();
 
 function kindKey(t){ return KIND_WORDS[t] ? t : "unknown"; }
 function kindWord(t){ return KIND_WORDS[t] ? KIND_WORDS[t][0] : "Unclassified"; }
-function relWords(r){ return String(r || "related").replace(/_/g, " "); }
+// A link with no relation name travels as EMPTY_REL (the server's marker);
+// on the page it reads "unnamed".
+const EMPTY_REL = "_none";
+function relWords(r){ return !r || r === EMPTY_REL ? "unnamed" : String(r).replace(/_/g, " "); }
 
 // Colour by kind; an entity from your organisation's shared graph reads as
 // one colour whatever its kind. In circle view, by circle.
@@ -478,7 +481,7 @@ if (window.matchMedia){
 let KINDS = [];          // [{type, count}] from /api/graph/types
 let CLASSIFIED = new Set();
 let ON = new Set();      // raw types switched on
-let TOTAL = 0;
+let TOTAL = 0;          // entities that can be shown: every kind, less the hidden ones
 
 function rawTypesOf(key){
   if (key !== UNCLASSIFIED) return [key];
@@ -499,6 +502,11 @@ function onFromUrl(){
   const known = new Set(KINDS.map(k => k.type));
   const asked = url.types.filter(t => known.has(t));
   ON = asked.length ? new Set(asked) : defaultOn();
+}
+function kindsOnWords(){
+  return kindRows().filter(r => rawTypesOf(r.key).length && rawTypesOf(r.key).every(t => ON.has(t)))
+    .map(r => r.key === UNCLASSIFIED ? "unclassified" : (KIND_WORDS[r.key] ? KIND_WORDS[r.key][1].toLowerCase() : words(r.key)))
+    .join(", ");
 }
 // The types to ask the canvas for: an empty list means every kind.
 function typesForQuery(){ return ON.size === KINDS.length ? [] : [...ON]; }
@@ -528,7 +536,7 @@ async function loadKinds(){
     const out = await api("/api/graph/types");
     KINDS = out.types || [];
     CLASSIFIED = new Set(out.classified || []);
-    TOTAL = KINDS.reduce((a, k) => a + k.count, 0);
+    TOTAL = Math.max(0, KINDS.reduce((a, k) => a + k.count, 0) - (out.hidden || 0));
     onFromUrl();
     renderTypeChips();
   } catch (e) {
@@ -581,11 +589,13 @@ fit(); new ResizeObserver(fit).observe($("stage"));
 // ---- the view note: what this view is, and the way back ----
 function renderViewNote(data){
   const bits = [];
-  if (url.entity && url.rel) bits.push("Only the " + relWords(url.rel) + " links of one entity.");
+  if (url.entity && url.rel) bits.push("Only the " + relWords(url.rel) + " links of one entity, as listed in its details.");
   if (url.unlinked && data){
     bits.push(data.truncated
       ? "Entities with no links: the newest " + fmt(data.nodes.length) + " of " + fmt(data.total) + "."
       : "Entities with no links: " + fmt(data.nodes.length) + " in all.");
+    bits.push("This counts the kinds switched on under Kinds" + (kindsOnWords() ? " (" + kindsOnWords() + ")" : "") +
+      ". Documents, email threads and unclassified entities start off, and hidden ones are left out, so the Overview's figure, which counts every kind, is larger.");
   }
   if (url.sinceHours) bits.push("Entities that gained links or facts in the last " + url.sinceHours + " hours.");
   if (url.circle) bits.push("One circle.");
@@ -642,6 +652,7 @@ function showCount(){
   $("count").textContent = TOTAL
     ? fmt(CURRENT.nodes.length) + " shown of " + plural(TOTAL, "entity", "entities") + "."
     : plural(CURRENT.nodes.length, "entity", "entities") + " shown.";
+  $("count").title = "Hidden entities are not counted.";
 }
 function draw(data){
   for (const n of data.nodes) n._r = nodeRadius(n);
@@ -863,7 +874,7 @@ function personBtn(x){
 function relList(items){
   if (!items.length) return el("p", {class: "small muted", text: "None."});
   const groups = {};
-  for (const x of items){ (groups[x.relation || "related"] ??= []).push(x); }
+  for (const x of items){ (groups[x.relation || EMPTY_REL] ??= []).push(x); }
   return Object.entries(groups).sort((a,b)=> b[1].length - a[1].length).map(([rel,list])=>
     el("div", {class: "relgroup"},
       el("button", {class: "linkbtn", type: "button", title: "Show only these links in the graph",
@@ -1069,7 +1080,7 @@ function doHide(btn){
     if (url.entity === id){ url.entity = ""; url.rel = ""; pushUrl(); }
     const out = el("p", {class: "said", role: "status"});
     fill(dwBody, out, el("a", {class: "link small", href: "/settings#hidden", text: "Hidden entities in Settings"}));
-    offerUndo(out, name + " is hidden from the graph.", r.change_id, async ()=>{ await load(); await openEntity(id); });
+    offerUndo(out, name + " is hidden from the graph.", r.change_id, async ()=>{ await load(); await openEntity(id); loadHidden(); });
     load(); loadHidden();
     return "";
   });
@@ -1077,6 +1088,9 @@ function doHide(btn){
 
 // ---- hidden entities: a count here, restored from Settings ----
 async function loadHidden(){
+  try { const out = await api("/api/graph/types");
+    TOTAL = Math.max(0, (out.types || []).reduce((a, k) => a + k.count, 0) - (out.hidden || 0));
+    if (KINDS.length) showCount(); } catch (e) { /* the count keeps its last figure */ }
   const p = $("hidden-note");
   try{
     const n = ((await api("/api/graph/suppressed")).items || []).length;

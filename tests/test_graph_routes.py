@@ -547,3 +547,114 @@ def test_graph_page_serves_with_a_query_string(tmp_path):
                 assert r.status == 200 and srv.token in r.read().decode()
     finally:
         srv.stop()
+
+
+# --- Task 8 fix round 1 ----------------------------------------------------------
+
+def test_relation_views_and_canvas_draw_live_links_only(tmp_path):
+    from mcpbrain import graph_view
+    from mcpbrain import graph_write as gw
+    s = _graph_store(tmp_path)
+    gw.upsert_relation(s, "p-sam", "works_at", "o-harbour", valid_from="2026-03-01")
+    out = graph_view.graph_ego(s, "p-sam", hops=1, relation="works_at")
+    assert {n["id"] for n in out["nodes"]} == {"p-sam", "o-harbour"}   # not the old employer
+    assert {(lk["source"], lk["target"]) for lk in out["links"]} == {("p-sam", "o-harbour")}
+    canvas = graph_view.graph_canvas(s, min_conn=0)
+    pairs = {(lk["source"], lk["target"]) for lk in canvas["links"]}
+    assert ("p-sam", "o-north") not in pairs and ("p-sam", "o-harbour") in pairs
+    # The drawer's count and the relation view agree.
+    detail = graph_view.entity_detail(s, "p-sam")
+    assert [r["other_id"] for r in detail["relations"] if r["relation"] == "works_at"] == ["o-harbour"]
+
+
+def test_since_and_recency_filters_together(tmp_path):
+    from datetime import datetime, timedelta, timezone
+
+    from mcpbrain import graph_view
+    s = _graph_store(tmp_path)
+    now = datetime.now(timezone.utc)
+    with s._connect(write=True) as db:
+        db.execute("UPDATE entities SET last_seen=?", (now.strftime("%Y-%m-%d"),))
+        fresh = db.execute("SELECT id FROM entity_relations WHERE entity_a='p-dana' "
+                           "AND entity_b='o-harbour'").fetchone()[0]
+        old = db.execute("SELECT id FROM entity_relations WHERE entity_a='d-quote'").fetchone()[0]
+        db.execute("INSERT INTO relation_sources VALUES(?, 'm1', 'email', ?)",
+                   (fresh, now.strftime("%Y-%m-%dT%H:%M:%SZ")))
+        db.execute("INSERT INTO relation_sources VALUES(?, 'm2', 'email', ?)",
+                   (old, (now - timedelta(days=3)).strftime("%Y-%m-%dT%H:%M:%SZ")))
+    out = graph_view.graph_canvas(s, min_conn=0, since_hours=24, recency_days=30)
+    assert {n["id"] for n in out["nodes"]} == {"p-dana", "o-harbour"}
+
+
+def test_a_new_fact_supersedes_the_last_and_undo_puts_it_back(tmp_path):
+    from mcpbrain import change_undo, graph_view
+    s = _graph_store(tmp_path)
+    first = graph_view.add_fact(s, "p-dana", "role", "Site lead")
+    second = graph_view.add_fact(s, "p-dana", "role", "Operations lead")
+    with s._connect() as db:
+        rows = {r["value"]: dict(r) for r in db.execute(
+            "SELECT value, valid_to FROM entity_observations WHERE entity_id='p-dana' "
+            "AND attribute='role' AND source='manual'")}
+    assert rows["Site lead"]["valid_to"] and rows["Operations lead"]["valid_to"] is None
+    assert change_undo.undo(s, str(tmp_path), second["change_id"])["ok"] is True
+    with s._connect() as db:
+        rows = {r["value"]: r["valid_to"] for r in db.execute(
+            "SELECT value, valid_to FROM entity_observations WHERE entity_id='p-dana' "
+            "AND attribute='role' AND source='manual'")}
+    assert rows == {"Site lead": None}
+    # Another attribute is left alone.
+    graph_view.add_fact(s, "p-dana", "phone", "0400 000 000")
+    assert first["ok"]
+
+
+def test_fact_undo_refuses_when_the_closed_fact_changed(tmp_path):
+    from mcpbrain import change_undo, graph_view
+    s = _graph_store(tmp_path)
+    graph_view.add_fact(s, "p-dana", "role", "Site lead")
+    second = graph_view.add_fact(s, "p-dana", "role", "Operations lead")
+    with s._connect(write=True) as db:
+        db.execute("UPDATE entity_observations SET valid_to='2026-01-02' WHERE value='Site lead'")
+    res = change_undo.undo(s, str(tmp_path), second["change_id"])
+    assert res["ok"] is False and res["reason"] == change_undo.CHANGED_SINCE
+    with s._connect() as db:
+        assert db.execute("SELECT COUNT(*) FROM entity_observations "
+                          "WHERE value='Operations lead'").fetchone()[0] == 1
+
+
+def test_no_fact_on_a_hidden_entity(tmp_path):
+    s = _graph_store(tmp_path)
+    s.suppress_entity("p-lena", reason="graph-ui")
+    srv = ControlServer(_Daemon(), str(tmp_path), store=s); srv.start()
+    try:
+        code, body = _post(f"http://127.0.0.1:{srv.port}/api/graph/entity/p-lena/facts",
+                           srv.token, {"attribute": "role", "value": "Site lead"})
+        assert code == 409 and "hidden" in body["reason"]
+        with s._connect() as db:
+            assert db.execute("SELECT COUNT(*) FROM entity_observations "
+                              "WHERE entity_id='p-lena'").fetchone()[0] == 0
+        code, body = _get(f"http://127.0.0.1:{srv.port}/api/graph/types", srv.token)
+        assert body["hidden"] == 1
+    finally:
+        srv.stop()
+
+
+def test_unnamed_relations_and_unknown_type_are_reachable(tmp_path):
+    from mcpbrain import graph_view
+    s = _graph_store(tmp_path)
+    with s._connect(write=True) as db:
+        db.execute("INSERT INTO entity_relations(entity_a, relation, entity_b, strength) "
+                   "VALUES('p-lena', '', 'o-north', 1)")
+        db.execute("UPDATE entities SET type='' WHERE id='f-shed'")
+    out = graph_view.graph_ego(s, "p-lena", hops=1, relation=graph_view.EMPTY_RELATION)
+    assert {n["id"] for n in out["nodes"]} == {"p-lena", "o-north"}
+    assert {lk["relation"] for lk in out["links"]} == {""}
+    assert {t["type"]: t["count"] for t in graph_view.graph_types(s)}["unknown"] == 2
+    canvas = graph_view.graph_canvas(s, min_conn=0, types=["unknown"])
+    assert {n["id"] for n in canvas["nodes"]} == {"x-stub", "f-shed"}
+    srv = ControlServer(_Daemon(), str(tmp_path), store=s); srv.start()
+    try:
+        code, body = _get(f"http://127.0.0.1:{srv.port}/api/graph/ego?id=p-lena&hops=1"
+                          "&relation=_none", srv.token)
+        assert code == 200 and {n["id"] for n in body["nodes"]} == {"p-lena", "o-north"}
+    finally:
+        srv.stop()

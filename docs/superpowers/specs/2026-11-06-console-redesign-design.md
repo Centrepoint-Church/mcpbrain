@@ -146,6 +146,7 @@ The existing graph stays: `vendor/d3.min.js` + `vendor/force-graph.min.js`, the 
 - Type chips and legend cover every type present, driven from the server's type list, not a hard-coded six. `document` and `thread` are off by default (my call: they're bookkeeping and crowd out people and projects); one click turns them on.
 - URL state: `?entity=<id>` opens that entity's drawer, `?unlinked=1` shows entities with no live links (needs the canvas endpoint to accept it). The Overview links use these.
 - Header count reads "N shown of M entities".
+- The graph background token is `--graph-ground` (renamed from `--graph-bg` for Hallmark rule 41, which pairs a `*-bg` token with an ink token on the same rule).
 
 ### 6. Data layer
 

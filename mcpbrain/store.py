@@ -140,6 +140,10 @@ def _log_change_tx(db, change_type: str, *, ref_id: str = "", summary: str = "",
         (change_type, ref_id, summary, detail, revert_ref, source)).lastrowid
 
 
+class EntityHidden(Exception):
+    """A write that needs a visible entity was asked for a suppressed one."""
+
+
 def _log_recorded_change(db, change: dict, ref_id, before, after) -> int:
     """Record an undoable change described by `change` ({change_type, summary?,
     detail?, source?, ref_id?}) with a JSON {before, after} revert_ref.
@@ -7331,24 +7335,41 @@ class Store:
     def add_manual_observation(self, entity_id: str, attribute: str, value: str, *,
                                change: dict | None = None) -> int | None:
         """Write a fact the owner stated about an entity: a current observation
-        with source='manual' and high confidence, the same shape
-        graph_corrections._apply_set_field writes for a role. Returns the new
-        observation id, or None for an unknown entity.
+        with source='manual' and high confidence. Like a role set through
+        graph_corrections._apply_set_field, it supersedes: any current manual
+        observation of the same attribute is closed (valid_to = today) first.
+
+        Returns the new observation id; None for an unknown entity; raises
+        EntityHidden for a suppressed one (a fact there would be invisible).
 
         change: when given, an undoable change_log row recording the
-        observation it wrote is logged on the same connection."""
+        observation it wrote and the ones it closed is logged on the same
+        connection."""
         today = datetime.now(timezone.utc).date().isoformat()
         with self._connect(write=True) as db:
             if db.execute("SELECT 1 FROM entities WHERE id=?", (entity_id,)).fetchone() is None:
                 return None
+            if db.execute("SELECT 1 FROM entity_suppressions WHERE entity_id=?",
+                          (entity_id,)).fetchone():
+                raise EntityHidden(entity_id)
+            closed = [r["id"] for r in db.execute(
+                "SELECT id FROM entity_observations WHERE entity_id=? AND attribute=? "
+                "AND source='manual' AND valid_to IS NULL AND invalidated_at IS NULL",
+                (entity_id, attribute))]
+            if closed:
+                marks = ",".join("?" * len(closed))
+                db.execute(f"UPDATE entity_observations SET valid_to=? WHERE id IN ({marks})",
+                           (today, *closed))
             oid = db.execute(
                 "INSERT INTO entity_observations(entity_id, attribute, value, source, valid_from, "
                 "confidence_source, last_seen) VALUES(?, ?, ?, 'manual', ?, 'high', ?)",
                 (entity_id, attribute, value, today, today)).lastrowid
             if change is not None:
-                _log_recorded_change(db, change, entity_id, {"fact": None},
+                _log_recorded_change(db, change, entity_id,
+                                     {"fact": None, "closed": closed},
                                      {"fact": {"id": oid, "attribute": attribute,
-                                               "value": value}})
+                                               "value": value},
+                                      "closed_on": today})
             return oid
 
     # --- Graph corrections (read side) ----------------------------------------

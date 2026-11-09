@@ -178,3 +178,33 @@ console.log(JSON.stringify(out));
     assert o["?entity=p-dana&rel=works_at"]["back"] == "?entity=p-dana&rel=works_at"
     assert o[""]["back"] == "" and "min_conn=7" in o[""]["canvas"]
     assert o["?since=bogus"]["state"]["sinceHours"] == 0
+
+
+def test_unnamed_relations_travel_as_the_server_marker():
+    from mcpbrain import graph_view
+    assert f'const EMPTY_REL = "{graph_view.EMPTY_RELATION}"' in GRAPH
+    assert "x.relation || EMPTY_REL" in GRAPH and '"related"' not in GRAPH
+
+
+def test_unlinked_note_says_which_kinds_it_counts():
+    assert "This counts the kinds switched on under Kinds" in GRAPH
+    assert "out.hidden" in GRAPH   # the header total leaves hidden entities out
+
+
+def _lch(css, name):
+    m = re.search(rf"{re.escape(name)}: oklch\(([\d.]+)% ([\d.]+) ([\d.]+)\)", css)
+    assert m, name
+    return tuple(float(x) for x in m.groups())
+
+
+def test_graph_colours_stay_off_the_meaning_colours():
+    css = (_WIZ / "console.css").read_text(encoding="utf-8")
+    for mode in ("lt", "dk"):
+        for i in range(1, 7):
+            hue = _lch(css, f"--{mode}-circle-{i}")[2]
+            # measured teal 205, status red 30, accent 355
+            for meaning in (205, 30, 355):
+                d = min(abs(hue - meaning), 360 - abs(hue - meaning))
+                assert d >= 25 or (meaning == 30 and hue == 20), (mode, i, hue, meaning)
+        ev, mt = _lch(css, f"--{mode}-type-event"), _lch(css, f"--{mode}-type-meeting")
+        assert abs(ev[0] - mt[0]) >= 15, (mode, ev, mt)
