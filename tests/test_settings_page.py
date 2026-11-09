@@ -113,8 +113,13 @@ ENDPOINTS = (
     "/api/diagnostics", "/api/logs/", "/api/support/report", "/api/model/status",
     "/api/model/ensure", "/api/sync-now", "/api/backup/run", "/api/graph/suppressed",
     "/restore", "/api/auth/start", "/api/connect-desktop", "/api/dashboard/stats",
-    "/api/timezones", "/api/status",
+    "/api/status",
 )
+
+
+def test_timezones_through_the_shared_helper():
+    assert 'C.populateTimezones($("timezone")' in PAGE
+    assert "/api/timezones" in (_WIZ / "console.js").read_text(encoding="utf-8")
 
 
 @pytest.mark.parametrize("endpoint", ENDPOINTS)
@@ -280,3 +285,87 @@ def test_settings_does_not_hardcode_tenant_or_folder_ids():
     assert prof.fleet_folder_id not in PAGE
     assert prof.escrow_folder_id not in PAGE
     assert "fleet-tenant-name" in PAGE
+
+
+# --- fix round 1 -----------------------------------------------------------------
+
+def _run_block(tmp_path, marker, tail):
+    m = re.search(rf"/\* {marker}:start \*/(.*?)/\* {marker}:end \*/", PAGE, flags=re.S)
+    assert m, f"{marker} block missing"
+    p = tmp_path / f"{marker}.js"
+    # words() comes from console.js on the page; the same function, inlined.
+    p.write_text('const words = (s) => String(s || "").replace(/\\s+\\u2014\\s+/g, ", ")'
+                 '.replace(/\\u2014/g, ", ");\n' + m.group(1) + tail)
+    r = subprocess.run(["node", str(p)], capture_output=True, text=True)
+    assert r.returncode == 0, r.stderr
+    return json.loads(r.stdout)
+
+
+@pytest.mark.skipif(shutil.which("node") is None, reason="node not installed")
+def test_hidden_reasons_are_words(tmp_path):
+    o = _run_block(tmp_path, "reason-words", """
+console.log(JSON.stringify([reasonWords("graph-ui"), reasonWords("user"), reasonWords("orphan_check"),
+  reasonWords("No links \\u2014 nothing points here"), reasonWords("")]));""")
+    assert o[0] == "you hid it in the graph"
+    assert o[1] == "you hid it through Claude"
+    assert o[2] == "hidden by an automatic check"
+    assert o[3] == "reason given: No links, nothing points here"
+    assert o[4] == ""
+
+
+@pytest.mark.skipif(shutil.which("node") is None, reason="node not installed")
+def test_save_profile_keeps_a_distinct_short_name(tmp_path):
+    o = _run_block(tmp_path, "owner-name", """
+const saved = {owner_full_name: "Dana Okafor", owner_name: "Dee"};
+console.log(JSON.stringify([ownerNameFor("Dana Okafor", saved), ownerNameFor("Dana Reyes", saved),
+  ownerNameFor("Dana Okafor", {owner_full_name: "Dana Okafor", owner_name: ""}),
+  ownerNameFor("Marcus Reyes", {})]));""")
+    assert o == ["Dee", "Dana", "Dana", "Marcus"]
+
+
+@pytest.mark.skipif(shutil.which("node") is None, reason="node not installed")
+def test_doctor_lines_are_worded(tmp_path):
+    o = _run_block(tmp_path, "diag-words", r"""
+const L = [
+  {status: "bad", text: "❌ Google           Sign-in expired — reconnect → repair failed: HttpError 401 boom"},
+  {status: "bad", text: "❌ Claude           Not seen → repair did not fix it; run mcpbrain setup"},
+  {status: "bad", text: "❌ Records          not created → creating... ✅ fixed"},
+  {status: "bad", text: "❌ Daemon           no repair registered for 'daemon'"},
+  {status: "bad", text: "❌ Records          records repo create failed: OSError(13, 'denied')"},
+  {status: "info", text: "➖ Baseline         skipped (RuntimeError: no store)"},
+  {status: "bad", text: "❌ Embedder         weights missing → re-download failed: x (needs network; rerun mcpbrain doctor when online)"},
+  {status: "ok", text: "✅ Watchdog         no stall restarts"},
+];
+console.log(JSON.stringify(L.map(diagLine)));""")
+    texts = [d["text"] for d in o]
+    for t in texts:
+        for raw in ("HttpError", "OSError", "RuntimeError", "mcpbrain setup", "mcpbrain doctor",
+                    "→", "✅", "❌", "➖", "—", "repair registered", "  "):
+            assert raw not in t, (raw, t)
+    assert texts[0].startswith("Google Sign-in expired, reconnect. The automatic fix failed.")
+    assert "Details are in the mcpbrain log." in texts[0]
+    assert "Fix this from the menu bar or ask for help." in texts[1]
+    assert o[2] == {"status": "ok", "text": "Records not created, fixed automatically."}
+    assert texts[3] == "Daemon Fix this from the menu bar or ask for help."
+    assert "Details are in the mcpbrain log." in texts[4] and "Details" in texts[5]
+    assert "run Diagnostics again when you’re online" in texts[6]
+    assert o[7] == {"status": "ok", "text": "Watchdog no stall restarts"}
+
+
+def test_logs_and_report_go_through_api_text():
+    assert "apiText" not in PAGE
+    assert 'api("/api/logs/" + which, {text: true})' in PAGE
+    assert 'api("/api/support/report", {text: true})' in PAGE
+    js = (_WIZ / "console.js").read_text(encoding="utf-8")
+    assert "if (res.ok && opts.text) return text;" in js
+
+
+def test_restore_redraws_the_list():
+    body = PAGE[PAGE.index("async function loadHidden("):PAGE.index("// ---- system")]
+    assert "await loadHidden();" in body
+    assert "setTimeout" not in body
+
+
+def test_no_inline_styles():
+    for name in ("settings.html", "index.html", "dashboard.html"):
+        assert 'style="' not in (_WIZ / name).read_text(encoding="utf-8"), name

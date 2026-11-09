@@ -185,32 +185,12 @@
 <script>
 "use strict";
 const C = window.mcpConsole;
-const api = C.api;
+// Shared page helpers live in console.js, defined once for every page.
+const {api, el, fill, said, errText, act, reenable, fmt, plural, monthYear, renderChip} = C;
 
 // ---- small helpers -------------------------------------------------------
 
 function $(id){ return document.getElementById(id); }
-function fmt(n){ return (typeof n === "number" ? n : 0).toLocaleString("en-AU"); }
-function plural(n, one, many){ return fmt(n) + " " + (n === 1 ? one : (many || one + "s")); }
-
-/* Build an element. Every string goes in through textContent: summaries and
-   names come from mail, documents and the model. */
-function el(tag, attrs, ...kids){
-  const n = document.createElement(tag);
-  for (const [k, v] of Object.entries(attrs || {})) {
-    if (v == null || v === false) continue;
-    if (k === "text") n.textContent = v;
-    else if (k === "class") n.className = v;
-    else if (k.startsWith("on")) n.addEventListener(k.slice(2), v);
-    else n.setAttribute(k, v === true ? "" : String(v));
-  }
-  for (const kid of kids.flat()) {
-    if (kid == null || kid === false) continue;
-    n.append(kid instanceof Node ? kid : document.createTextNode(String(kid)));
-  }
-  return n;
-}
-function fill(node, ...kids){ node.replaceChildren(...kids.flat().filter(k => k != null && k !== false)); }
 function setText(id, text){ const n = $(id); if (n) n.textContent = text; }
 /* Monospace is for measured values only: a time, count, version or id. A
    placeholder or a sentence ("not yet", "never") stays in the body face.
@@ -223,37 +203,6 @@ function val(id, text, tone){
   n.classList.toggle("measured", m);
   n.classList.toggle("measured--cool", m && tone !== "plain");
 }
-function said(node, text, kind){
-  node.textContent = text || "";
-  node.classList.remove("said--ok", "said--bad");
-  if (kind) node.classList.add("said--" + kind);
-  node.hidden = !text;
-}
-function errText(e){ return e && e.offline ? "mcpbrain is not responding." : (e && e.message) || "Something went wrong."; }
-
-/* Run an action from a button: disable it while the request runs, report the
-   result (or the server's reason, such as a 409's) next to it, and never
-   assume success. Resolves true when the action went through. */
-async function act(btn, out, run){
-  btn.disabled = true; btn.setAttribute("aria-busy", "true");
-  try {
-    const msg = await run();
-    if (out && msg) said(out, msg, "ok");
-    return true;
-  } catch (e) {
-    if (out) said(out, errText(e), "bad");
-    btn.disabled = false;
-    return false;
-  } finally {
-    btn.removeAttribute("aria-busy");
-  }
-}
-function reenable(btn, ms){ setTimeout(() => { btn.disabled = false; }, ms); }
-
-function monthYear(v){
-  const d = C.parse(/^\d{4}-\d{2}$/.test(String(v)) ? v + "-01T00:00:00" : v);
-  return d ? d.toLocaleDateString("en-AU", {month: "short", year: "numeric"}) : String(v || "");
-}
 
 // ---- state ---------------------------------------------------------------
 
@@ -262,25 +211,9 @@ let settings = null;      // last /api/settings (source switches)
 let lastChanges = "";     // the last rendered feed, to skip redraws that change nothing
 let lastNeeds = "";
 
-// ---- health chip and offline ---------------------------------------------
+// ---- offline ---------------------------------------------------------------
 
-const CHIP = {
-  healthy: ["chip--ok", "Healthy"], needs_you: ["chip--person", "Needs you"],
-  behind: ["chip--person", "Behind"], stalled: ["chip--bad", "Stalled"],
-  paused: ["chip--quiet", "Paused"], offline: ["chip--bad", "Offline"],
-};
-function renderChip(state, reasons){
-  const [cls, label] = CHIP[state] || ["chip--quiet", "Unknown"];
-  const chip = $("health-chip");
-  chip.className = "chip " + cls;
-  chip.textContent = label;
-  chip.title = (reasons || []).join(". ");
-}
-document.addEventListener("mcpconsole:offline", () => {
-  $("offline").hidden = false;
-  renderChip("offline", ["mcpbrain is not responding"]);
-});
-document.addEventListener("mcpconsole:online", () => { $("offline").hidden = true; });
+C.wireOffline(() => refresh(true));
 
 // ---- reading panel -------------------------------------------------------
 
@@ -525,10 +458,12 @@ const TYPE_LABEL = {
   entity_edited: ["entity edited", "entities edited"],
   entity_merged: ["entity merged", "entities merged"],
   entity_suppressed: ["entity hidden", "entities hidden"],
+  entity_unsuppressed: ["entity restored to the graph", "entities restored to the graph"],
 };
 // Changes whose ref_id is an entity id: they open in the graph by it.
 const ENTITY_TYPES = new Set(["profile_updated", "tidy_suppress", "tidy_org", "tidy_org_rewrite",
-  "tidy_owner", "tidy_merge", "entity_edited", "entity_merged", "entity_suppressed"]);
+  "tidy_owner", "tidy_merge", "entity_edited", "entity_merged", "entity_suppressed",
+  "entity_unsuppressed"]);
 
 function circleTitle(c){
   const m = /^Title set for community \d+: ([\s\S]*)$/.exec(c.summary || "");
@@ -981,7 +916,6 @@ $("refresh").addEventListener("click", (ev) => {
   b.disabled = true;
   refresh(true).finally(() => { b.disabled = false; });
 });
-$("offline-retry").addEventListener("click", () => refresh(true));
 refresh(true);
 setInterval(() => refresh(false), 60000);
 </script>

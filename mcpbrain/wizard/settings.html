@@ -83,7 +83,7 @@
           <div id="org-rows" class="orgs"><span class="skel skel--line"></span></div>
           <div><button class="btn" type="button" id="org-add">Add organisation</button></div>
         </div>
-        <div class="form-end" style="justify-content: flex-start;">
+        <div class="form-end form-end--start">
           <button class="btn btn--primary" type="submit" id="profile-save" disabled>Save profile</button>
           <span class="said" id="profile-said" role="status" hidden></span>
         </div>
@@ -185,6 +185,7 @@
         <p>People, organisations and other entities hidden from the graph, by you or by the daily tidy-up. Restoring one brings it and its links back.</p>
       </header>
       <div class="panel">
+        <p class="panel__body said" id="hidden-said" role="status" hidden></p>
         <div class="panel__body" id="hidden-body"><span class="skel skel--line"></span><span class="skel skel--line skel--short"></span></div>
       </div>
     </section>
@@ -259,7 +260,7 @@
             <label for="fleet_escrow_folder_id">Escrow folder ID (backup key)</label>
             <input class="input input--measured" id="fleet_escrow_folder_id" type="text" readonly spellcheck="false" autocomplete="off">
           </div>
-          <div class="form-end" style="justify-content: flex-start;">
+          <div class="form-end form-end--start">
             <button class="btn" type="button" id="fleet-edit" disabled>Edit folder IDs</button>
             <button class="btn" type="button" id="fleet-save-btn" disabled hidden>Save folder IDs</button>
             <button class="btn" type="button" id="fleet-cancel" hidden>Cancel</button>
@@ -276,79 +277,16 @@
 <script>
 "use strict";
 const C = window.mcpConsole;
-const api = C.api;
+// Shared page helpers live in console.js, defined once for every page.
+const {api, el, fill, said, errText, words, act, fmt, plural, monthYear, renderChip} = C;
+const AGAIN = {again: true};   // a button that can be used again after it worked
 const root = document.documentElement;
 
 // ---- small helpers -------------------------------------------------------
 
 function $(id){ return document.getElementById(id); }
-function fmt(n){ return (typeof n === "number" ? n : 0).toLocaleString("en-AU"); }
-function plural(n, one, many){ return fmt(n) + " " + (n === 1 ? one : (many || one + "s")); }
-
-/* Build an element. Every string goes in through textContent: names, folders
-   and reasons come from config, mail and the model. */
-function el(tag, attrs, ...kids){
-  const n = document.createElement(tag);
-  for (const [k, v] of Object.entries(attrs || {})) {
-    if (v == null || v === false) continue;
-    if (k === "text") n.textContent = v;
-    else if (k === "class") n.className = v;
-    else if (k.startsWith("on")) n.addEventListener(k.slice(2), v);
-    else n.setAttribute(k, v === true ? "" : String(v));
-  }
-  for (const kid of kids.flat()) {
-    if (kid == null || kid === false) continue;
-    n.append(kid instanceof Node ? kid : document.createTextNode(String(kid)));
-  }
-  return n;
-}
-function fill(node, ...kids){ node.replaceChildren(...kids.flat().filter(k => k != null && k !== false)); }
 function measured(text, cool){ return el("span", {class: cool ? "measured measured--cool" : "measured", text}); }
-function said(node, text, kind){
-  node.textContent = text || "";
-  node.classList.remove("said--ok", "said--bad");
-  if (kind) node.classList.add("said--" + kind);
-  node.hidden = !text;
-}
-function errText(e){ return e && e.offline ? "mcpbrain is not responding." : (e && e.message) || "Something went wrong."; }
-// Server detail strings are written for a terminal: drop dashes for commas.
-function words(s){ return String(s || "").replace(/\s+\u2014\s+/g, ", ").replace(/\u2014/g, ", "); }
 function busy(id, on){ $(id).setAttribute("aria-busy", on ? "true" : "false"); }
-
-/* Run an action from a button: disable it while the request runs, report the
-   result (or the server's reason) next to it, never assume success. */
-async function act(btn, out, run){
-  btn.disabled = true; btn.setAttribute("aria-busy", "true");
-  try {
-    const msg = await run();
-    if (out && msg) said(out, msg, "ok");
-    return true;
-  } catch (e) {
-    if (out) said(out, errText(e), "bad");
-    return false;
-  } finally {
-    btn.disabled = false;
-    btn.removeAttribute("aria-busy");
-  }
-}
-
-/* Logs and the support report are plain text, not JSON. */
-async function apiText(path){
-  const m = document.querySelector('meta[name="mcpbrain-token"]');
-  let res;
-  try {
-    res = await fetch(path, {headers: {Authorization: "Bearer " + (m ? m.getAttribute("content") : "")}});
-  } catch (e) {
-    const err = new Error("mcpbrain is not responding"); err.offline = true; throw err;
-  }
-  if (!res.ok) throw new Error("Couldn’t load it (" + res.status + ")");
-  return res.text();
-}
-
-function monthYear(v){
-  const d = C.parse(/^\d{4}-\d{2}$/.test(String(v)) ? v + "-01T00:00:00" : v);
-  return d ? d.toLocaleDateString("en-AU", {month: "short", year: "numeric"}) : String(v || "");
-}
 
 // ---- state ---------------------------------------------------------------
 
@@ -371,49 +309,17 @@ async function saveSettings(body, out, okText){
   }
 }
 
-// ---- health chip and offline ---------------------------------------------
+// ---- offline ---------------------------------------------------------------
 
-const CHIP = {
-  healthy: ["chip--ok", "Healthy"], needs_you: ["chip--person", "Needs you"],
-  behind: ["chip--person", "Behind"], stalled: ["chip--bad", "Stalled"],
-  paused: ["chip--quiet", "Paused"], offline: ["chip--bad", "Offline"],
-};
-function renderChip(state, reasons){
-  const chip = $("health-chip");
-  const [cls, text] = CHIP[state] || ["chip--quiet", "Unknown"];
-  chip.className = "chip " + cls;
-  chip.textContent = text;
-  chip.title = (reasons || []).join(". ");
-}
-document.addEventListener("mcpconsole:offline", () => { $("offline").hidden = false; renderChip("offline", ["mcpbrain is not responding"]); });
-document.addEventListener("mcpconsole:online", () => { $("offline").hidden = true; });
-$("offline-retry").addEventListener("click", () => loadAll());
+C.wireOffline(() => loadAll());
 
 // ---- profile ---------------------------------------------------------------
 
-function orgRow(name, domains){
-  const n = el("input", {class: "input", type: "text", "aria-label": "Organisation", placeholder: "Organisation name", autocomplete: "off", spellcheck: "false"});
-  n.value = name || "";
-  const d = el("input", {class: "input", type: "text", "aria-label": "Email domains for " + (name || "this organisation"), placeholder: "Email domains, comma-separated", autocomplete: "off", spellcheck: "false"});
-  d.value = (domains || []).join(", ");
-  n.addEventListener("input", () => d.setAttribute("aria-label", "Email domains for " + (n.value.trim() || "this organisation")));
-  const row = el("div", {class: "orgs__row org-row"}, n, d);
-  row.append(el("button", {class: "btn", type: "button", text: "Remove", "aria-label": "Remove " + (name || "this organisation"),
-    onclick: () => { row.remove(); said($("profile-said"), "Removed. Save profile to keep the change.", null); }}));
-  return row;
-}
-function collectOrgs(){
-  const out = [];
-  document.querySelectorAll("#org-rows .org-row").forEach(row => {
-    const [n, d] = row.querySelectorAll("input");
-    const name = n.value.trim();
-    if (!name) return;
-    out.push({name, domains: d.value.split(",").map(x => x.trim().toLowerCase()).filter(Boolean)});
-  });
-  return out;
+function profileOrgRow(o){
+  return C.orgRow(o.name, o.domains, () => said($("profile-said"), "Removed. Save profile to keep the change.", null));
 }
 $("org-add").addEventListener("click", () => {
-  const row = orgRow("", []);
+  const row = profileOrgRow({name: "", domains: []});
   $("org-rows").append(row);
   row.querySelector("input").focus();
 });
@@ -458,32 +364,27 @@ async function addAlias(){
 $("alias-add").addEventListener("click", addAlias);
 $("alias-new").addEventListener("keydown", (ev) => { if (ev.key === "Enter") { ev.preventDefault(); addAlias(); } });
 
-async function populateTimezones(selected){
-  const sel = $("timezone");
-  let detected = "";
-  try { detected = Intl.DateTimeFormat().resolvedOptions().timeZone || ""; } catch (e) { /* none */ }
-  try {
-    const j = await api("/api/timezones");
-    fill(sel, (j.zones || []).map(z => {
-      const o = el("option", {value: z.value, text: z.label});
-      if (z.value === (selected || detected)) o.selected = true;
-      return o;
-    }));
-  } catch (e) {
-    fill(sel, el("option", {value: selected || "", text: selected || "Couldn’t load timezones"}));
-  }
-}
-
 function renderProfile(){
   $("owner_name").value = cfg.owner_full_name || cfg.owner_name || "";
   $("owner_email").value = cfg.owner_email || "";
   $("owner_role").value = cfg.owner_role || "";
   const orgs = cfg.orgs && cfg.orgs.length ? cfg.orgs : [{name: "", domains: []}];
-  fill($("org-rows"), orgs.map(o => orgRow(o.name, o.domains)));
+  fill($("org-rows"), orgs.map(profileOrgRow));
   $("profile-save").disabled = false;
   busy("profile", false);
 }
 
+/* owner-name:start */
+// The short name actions are attributed to. A save that keeps the full name
+// keeps the saved short name, so a deliberate "Dee" for "Dana Okafor" is never
+// silently rewritten; a new full name (or none saved yet) takes its first word.
+function ownerNameFor(full, saved){
+  const prevFull = ((saved && saved.owner_full_name) || "").trim();
+  const prevShort = ((saved && saved.owner_name) || "").trim();
+  if (prevShort && prevFull === full) return prevShort;
+  return full.split(/\s+/)[0];
+}
+/* owner-name:end */
 function invalid(id, msg){
   const i = $(id);
   i.setAttribute("aria-invalid", msg ? "true" : "false");
@@ -497,14 +398,14 @@ $("profile-form").addEventListener("submit", async (ev) => {
   const out = $("profile-said");
   const full = $("owner_name").value.trim();
   const email = $("owner_email").value.trim();
-  const orgs = collectOrgs();
+  const orgs = C.collectOrgs($("org-rows"));
   let bad = invalid("owner_name", full ? "" : "Your name is needed to attribute actions to you.");
   bad = invalid("owner_email", /^[^@\s]+@[^@\s]+$/.test(email) ? "" : "Enter the email address you use.") || bad;
   if (!orgs.length) { said(out, "Keep at least one organisation: everything is tagged against them.", "bad"); return; }
   if (bad) { said(out, "Not saved. Fix the fields marked above.", "bad"); return; }
   // The page is filled from the saved config before Save is enabled, so
   // every field is posted; a cleared role clears it.
-  const body = {owner_full_name: full, owner_name: full.split(/\s+/)[0], owner_email: email,
+  const body = {owner_full_name: full, owner_name: ownerNameFor(full, cfg), owner_email: email,
                 owner_role: $("owner_role").value.trim(), orgs};
   const tz = $("timezone").value.trim();
   if (tz) body.timezone = tz;
@@ -515,7 +416,7 @@ $("profile-form").addEventListener("submit", async (ev) => {
     if (tz) C.tz = tz;
     renderAliases();
     return "Saved.";
-  });
+  }, AGAIN);
 });
 
 async function loadProfile(){
@@ -529,7 +430,7 @@ async function loadProfile(){
   if (cfg.timezone) C.tz = cfg.timezone;
   renderProfile();
   renderFleet();
-  await populateTimezones(cfg.timezone || "");
+  await C.populateTimezones($("timezone"), cfg.timezone || "");
 }
 
 // ---- appearance ------------------------------------------------------------
@@ -670,7 +571,7 @@ function sourceRow(name, label, s){
       try { await api("/api/sync-now", {method: "POST", body: {source: name}}); }
       catch (e) { if (e.status === 409) throw new Error(label + " is switched off."); throw e; }
       return "Sync started.";
-    })});
+    }, AGAIN)});
   const box = el("input", {type: "checkbox", "aria-label": "Index " + label});
   box.checked = on;
   box.addEventListener("change", async () => {
@@ -720,7 +621,7 @@ function listField(key, label, help, placeholder){
   async function add(){
     const v = inp.value.trim();
     if (!v) { inp.focus(); return; }
-    if (cur().some(x => x.toLowerCase() === v.toLowerCase())) { said(out, "Already on the list.", null); return; }
+    if (cur().some(x => x.toLowerCase() === v.toLowerCase())) { said(out, "Not added: it is on the list already.", null); return; }
     btn.disabled = true;
     if (await saveSettings({ingest: {[key]: [...cur(), v]}}, out, "Added and saved.")) { inp.value = ""; draw(); }
     btn.disabled = false;
@@ -825,7 +726,7 @@ function connRow(c, account){
   const out = el("p", {class: "said", role: "status", hidden: true});
   const p = el("p", {});
   const acts = el("div", {class: "act"});
-  const btn = (text, run) => el("button", {class: "btn", type: "button", text, onclick: (ev) => act(ev.currentTarget, out, run)});
+  const btn = (text, run) => el("button", {class: "btn", type: "button", text, onclick: (ev) => act(ev.currentTarget, out, run, AGAIN)});
   if (c.name === "google") {
     p.append(account ? "Read-only Gmail, Drive and Calendar as " + account + "." : "Read-only Gmail, Drive and Calendar.");
     if (c.state !== "ok" && c.detail) p.append(" " + words(c.detail) + ".");
@@ -878,11 +779,19 @@ async function renderConnections(){
 
 const TYPE_WORDS = {person: "Person", org: "Organisation", project: "Project", topic: "Topic", meeting: "Meeting",
   event: "Event", document: "Document", thread: "Thread"};
+/* reason-words:start */
+// Why an entity is hidden, in words. The two codes mcpbrain writes itself are
+// named; other short codes get a worded fallback; prose (the daily tidy-up
+// writes its reason as a sentence) is shown cleaned.
+const REASON_WORDS = {"graph-ui": "you hid it in the graph", user: "you hid it through Claude"};
 function reasonWords(r){
+  r = String(r || "").trim();
   if (!r) return "";
-  if (r === "graph-ui") return "you hid it in the graph";
-  return "reason given: " + r;
+  if (REASON_WORDS[r]) return REASON_WORDS[r];
+  if (/^[a-z0-9_:.-]+$/.test(r)) return "hidden by an automatic check";
+  return "reason given: " + words(r);
 }
+/* reason-words:end */
 async function loadHidden(){
   const body = $("hidden-body");
   let items;
@@ -910,14 +819,12 @@ async function loadHidden(){
       if (why) meta.push(why);
       return el("li", {}, el("div", {}, el("strong", {text: it.name || "Unnamed entity"}), el("p", {class: "muted small", text: meta.join(", ")})),
         el("button", {class: "btn btn--sm", type: "button", text: "Restore", "aria-label": "Restore " + (it.name || "this entity"),
-          onclick: (ev) => {
-            const b = ev.currentTarget;
-            act(b, out, async () => {
-              await api(`/api/graph/entity/${encodeURIComponent(it.id)}/restore`, {method: "POST"});
-              setTimeout(() => { b.disabled = true; }, 0);
-              return "Restored. You can undo it under What changed on the Overview.";
-            });
-          }}), out);
+          onclick: (ev) => act(ev.currentTarget, out, async () => {
+            await api(`/api/graph/entity/${encodeURIComponent(it.id)}/restore`, {method: "POST"});
+            // Redraw the list and its count; the result is said above it.
+            await loadHidden();
+            said($("hidden-said"), "Restored " + (it.name || "the entity") + ". You can undo it under What changed on the Overview.", "ok");
+          })}), out);
     })));
   busy("hidden", false);
 }
@@ -958,7 +865,7 @@ $("model-ensure").addEventListener("click", (ev) => act(ev.currentTarget, $("mod
   await api("/api/model/ensure", {method: "POST"});
   modelTimer = setTimeout(pollModel, 1000);
   return "Download started.";
-}));
+}, AGAIN));
 
 $("login-switch").addEventListener("change", async (ev) => {
   const box = ev.currentTarget, want = box.checked, out = $("login-said");
@@ -981,13 +888,13 @@ $("update-check").addEventListener("click", (ev) => act(ev.currentTarget, $("upd
   if (r.newer) return "Version " + r.latest + " is available. You have " + (r.installed || "an older one") + ".";
   if (!r.latest) throw new Error("Couldn’t check for updates right now. Try again later.");
   return "You have the latest version, " + (r.installed || r.latest) + ".";
-}));
+}, AGAIN));
 $("update-apply").addEventListener("click", (ev) => act(ev.currentTarget, $("update-said"), async () => {
   try { await api("/api/update/apply", {method: "POST"}); }
   catch (e) { if (e.status === 409) { $("update-apply").hidden = true; return "You already have the latest version."; } throw e; }
   $("update-apply").hidden = true;
   return "Updating. mcpbrain restarts when it’s done; open the console again from the menu bar.";
-}));
+}, AGAIN));
 
 $("restart").addEventListener("click", () => { $("restart-confirm").hidden = false; $("restart-go").focus(); });
 $("restart-cancel").addEventListener("click", () => { $("restart-confirm").hidden = true; $("restart").focus(); });
@@ -996,28 +903,50 @@ $("restart-go").addEventListener("click", (ev) => act(ev.currentTarget, $("updat
   $("restart-confirm").hidden = true;
   $("restart").disabled = true;
   return "Restarting. In a few seconds, open the console again from the menu bar.";
-}));
+}, AGAIN));
 
 // Diagnostics: doctor's own lines, its status as a chip, and plain words where
 // it would print a terminal-only repair note.
 const DIAG = {ok: ["chip--ok", "OK"], warn: ["chip--person", "Look at this"], bad: ["chip--bad", "Problem"], info: ["chip--quiet", "Note"]};
-function diagText(t){
-  return words(String(t || "")
-    .replace(/^\s*(?:\u2705|\u26a0\ufe0f?|\u274c|\u2796|\u2139\ufe0f?)\s*/u, "")
-    .replace(/no repair registered for '[^']*'/g, "Fix this from the menu bar or ask for help")
-    .replace(/\s{2,}/g, " ")).trim();
+/* diag-words:start */
+// doctor writes for a terminal: a status glyph, a padded label, arrows to what
+// it tried, exception text and CLI advice. The page keeps the status (a line
+// it fixed itself counts as OK) and says the rest in words; an exception is
+// never shown, the log is pointed at instead.
+const LOG_HINT = "Details are in the mcpbrain log.";
+const HELP_HINT = "Fix this from the menu bar or ask for help.";
+function diagLine(l){
+  let s = String((l && l.text) || "");
+  let status = (l && l.status) || "info";
+  if (/✅\s*fixed\s*$/u.test(s)) status = "ok";
+  s = s.replace(/^\s*(?:✅|⚠️?|❌|➖|ℹ️?)\s*/u, "")
+    .replace(/\s*→\s*[^→]*?\.\.\.\s*✅\s*fixed\s*$/u, ", fixed automatically.")
+    .replace(/\s*→\s*repair failed:.*$/u, ". The automatic fix failed. " + LOG_HINT)
+    .replace(/\s*→\s*repair did not fix it.*$/u, ". The automatic fix didn’t work. " + HELP_HINT)
+    .replace(/\s*→\s*re-download failed:.*$/u, ". The download failed; run Diagnostics again when you’re online.")
+    .replace(/\s*→\s*re-download did not land.*$/u, ". The download didn’t finish; run Diagnostics again when you’re online.")
+    .replace(/no repair registered for '[^']*'/g, HELP_HINT)
+    .replace(/\b(failed|could not [a-z ]+?):\s.*$/i, "$1. " + LOG_HINT)
+    .replace(/\s*\((?=[^)]*(?:Error|Exception|errno|Traceback|No such file))[^)]*\)/g, ". " + LOG_HINT)
+    .replace(/\brerun mcpbrain doctor\b/gi, "run Diagnostics again")
+    .replace(/\brun mcpbrain (?:setup|doctor --repair|doctor)\b/gi, "fix it from the menu bar or ask for help")
+    .replace(/\s*→\s*/gu, ": ")
+    .replace(/\s{2,}/g, " ");
+  return {status: status, text: words(s).replace(/\.\s*\./g, ".").trim()};
 }
+/* diag-words:end */
 function renderDiag(r){
   const body = $("diag-body");
   if (r.running) { fill(body, el("p", {class: "muted", text: "Running diagnostics. This takes up to a minute."})); return; }
   if (!r.ran_at) return;
   const lines = r.lines || [];
-  const problems = lines.filter(l => l.status === "bad" || l.status === "warn").length;
+  const problems = lines.map(diagLine).filter(d => d.status === "bad" || d.status === "warn").length;
   fill(body,
     el("p", {class: "small"}, problems ? plural(problems, "thing") + " to look at. " : "Everything checked out. ", "Ran ", measured(C.relTime(r.ran_at), true), "."),
     el("ul", {class: "checks"}, lines.map(l => {
-      const [cls, w] = DIAG[l.status] || DIAG.info;
-      return el("li", {}, el("span", {class: "chip " + cls, text: w}), el("span", {text: diagText(l.text)}));
+      const d = diagLine(l);
+      const [cls, w] = DIAG[d.status] || DIAG.info;
+      return el("li", {}, el("span", {class: "chip " + cls, text: w}), el("span", {text: d.text}));
     })));
 }
 let diagTimer = 0;
@@ -1051,7 +980,7 @@ document.querySelectorAll("[data-log]").forEach(b => b.addEventListener("click",
   const which = b.getAttribute("data-log");
   b.disabled = true;
   try {
-    const text = await apiText("/api/logs/" + which);
+    const text = await api("/api/logs/" + which, {text: true});
     $("log-title").textContent = which === "daemon" ? "mcpbrain log, latest lines" : "Menu bar log, latest lines";
     $("log-text").textContent = text || "The log is empty.";
     $("log-box").hidden = false;
@@ -1064,7 +993,7 @@ $("report-copy").addEventListener("click", async (ev) => {
   const b = ev.currentTarget;
   b.disabled = true;
   try {
-    const text = await apiText("/api/support/report");
+    const text = await api("/api/support/report", {text: true});
     try {
       await navigator.clipboard.writeText(text);
       said($("logs-said"), "Copied. Paste it into your message to whoever is helping you.", "ok");
@@ -1126,7 +1055,7 @@ async function saveFleet(){
     cfg.fleet = Object.assign({}, cfg.fleet, body.fleet);
     fleetEditing(false);
     return "Saved.";
-  });
+  }, AGAIN);
 }
 $("fleet-save-btn").addEventListener("click", saveFleet);
 

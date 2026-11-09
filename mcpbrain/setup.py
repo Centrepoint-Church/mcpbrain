@@ -242,11 +242,13 @@ def main(argv=None) -> int:
     except Exception as exc:  # noqa: BLE001 — optional; never block onboarding
         print(f"Skipped scheduling records cadences ({exc}).", file=sys.stderr)
 
-    print(f"Opening the mcpbrain setup wizard at {url}")
+    print(f"Opening mcpbrain setup at {url}")
     print("If a browser does not open, paste that URL into one yourself.")
-    print("Finish setup in the wizard (Google sign-in, your details), then click "
-          "'Connect & restart Claude Desktop' as the LAST step — that reloads Claude "
-          "so the brain_* tools appear. Backup and recovery happen automatically.")
+    print("Setup has three steps: 1 Connect Google, 2 About you, 3 Connect Claude "
+          "Desktop. Do step 3 last: 'Connect and restart Claude Desktop' reloads "
+          "Claude so the brain_* tools appear. Backup and recovery happen "
+          "automatically after step 1. Once setup is done, the same address opens "
+          "the console (Overview, Graph, Settings).")
     webbrowser.open(url)
     return 0
 

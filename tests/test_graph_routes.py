@@ -328,3 +328,15 @@ def test_suppressed_route_without_store(tmp_path):
         assert e.value.code == 503
     finally:
         srv.stop()
+
+
+def test_list_suppressed_skips_a_suppression_whose_entity_is_gone(tmp_path):
+    from mcpbrain import graph_view
+    s = _real_store(tmp_path)
+    s.upsert_entity("p-dana", "Dana Okafor", "person")
+    s.upsert_entity("o-gone", "Gone Org", "org")
+    s.suppress_entity("p-dana", reason="user")
+    s.suppress_entity("o-gone", reason="graph-ui")
+    with s._connect(write=True) as db:   # what an org import's entity removal leaves behind
+        db.execute("DELETE FROM entities WHERE id='o-gone'")  # admin-delete-ok
+    assert [r["id"] for r in graph_view.list_suppressed(s)] == ["p-dana"]

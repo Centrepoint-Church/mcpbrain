@@ -301,7 +301,9 @@ def test_timezone_is_a_select():
 
 def test_prefill_and_dropdown_bootstrap_present():
     assert "/api/config" in WIZ          # one-shot prefill fetch
-    assert "/api/timezones" in WIZ       # dropdown population
+    # Dropdown population: the shared helper in console.js calls /api/timezones.
+    assert 'C.populateTimezones($("timezone")' in WIZ
+    assert "/api/timezones" in Path("mcpbrain/wizard/console.js").read_text()
 
 
 def test_guided_elements_present():

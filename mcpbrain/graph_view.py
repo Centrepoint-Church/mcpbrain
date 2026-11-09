@@ -533,14 +533,15 @@ def suppress_entity(store, entity_id: str) -> dict:
 def list_suppressed(store) -> list[dict]:
     """Every hidden entity, newest first: {id, name, type, suppressed_at, reason}.
 
-    A suppression whose entity row has gone (merged away) is still listed, by
-    id, so it can be restored or seen; its name falls back to the id."""
+    Only suppressions whose entity still exists: an org import or merge can
+    delete the entity row and leave its suppression behind, and that row has
+    nothing to restore, so listing it would offer a Restore that can't work."""
     with store._connect() as db:
         rows = db.execute(
-            "SELECT s.entity_id AS id, COALESCE(e.name, s.entity_id) AS name, "
+            "SELECT s.entity_id AS id, COALESCE(NULLIF(e.name, ''), s.entity_id) AS name, "
             "COALESCE(e.type, '') AS type, COALESCE(s.suppressed_at, '') AS suppressed_at, "
             "COALESCE(s.reason, '') AS reason "
-            "FROM entity_suppressions s LEFT JOIN entities e ON e.id = s.entity_id "
+            "FROM entity_suppressions s JOIN entities e ON e.id = s.entity_id "
             "ORDER BY s.suppressed_at DESC, s.entity_id").fetchall()
     return [dict(r) for r in rows]
 

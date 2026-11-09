@@ -235,3 +235,26 @@ def test_sources_use_the_enabled_flag_and_keep_row_results():
 def test_restoring_is_said_in_words():
     js = (WIZARD / "console.js").read_text(encoding="utf-8")
     assert "mcpbrain is restoring a backup, try again in a moment." in js
+
+
+SHARED = ("el", "fill", "said", "errText", "act", "reenable", "plural", "monthYear",
+          "renderChip", "wireOffline", "orgRow", "collectOrgs", "populateTimezones")
+
+
+def test_page_helpers_are_defined_once_in_console_js():
+    js = (WIZARD / "console.js").read_text(encoding="utf-8")
+    for name in SHARED:
+        assert len(re.findall(rf"function {name}\(", js)) == 1, name
+        assert f"{name}: {name}" in js, name
+    for page in ("dashboard.html", "settings.html", "index.html"):
+        html = (WIZARD / page).read_text(encoding="utf-8")
+        for name in SHARED:
+            assert not re.search(rf"function {name}\(", html), (page, name)
+        assert "const CHIP" not in html and "apiText" not in html, page
+        assert 'addEventListener("mcpconsole:offline"' not in html, page
+
+
+def test_whatchanged_words_a_restore():
+    assert 'entity_unsuppressed: ["entity restored to the graph"' in DASH
+    ents = DASH[DASH.index("const ENTITY_TYPES"):].split(");", 1)[0]
+    assert '"entity_unsuppressed"' in ents

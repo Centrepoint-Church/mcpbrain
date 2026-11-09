@@ -309,6 +309,7 @@ pre.log { margin: var(--space-xs) 0 0; padding: var(--space-sm); max-height: 16r
 .input--measured { font-family: var(--font-outlier); font-size: var(--text-sm); }
 .items .input { flex: 1 1 12rem; min-height: 32px; }
 .form-end { grid-column: 1 / -1; display: flex; gap: var(--space-sm); align-items: center; justify-content: flex-end; flex-wrap: wrap; }
+.form-end--start { justify-content: flex-start; }
 .jump { display: flex; flex-wrap: wrap; gap: var(--space-2xs) var(--space-md); padding-bottom: var(--space-md); border-bottom: var(--rule-hair) solid var(--color-rule); }
 .jump a { font-size: var(--text-sm); color: var(--color-ink-2); text-decoration: underline; text-decoration-color: var(--color-rule-2); text-underline-offset: 0.2em; min-height: 32px; display: inline-flex; align-items: center; transition: color var(--dur-short) var(--ease-out); }
 .jump a:hover { color: var(--color-accent-text); }

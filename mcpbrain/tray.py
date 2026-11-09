@@ -124,7 +124,8 @@ class TrayController:
         self.refresh()
 
     def on_open_setup(self) -> None:
-        """Open the local setup/status page in the browser."""
+        """Open the console's root URL: setup until the install is configured,
+        then the server redirects it to the Overview (Settings is a tab there)."""
         url = self._client.wizard_url()
         if url:
             webbrowser.open(url)
@@ -161,8 +162,8 @@ class TrayController:
 
         Layout: Indexed/Enriched counts (or a "not running" line and "Start
         mcpbrain" when the daemon is down) → Open Dashboard → conditional Reconnect Google → version →
-        Quit. Pause/Resume and Open-setup have moved off the tray: setup now
-        lives behind the dashboard's settings cog.
+        Quit. Pause/Resume and Open-setup have moved off the tray: settings
+        are the Settings tab in the console's top bar.
         """
         items: list[tuple[str, object, bool]] = []
         if not self._available or self._last is None:

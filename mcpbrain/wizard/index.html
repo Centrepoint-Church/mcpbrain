@@ -73,7 +73,7 @@
         <div class="orgs" id="org-rows"></div>
         <div><button class="btn" type="button" id="org-add">Add organisation</button></div>
       </div>
-      <div class="form-end" style="justify-content: flex-start;">
+      <div class="form-end form-end--start">
         <button class="btn" type="submit" id="profile-save" data-step-action>Save</button>
         <span class="said" id="p-state" role="status" hidden></span>
       </div>
@@ -102,34 +102,15 @@
 <script>
 "use strict";
 const C = window.mcpConsole;
-const api = C.api;
+// Shared page helpers live in console.js, defined once for every page.
+const {api, el, said} = C;
 const $ = id => document.getElementById(id);
-
-function el(tag, attrs, ...kids){
-  const n = document.createElement(tag);
-  for (const [k, v] of Object.entries(attrs || {})) {
-    if (v == null || v === false) continue;
-    if (k === "text") n.textContent = v;
-    else if (k === "class") n.className = v;
-    else if (k.startsWith("on")) n.addEventListener(k.slice(2), v);
-    else n.setAttribute(k, v === true ? "" : String(v));
-  }
-  for (const kid of kids.flat()) if (kid != null && kid !== false) n.append(kid instanceof Node ? kid : document.createTextNode(String(kid)));
-  return n;
-}
 function chip(id, text, kind){            // kind: "ok" | "person" | "bad" | "quiet"
   const c = $(id);
   c.textContent = text;                   // server-derived text always via textContent
   c.className = "chip chip--" + (kind || "quiet");
 }
-function said(node, text, kind){
-  node.textContent = text || "";
-  node.classList.remove("said--ok", "said--bad");
-  if (kind) node.classList.add("said--" + kind);
-  node.hidden = !text;
-}
-document.addEventListener("mcpconsole:offline", () => { $("offline").hidden = false; });
-document.addEventListener("mcpconsole:online", () => { $("offline").hidden = true; });
+C.wireOffline();
 
 // ---- step state ------------------------------------------------------------
 
@@ -211,8 +192,8 @@ async function autoBackup(){
     // 503 {retry:true}: detection was inconclusive (Drive unreachable, say);
     // anything else failed. Either way a later status poll tries again.
     _autoBackupDone = false;
-    backupLine("couldn’t set up backup yet. Trying again shortly.", "bad");
-    $("backup-status").title = j.error || "";
+    backupLine(j.retry ? "Google Drive couldn’t be checked for a backup just now. Trying again shortly."
+      : "couldn’t set up backup yet. Trying again shortly; if it keeps failing, run Diagnostics in Settings once setup is done.", "bad");
   }
 }
 
@@ -251,34 +232,11 @@ async function refresh(){
 
 // ---- 2 About you ---------------------------------------------------------------
 
-function orgRow(name, domains){
-  const n = el("input", {class: "input org-name", type: "text", "aria-label": "Organisation", placeholder: "Organisation name", autocomplete: "off", spellcheck: "false"});
-  n.value = name || "";
-  const d = el("input", {class: "input org-domains", type: "text", "aria-label": "Email domains", placeholder: "Email domains, for example example.org", autocomplete: "off", spellcheck: "false"});
-  d.value = (domains || []).join(", ");
-  const row = el("div", {class: "orgs__row org-row"}, n, d);
-  row.append(el("button", {class: "btn", type: "button", text: "Remove", "aria-label": "Remove this organisation", onclick: () => {
-    if (document.querySelectorAll("#org-rows .org-row").length > 1) row.remove(); else { n.value = ""; d.value = ""; }
-  }}));
-  return row;
-}
 $("org-add").addEventListener("click", () => {
-  const row = orgRow("", []);
+  const row = C.orgRow("", []);
   $("org-rows").append(row);
   row.querySelector("input").focus();
 });
-function collectOrgs(){
-  // Rows with a name become {name, domains:[...]}; blank rows are skipped.
-  const out = [];
-  document.querySelectorAll("#org-rows .org-row").forEach(row => {
-    const name = row.querySelector(".org-name").value.trim();
-    if (!name) return;
-    const domains = row.querySelector(".org-domains").value
-      .split(",").map(x => x.trim().toLowerCase()).filter(Boolean);
-    out.push({name: name, domains: domains});
-  });
-  return out;
-}
 
 async function saveProfile(ev){
   if (ev) ev.preventDefault();
@@ -296,7 +254,7 @@ async function saveProfile(ev){
   if (email) body.owner_email = email;
   const role = $("owner_role").value.trim();
   if (role) body.owner_role = role;
-  const orgs = collectOrgs();
+  const orgs = C.collectOrgs($("org-rows"));
   if (orgs.length) body.orgs = orgs;
   const tz = $("timezone").value.trim();
   if (tz) body.timezone = tz;
@@ -315,22 +273,6 @@ async function saveProfile(ev){
 }
 $("profile-form").addEventListener("submit", saveProfile);
 
-async function populateTimezones(selected){
-  const sel = $("timezone");
-  let detected = "";
-  try { detected = Intl.DateTimeFormat().resolvedOptions().timeZone || ""; } catch (e) { /* none */ }
-  try {
-    const j = await api("/api/timezones");
-    sel.replaceChildren(...(j.zones || []).map(z => {
-      const o = el("option", {value: z.value, text: z.label});
-      if (z.value === (selected || detected)) o.selected = true;
-      return o;
-    }));
-  } catch (e) {
-    sel.replaceChildren(el("option", {value: selected || detected, text: selected || detected || "Couldn’t load timezones"}));
-  }
-}
-
 async function prefillFromConfig(){
   let c = {};
   try { c = await api("/api/config"); } catch (e) { c = {}; }
@@ -338,7 +280,7 @@ async function prefillFromConfig(){
   if (c.owner_email) $("owner_email").value = c.owner_email;
   if (c.owner_role) $("owner_role").value = c.owner_role;
   const orgs = c.orgs && c.orgs.length ? c.orgs : [{name: "", domains: []}];
-  $("org-rows").replaceChildren(...orgs.map(o => orgRow(o.name, o.domains)));
+  $("org-rows").replaceChildren(...orgs.map(o => C.orgRow(o.name, o.domains)));
   // Prefill name and email from the connected Google account when none are
   // saved yet. Never overrides a saved value.
   try {
@@ -346,7 +288,7 @@ async function prefillFromConfig(){
     if (!$("owner_name").value && s.google_name) $("owner_name").value = s.google_name;
     if (!$("owner_email").value && s.google_account) $("owner_email").value = s.google_account;
   } catch (e) { /* stays blank */ }
-  await populateTimezones(c.timezone || "");
+  await C.populateTimezones($("timezone"), c.timezone || "");
 }
 
 // ---- 3 Connect Claude Desktop ------------------------------------------------
