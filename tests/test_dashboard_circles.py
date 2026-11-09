@@ -40,9 +40,9 @@ def test_assemble_circles_degrades(tmp_path):
         out = dashboard.assemble(s, str(tmp_path))
     assert out["circles"] == []
 
-# The redesigned dashboard shows circles as a count tile fed by the stats
-# endpoint's graph.communities, not the old renderCircles card.
+# The Overview shows circles as a row of the Knowledge graph table, fed by the
+# stats endpoint's graph.circles, not the old renderCircles card.
 DASH = Path("mcpbrain/wizard/dashboard.html").read_text()
-def test_html_has_circles_tile(): assert 'id="s-communities"' in DASH
+def test_html_has_circles_row(): assert 'id="g-circles"' in DASH
 def test_html_circles_labelled(): assert "Circles" in DASH
 def test_html_uses_stats_endpoint(): assert "/api/dashboard/stats" in DASH

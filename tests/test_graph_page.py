@@ -80,7 +80,7 @@ def test_graph_html_js_syntax():
 
 def test_dashboard_links_to_graph():
     html = (Path(__file__).resolve().parents[1] / "mcpbrain" / "wizard" / "dashboard.html").read_text()
-    assert "/graph" in html                       # explore button targets the page
-    assert "Explore graph" in html
+    assert "/graph" in html                       # the graph link targets the page
+    assert "Open the graph" in html
     # the button is no longer a disabled "soon" teaser
     assert 'class="explore" disabled' not in html

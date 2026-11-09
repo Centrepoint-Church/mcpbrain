@@ -105,9 +105,10 @@ def test_routes_require_the_token(api_unauthenticated):
 DASH = Path("mcpbrain/wizard/dashboard.html").read_text()
 
 
-def test_html_has_corrections_card():
-    assert 'id="corrections-card"' in DASH
-    assert 'id="corrections-body"' in DASH
+def test_html_has_corrections_in_needs_you():
+    # Pending corrections are rows in the Overview's Needs-you panel.
+    assert 'id="needs"' in DASH
+    assert "function renderCorrections" in DASH
 
 
 def test_html_wires_up_the_two_routes():
@@ -117,13 +118,10 @@ def test_html_wires_up_the_two_routes():
 
 def test_corrections_script_never_uses_innerhtml():
     """The summary text is model-supplied (0.7.87 graph stored-XSS precedent):
-    the new loadCorrections() code must build the DOM with textContent/
-    createElement only, never innerHTML."""
-    start = DASH.index("function loadCorrections")
-    end = DASH.index("refresh();", start)
-    snippet = DASH[start:end]
-    assert "loadCorrections" in snippet  # sanity: the slice found the function
-    assert "innerHTML" not in snippet
+    the page builds the DOM with textContent/createElement only, never
+    innerHTML, anywhere."""
+    assert "renderCorrections" in DASH
+    assert "innerHTML" not in DASH
 
 
 def test_dismissing_a_correction_finding_declines_the_correction(api, store):
@@ -152,7 +150,7 @@ def test_pending_lists_entity_names(api, store):
 
 
 def test_corrections_card_renders_names_with_textcontent_only():
-    start = DASH.index("function loadCorrections")
-    end = DASH.index("refresh();", start)
+    start = DASH.index("function renderCorrections")
+    end = DASH.index("function connectionItem", start)
     snippet = DASH[start:end]
     assert "c.names" in snippet and "innerHTML" not in snippet

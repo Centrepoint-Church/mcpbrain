@@ -52,6 +52,10 @@ _CHUNK_LIST_ROUTES = {"/api/chunks/cold": "list_cold",
                       "/api/chunks/waiting": "list_waiting",
                       "/api/chunks/reflow-gave-up": "list_reflow_gave_up"}
 _SYNC_SOURCES = ("gmail", "drive", "calendar", "anarlog")
+_STATIC_TYPES = {".css": "text/css; charset=utf-8",
+                 ".js": "text/javascript; charset=utf-8",
+                 ".woff2": "font/woff2",
+                 ".txt": "text/plain; charset=utf-8"}
 
 
 def h_json(h, code, obj):
@@ -128,6 +132,16 @@ class ControlServer:
                 if self.path.startswith("/vendor/"):
                     m = re.match(r"^/vendor/([A-Za-z0-9._-]+\.js)$", self.path)
                     return server._serve_vendor(self, m.group(1) if m else "")
+                # The console's shared stylesheet, script and fonts. Before the
+                # auth gate for the same reason as /vendor/: <link> and
+                # <script src> carry no token. The whole /static/ prefix is
+                # claimed so anything else 404s, and the token is never
+                # injected into these files.
+                if self.path.startswith("/static/"):
+                    m = re.match(r"^/static/(fonts/)?([A-Za-z0-9._-]+\.(?:css|js|woff2|txt))$",
+                                 self.path)
+                    return server._serve_static(self, (m.group(1) or "", m.group(2))
+                                                if m else ("", ""))
                 if not self._auth_ok(): return
                 if self._restoring(): return
                 if self.path == "/api/status": return h_json(self, 200, server.daemon.status())
@@ -456,6 +470,23 @@ class ControlServer:
             h.send_response(404); h.end_headers(); return
         data = p.read_bytes()
         h.send_response(200); h.send_header("Content-Type", "text/javascript")
+        h.send_header("Content-Length", str(len(data))); h.end_headers(); h.wfile.write(data)
+
+    def _serve_static(self, h, where):
+        sub, name = where
+        root = (Path(__file__).parent / "wizard").resolve()
+        base = (root / "fonts").resolve() if sub else root
+        p = (base / name).resolve() if name else base
+        mime = _STATIC_TYPES.get(p.suffix)
+        # Top-level: only console.css / console.js. fonts/: woff2 and OFL.txt.
+        allowed = {".woff2", ".txt"} if sub else {".css", ".js"}
+        # Resolved and required to sit directly in its folder: a symlink or a
+        # `..` that lands anywhere else is refused.
+        if (not name or p.parent != base or p.suffix not in allowed
+                or mime is None or not p.is_file()):
+            h.send_response(404); h.end_headers(); return
+        data = p.read_bytes()
+        h.send_response(200); h.send_header("Content-Type", mime)
         h.send_header("Content-Length", str(len(data))); h.end_headers(); h.wfile.write(data)
 
     def _close_finding(self, h, finding_id: int, *, dismiss: bool):

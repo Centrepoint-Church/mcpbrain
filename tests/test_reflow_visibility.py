@@ -230,8 +230,9 @@ def test_doctor_idle_only_when_nothing_remains(tmp_path):
 
 def test_dashboard_page_renders_the_reflow_state():
     html = (Path(dashboard.__file__).parent / "wizard" / "dashboard.html").read_text()
-    assert 'id="d-reflow"' in html and "reflowText(data.reflow)" in html
-    assert "blocked: " in html
+    # Re-chunking renders in the System block from stats system.reflow.
+    assert 'id="system"' in html and "reflowText(system.reflow)" in html
+    assert "Blocked: " in html
 
 
 def test_bin_reflow_status_reports_outcomes_and_remaining(tmp_path):
@@ -264,15 +265,15 @@ def test_dashboard_reflow_text_reports_every_blocked_status():
     for status in ("no_recent_backup", "disabled", "error"):
         r = {"owners_done": 3, "queued": 0, "remaining": 5, "total": 8,
              "last_seed": {"status": status, "remaining": 5}}
-        assert _reflow_text(r) == "blocked: " + status.replace("_", " ")
+        assert _reflow_text(r) == "Blocked: " + status.replace("_", " ")
     # Blocked even when rows are still queued, and even when remaining is 0:
     # a gated seed is never "idle"/"done".
     r = {"owners_done": 3, "queued": 2, "remaining": 0,
          "last_seed": {"status": "disabled", "remaining": 0}}
-    assert _reflow_text(r) == "blocked: disabled"
+    assert _reflow_text(r) == "Blocked: disabled"
     assert _reflow_text({"owners_done": 0, "queued": 0, "remaining": 0,
-                         "last_seed": {"status": "ok"}}) == "idle"
-    assert _reflow_text({"halted": "x"}) == "halted — see doctor"
+                         "last_seed": {"status": "ok"}}) == "Idle"
+    assert _reflow_text({"halted": "x"}) == "Halted, run Diagnostics in Settings"
 
 
 # -- hardening H5: doctor and dashboard agree on "blocked" -------------------
@@ -303,9 +304,9 @@ def test_doctor_queued_rows_with_a_gated_seed_are_blocked(tmp_path):
 def test_dashboard_done_backlog_with_stale_backup_is_not_blocked():
     for status in ("no_recent_backup", "disabled", "error"):
         assert _reflow_text({"owners_done": 4, "queued": 0, "remaining": 0,
-                             "last_seed": {"status": status, "remaining": 0}}) == "done (4)"
+                             "last_seed": {"status": status, "remaining": 0}}) == "Finished, 4 done"
         assert _reflow_text({"owners_done": 0, "queued": 0, "remaining": 0,
-                             "last_seed": {"status": status}}) == "idle"
+                             "last_seed": {"status": status}}) == "Idle"
 
 
 def test_dashboard_gated_seed_with_unknown_remaining_is_blocked():
@@ -314,9 +315,9 @@ def test_dashboard_gated_seed_with_unknown_remaining_is_blocked():
     for status in ("no_recent_backup", "disabled", "error"):
         assert _reflow_text({"owners_done": 0, "queued": 0, "remaining": None,
                              "last_seed": {"status": status, "remaining": None}}
-                            ) == "blocked: " + status.replace("_", " ")
+                            ) == "Blocked: " + status.replace("_", " ")
     assert _reflow_text({"owners_done": 0, "queued": 0, "remaining": None,
-                         "last_seed": {"status": "ok"}}) == "idle"
+                         "last_seed": {"status": "ok"}}) == "Idle"
 
 
 # -- dry run #2 D4: "re-enrich" split into uncovered vs inherited-unenriched --
@@ -392,10 +393,10 @@ def _reflow_chunks_text(r):
 
 def test_dashboard_reflow_tooltip_splits_the_chunk_counts():
     html = (Path(dashboard.__file__).parent / "wizard" / "dashboard.html").read_text()
-    assert "reflowChunksText(data.reflow)" in html
+    assert "reflowChunksText(system.reflow)" in html
     assert _reflow_chunks_text({"chunks_carried": 5, "chunks_uncovered": 2,
                                 "chunks_inherited_unenriched": 3}) == \
-        "5 chunks carried · 2 new text to enrich · 3 inherited unenriched"
+        "5 chunks carried, 2 new text to enrich, 3 inherited unenriched"
     assert _reflow_chunks_text(None) == ""
 
 

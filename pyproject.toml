@@ -100,7 +100,7 @@ exclude = ["mcpbrain.maintenance*"]
 # onboarding wizard HTML and the example OAuth client, breaking the browser
 # wizard served by control_api._serve_wizard.
 [tool.setuptools.package-data]
-"mcpbrain.wizard" = ["*.html"]
+"mcpbrain.wizard" = ["*.html", "*.css", "*.js"]
 # Ship the wizard assets, the example client, and the SHARED desktop OAuth
 # client so a clean `uv tool install` carries it (auth.py finds it via its
 # bundled-path lookup, so no env var is needed on any machine).
@@ -119,6 +119,7 @@ exclude = ["mcpbrain.maintenance*"]
     "prompts/*.md",
     "wizard/img/*",
     "wizard/vendor/*",
+    "wizard/fonts/*",
     "records_templates/*",
     "records_templates/**/*",
 ]

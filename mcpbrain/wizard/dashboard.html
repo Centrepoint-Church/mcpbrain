@@ -1,580 +1,935 @@
 <!doctype html>
-<html lang="en">
+<html lang="en-AU">
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>Console — mcpbrain</title>
-<style>
-  :root{
-    --ink:#12151b; --muted:#697280; --faint:#98a0ab;
-    --line:#e6e8ee; --paper:#f4f6f9; --card:#ffffff;
-    --signal:#0b5cff; --signal-weak:#e8f0ff;
-    --graph:#6a4cff; --graph-weak:#efeaff;
-    --ok:#1f9d54; --ok-bg:#e6f5ec;
-    --warn:#b7791f; --warn-bg:#fbf1da;
-    --err:#d64545; --err-bg:#fbe9e9;
-    --idle:#7a828d; --idle-bg:#eef1f5;
-    --mono:ui-monospace,"SF Mono","JetBrains Mono","Fira Mono","Consolas",monospace;
-    --sans:-apple-system,BlinkMacSystemFont,"Segoe UI",system-ui,sans-serif;
-  }
-  *{box-sizing:border-box}
-  body{margin:0;background:var(--paper);color:var(--ink);font:15px/1.55 var(--sans);
-    -webkit-font-smoothing:antialiased}
-  .wrap{max-width:1080px;margin:0 auto;padding:30px 22px 72px}
-
-  .eyebrow{font-size:11px;font-weight:700;text-transform:uppercase;letter-spacing:.11em;
-    color:var(--faint)}
-
-  /* header */
-  .top{display:flex;align-items:center;justify-content:space-between;gap:16px;
-    flex-wrap:wrap;margin:0 0 26px}
-  .brand{display:flex;align-items:center;gap:12px}
-  .mark{width:30px;height:30px;border-radius:8px;flex:0 0 auto;position:relative;
-    background:radial-gradient(120% 120% at 30% 25%,var(--signal),var(--graph))}
-  .mark::after{content:"";position:absolute;inset:8px;border-radius:3px;
-    background:var(--card);opacity:.9;
-    clip-path:polygon(0 60%,28% 60%,38% 20%,52% 85%,64% 45%,72% 60%,100% 60%,100% 100%,0 100%)}
-  .wordmark{font-size:17px;font-weight:680;letter-spacing:-.01em;line-height:1}
-  .brand .eyebrow{margin-top:3px}
-  .actions{display:flex;align-items:center;gap:10px}
-  .live{display:inline-flex;align-items:center;gap:7px;font-family:var(--mono);
-    font-size:12.5px;color:var(--muted)}
-  .live .pulse{width:8px;height:8px;border-radius:50%;background:var(--ok);
-    box-shadow:0 0 0 0 rgba(31,157,84,.5);animation:pulse 2.4s ease-out infinite}
-  @keyframes pulse{0%{box-shadow:0 0 0 0 rgba(31,157,84,.45)}70%{box-shadow:0 0 0 7px rgba(31,157,84,0)}100%{box-shadow:0 0 0 0 rgba(31,157,84,0)}}
-  button{font:inherit;font-weight:600;border-radius:9px;padding:8px 14px;cursor:pointer;
-    border:1px solid var(--line);background:var(--card);color:var(--ink);
-    transition:background .12s,border-color .12s,color .12s,opacity .12s}
-  button:hover:not(:disabled){background:var(--idle-bg)}
-  button:focus-visible{outline:2px solid var(--signal);outline-offset:2px}
-  button:disabled{opacity:.5;cursor:default}
-  .icon-btn{padding:8px 10px;line-height:0;color:var(--muted)}
-  .icon-btn:hover:not(:disabled){color:var(--ink)}
-  .icon-btn svg{display:block}
-  .spinner{width:15px;height:15px;border:2px solid var(--line);border-top-color:var(--signal);
-    border-radius:50%;animation:spin .6s linear infinite;display:none}
-  .spinner.active{display:inline-block}
-  @keyframes spin{to{transform:rotate(360deg)}}
-
-  /* hero: the pipeline feeds the knowledge graph */
-  .pipeline{background:var(--card);border:1px solid var(--line);border-radius:18px;
-    padding:24px 26px;display:grid;
-    grid-template-columns:minmax(0,.92fr) auto minmax(0,1.25fr);align-items:stretch;gap:20px;
-    box-shadow:0 1px 2px rgba(18,21,27,.04),0 10px 30px rgba(18,21,27,.035)}
-  .feed{display:flex;flex-direction:column;justify-content:center;gap:14px}
-  .stage{min-width:0}
-  .stage .eyebrow{margin-bottom:8px}
-  .stat-num{font-family:var(--mono);font-weight:600;font-variant-numeric:tabular-nums;
-    letter-spacing:-.02em;font-size:clamp(28px,3.4vw,40px);line-height:1;color:var(--ink)}
-  .stat-sub{font-size:13px;color:var(--muted);margin-top:8px;line-height:1.4}
-  .stat-sub b{font-family:var(--mono);font-weight:600;color:var(--muted)}
-  .stat-sub .skipped{text-decoration:underline dotted;text-underline-offset:2px;cursor:help}
-  .meter{height:7px;border-radius:99px;background:var(--signal-weak);margin:11px 0 0;overflow:hidden}
-  .meter>span{display:block;height:100%;border-radius:99px;
-    background:linear-gradient(90deg,var(--signal),#3d8bff);width:0;
-    transition:width 1s cubic-bezier(.2,.7,.2,1)}
-  .meter-label{font-family:var(--mono);font-size:12px;color:var(--signal);
-    margin-top:7px;font-variant-numeric:tabular-nums;cursor:help;width:fit-content}
-
-  .flow-v{width:2px;height:18px;margin-left:2px;position:relative;background:var(--line);
-    border-radius:2px;overflow:hidden;align-self:flex-start}
-  .flow-v::before{content:"";position:absolute;inset:0;
-    background:linear-gradient(180deg,transparent,var(--signal),transparent);
-    height:60%;animation:flowv 1.9s linear infinite}
-  @keyframes flowv{0%{transform:translateY(-120%)}100%{transform:translateY(260%)}}
-
-  .flow-h{width:34px;align-self:center;position:relative}
-  .flow-h .line{height:2px;background:var(--line);border-radius:2px;position:relative;overflow:hidden}
-  .flow-h .line::before{content:"";position:absolute;inset:0;
-    background:linear-gradient(90deg,transparent,var(--graph),transparent);
-    width:45%;animation:flow 1.9s linear infinite}
-  @keyframes flow{0%{transform:translateX(-120%)}100%{transform:translateX(320%)}}
-  .flow-h .head{position:absolute;right:-1px;top:50%;transform:translateY(-50%);
-    width:6px;height:6px;border-top:2px solid var(--graph);border-right:2px solid var(--graph);
-    rotate:45deg;opacity:.55}
-
-  /* graph destination panel — home of the future interactive view */
-  .graph-panel{position:relative;border-radius:14px;overflow:hidden;min-height:190px;
-    background:radial-gradient(125% 130% at 85% 12%,var(--graph-weak),#fbfaff);
-    border:1px solid #ece8ff;display:flex;align-items:center}
-  .graph-panel canvas{position:absolute;inset:0;width:100%;height:100%}
-  .graph-inner{position:relative;z-index:1;padding:20px 22px}
-  .graph-inner .eyebrow{color:var(--graph);opacity:.9}
-  .graph-inner .stat-num{color:var(--graph);margin-top:9px;font-size:clamp(32px,4vw,44px)}
-  .explore{margin-top:15px;display:inline-flex;align-items:center;gap:8px;
-    background:rgba(255,255,255,.72);border:1px solid #e2dcff;color:var(--graph)}
-  .explore:disabled{opacity:1;cursor:default}
-  .explore .soon{font-family:var(--mono);font-size:10px;letter-spacing:.08em;
-    text-transform:uppercase;background:var(--graph);color:#fff;border-radius:99px;padding:1px 7px}
-
-  body.paused .flow-v::before,body.paused .flow-h .line::before{animation:none;opacity:0}
-  body.paused .live .pulse{background:var(--idle);animation:none;box-shadow:none}
-
-  /* graph readout tiles */
-  .tiles{display:grid;grid-template-columns:repeat(4,1fr);gap:14px;margin:14px 0 0}
-  .tile{background:var(--card);border:1px solid var(--line);border-radius:14px;padding:16px 18px}
-  .tile .eyebrow{color:var(--graph);opacity:.85}
-  .tile .stat-num{font-size:clamp(24px,3vw,30px);margin-top:9px}
-  .tile .stat-sub{font-size:12px;margin-top:6px}
-
-  /* detail grid */
-  .grid{display:grid;grid-template-columns:1fr 1fr 1fr;gap:16px;margin-top:16px;align-items:start}
-  .card{background:var(--card);border:1px solid var(--line);border-radius:16px;padding:18px 20px}
-  .card h2{font-size:11px;font-weight:700;text-transform:uppercase;letter-spacing:.1em;
-    color:var(--faint);margin:0 0 14px}
-  .row{display:flex;align-items:center;gap:10px;padding:9px 0;border-top:1px solid var(--line)}
-  .row:first-of-type{border-top:none}
-  .row .name{flex:1 1 auto;font-size:14px;min-width:0}
-  .row .name small{display:block;color:var(--muted);font-size:12px;margin-top:1px;font-family:var(--mono)}
-  .row .val{font-family:var(--mono);font-size:12.5px;color:var(--muted);white-space:nowrap;
-    font-variant-numeric:tabular-nums}
-  .empty{color:var(--muted);font-size:13px;padding:4px 0}
-
-  .badge{font-size:11px;font-weight:600;padding:1px 8px;border-radius:99px;font-family:var(--mono)}
-  .badge.done{background:var(--ok-bg);color:var(--ok)}
-  .badge.going{background:var(--signal-weak);color:var(--signal)}
-
-  .sdot{width:9px;height:9px;border-radius:50%;flex:0 0 auto}
-  .sdot.ok{background:var(--ok)} .sdot.warn{background:var(--warn)}
-  .sdot.err{background:var(--err)} .sdot.idle{background:var(--idle)}
-  .state{font-size:11px;font-weight:600;font-family:var(--mono)}
-  .state.ok{color:var(--ok)} .state.warn{color:var(--warn)} .state.idle{color:var(--idle)}
-
-  .kv{display:flex;justify-content:space-between;gap:10px;padding:7px 0;
-    border-top:1px solid var(--line);font-size:13.5px}
-  .kv:first-of-type{border-top:none}
-  .kv .k{color:var(--muted)}
-  .kv .v{font-family:var(--mono);font-variant-numeric:tabular-nums}
-
-  /* toast */
-  #toast{position:fixed;bottom:24px;left:50%;transform:translateX(-50%);background:#1a1f27;
-    color:#fff;border-radius:10px;padding:10px 18px;font-size:14px;pointer-events:none;
-    opacity:0;transition:opacity .2s;z-index:999;white-space:nowrap}
-  #toast.show{opacity:1}
-
-  @media(max-width:820px){
-    .tiles{grid-template-columns:repeat(2,1fr)}
-    .grid{grid-template-columns:1fr}
-    .pipeline{grid-template-columns:1fr;gap:16px;padding:20px}
-    .flow-h{display:none}
-    .graph-panel{min-height:160px}
-  }
-  @media(prefers-reduced-motion:reduce){
-    .flow-v::before,.flow-h .line::before,.live .pulse{animation:none!important}
-    .meter>span{transition:none}
-  }
-</style>
+<title>Overview, mcpbrain</title>
+<meta name="description" content="Whether the brain is healthy and current, what needs you, what changed in the last two days, and how much of your mail and documents is in the graph.">
+<meta name="mcpbrain-token" content="__MCPBRAIN_TOKEN__">
+<link rel="icon" href="data:,">
+<link rel="stylesheet" href="/static/console.css">
+<script src="/static/console.js"></script>
 </head>
 <body>
-<main class="wrap">
-  <header class="top">
-    <div class="brand">
-      <span class="mark" aria-hidden="true"></span>
-      <div>
-        <div class="wordmark">mcpbrain</div>
-        <div class="eyebrow">Console</div>
-      </div>
-    </div>
-    <div class="actions">
-      <span id="spinner" class="spinner"></span>
-      <span class="live"><span class="pulse"></span><span id="live-text">connecting…</span></span>
-      <button id="refresh-btn" onclick="refresh()">Refresh</button>
-      <button class="icon-btn" title="Settings" aria-label="Settings" onclick="location.href='/'">
-        <svg width="17" height="17" viewBox="0 0 24 24" fill="none" stroke="currentColor"
-             stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
-          <circle cx="12" cy="12" r="3"></circle>
-          <path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 1 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-4 0v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 1 1-2.83-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1 0-4h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 1 1 2.83-2.83l.06.06a1.65 1.65 0 0 0 1.82.33H9a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 4 0v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 1 1 2.83 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82V9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1z"></path>
-        </svg>
+<a class="skip" href="#main">Skip to the overview</a>
+
+<header class="bar">
+  <div class="bar__in">
+    <a class="wordmark" href="/dashboard" aria-label="mcpbrain overview">mcpbrain</a>
+    <nav class="tabs" aria-label="Console">
+      <a class="tab" href="/dashboard" aria-current="page">Overview</a>
+      <a class="tab" href="/graph">Graph</a>
+      <a class="tab" href="/settings">Settings</a>
+    </nav>
+    <div class="bar__end">
+      <span class="chip chip--quiet" id="health-chip" role="status">Checking</span>
+      <span class="asof">Updated <span class="measured measured--cool" id="asof">not yet</span></span>
+      <button class="btn btn--sm" type="button" id="refresh">Refresh</button>
+      <button class="btn btn--sm mode" type="button" data-mode-toggle aria-label="Switch between light and dark mode">
+        <svg class="sun" viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="12" r="4"/><path d="M12 2v2M12 20v2M4.93 4.93l1.41 1.41M17.66 17.66l1.41 1.41M2 12h2M20 12h2M4.93 19.07l1.41-1.41M17.66 6.34l1.41-1.41"/></svg>
+        <svg class="moon" viewBox="0 0 24 24" aria-hidden="true"><path d="M20.5 14.5A8.5 8.5 0 0 1 9.5 3.5a8.5 8.5 0 1 0 11 11z"/></svg>
       </button>
     </div>
-  </header>
+  </div>
+</header>
 
-  <!-- HERO: the pipeline feeds the knowledge graph -->
-  <section class="pipeline" aria-label="Enrichment pipeline feeding the knowledge graph">
-    <div class="feed">
-      <div class="stage">
-        <div class="eyebrow">Captured</div>
-        <div class="stat-num" id="s-indexed">0</div>
-        <div class="stat-sub"><span id="s-cold-line">chunks indexed</span></div>
+<main id="main">
+<div class="page">
+  <noscript><p class="banner">The overview loads its figures with JavaScript. Turn it on for this page to see them.</p></noscript>
+  <div class="banner banner--bad" id="offline" role="alert" hidden>
+    <span>mcpbrain is not responding. If it stopped or restarted, start it from the menu bar and open the console from there. This page keeps the last figures it had.</span>
+    <button class="btn btn--sm" type="button" id="offline-retry">Try again</button>
+  </div>
+
+  <div class="oa-top">
+    <section class="panel oa-reading" id="reading" aria-labelledby="reading-h" aria-busy="true">
+      <h1 id="reading-h">In the graph</h1>
+      <div class="reading" id="r-pct"><span class="skel">00%</span></div>
+      <div class="meter" id="r-meter" role="img" aria-label="Loading"><span></span></div>
+      <dl class="facts">
+        <div><dt>waiting</dt><dd class="measured" id="r-waiting"><span class="skel">0</span></dd></div>
+        <div><dt>batches queued</dt><dd class="measured" id="r-units"><span class="skel">0</span></dd></div>
+        <div><dt>pushed in 24 h</dt><dd class="measured measured--cool" id="r-pushes"><span class="skel">0</span></dd></div>
+        <div><dt>last push</dt><dd class="measured measured--cool" id="r-last"><span class="skel">00:00</span></dd></div>
+      </dl>
+      <p class="said said--bad" id="reading-err" role="status" hidden></p>
+      <div class="panels oa-cells">
+        <div>
+          <span>Captured</span>
+          <span class="measured" id="r-total"><span class="skel">0</span></span>
+          <div class="acts"><a class="linkbtn" href="#sources">See sources</a></div>
+        </div>
+        <div>
+          <span>Worth enriching</span>
+          <span class="measured" id="r-eligible"><span class="skel">0</span></span>
+          <span class="muted small" id="r-skipped"></span>
+          <div class="acts">
+            <button class="linkbtn" type="button" data-chunks="cold">Review what’s skipped</button>
+            <button class="linkbtn" type="button" data-chunks="waiting">See what’s waiting</button>
+          </div>
+        </div>
       </div>
-      <div class="flow-v" aria-hidden="true"></div>
-      <div class="stage">
-        <div class="eyebrow">In the graph</div>
-        <div class="stat-num" id="s-enriched">0</div>
-        <div class="meter"><span id="meter-fill"></span></div>
-        <div class="meter-label" id="meter-label">0% digested into the graph</div>
-        <div class="stat-sub" id="meter-sub">0 waiting, 0 queued for Claude</div>
+    </section>
+
+    <section class="panel oa-needs" id="needs" aria-labelledby="needs-title" aria-busy="true">
+      <div class="panel__body">
+        <h2 id="needs-title">Checking what needs you</h2>
+        <ul class="needs-list" id="needs-list">
+          <li><span class="skel skel--line"></span><span class="skel skel--line skel--short"></span></li>
+        </ul>
+        <p class="muted small" id="needs-corrections"></p>
       </div>
+      <div class="note statusline">
+        <dl>
+          <div><dt>Email synced</dt><dd class="measured measured--cool" id="st-email">not yet</dd></div>
+          <div><dt>Last enrichment</dt><dd class="measured measured--cool" id="st-enrich">not yet</dd></div>
+          <div><dt>Backup</dt><dd class="measured measured--cool" id="st-backup">not yet</dd></div>
+        </dl>
+        <div class="acts">
+          <button class="btn" type="button" id="sync-all">Sync now</button>
+          <button class="btn" type="button" id="pause">Pause</button>
+          <button class="btn" type="button" id="backup-now">Back up now</button>
+        </div>
+        <p class="said" id="st-said" role="status" hidden></p>
+      </div>
+    </section>
+  </div>
+
+  <section class="panel" id="chunks" aria-labelledby="chunks-h" hidden>
+    <div class="panel__head">
+      <h2 id="chunks-h">Items</h2>
+      <div class="end"><button class="btn btn--sm" type="button" id="chunks-close">Close</button></div>
     </div>
-    <div class="flow-h" aria-hidden="true"><div class="line"></div><span class="head"></span></div>
-    <div class="graph-panel">
-      <canvas id="constellation"></canvas>
-      <div class="graph-inner">
-        <div class="eyebrow">Knowledge graph</div>
-        <div class="stat-num" id="s-entities">0</div>
-        <div class="stat-sub">people, organisations, projects, topics and meetings</div>
-        <button class="explore" onclick="location.href='/graph'">Explore graph →</button>
+    <div class="panel__body"><p class="muted small" id="chunks-intro"></p></div>
+    <div class="scroll-x">
+      <table class="table">
+        <thead><tr>
+          <th scope="col"><input type="checkbox" id="chunks-all" aria-label="Select every item on this page"></th>
+          <th scope="col">Item</th><th scope="col">Source</th><th scope="col">Date</th><th scope="col">Why</th>
+        </tr></thead>
+        <tbody id="chunks-body"></tbody>
+      </table>
+    </div>
+    <div class="note">
+      <div class="pager">
+        <button class="btn btn--sm" type="button" id="chunks-prev">Previous</button>
+        <span id="chunks-page" class="measured"></span>
+        <button class="btn btn--sm" type="button" id="chunks-next">Next</button>
       </div>
+      <button class="btn" type="button" id="chunks-act" disabled>Act on selected</button>
+      <span class="said" id="chunks-said" role="status" hidden></span>
     </div>
   </section>
 
-  <!-- graph readout -->
-  <section class="tiles" aria-label="Knowledge graph detail">
-    <div class="tile"><div class="eyebrow">Relations</div>
-      <div class="stat-num" id="s-relations">0</div><div class="stat-sub">links between entities</div></div>
-    <div class="tile"><div class="eyebrow">Observations</div>
-      <div class="stat-num" id="s-observations">0</div><div class="stat-sub">time-stamped facts</div></div>
-    <div class="tile"><div class="eyebrow">Circles</div>
-      <div class="stat-num" id="s-communities">0</div><div class="stat-sub">detected communities</div></div>
-    <div class="tile"><div class="eyebrow">Unlinked</div>
-      <div class="stat-num" id="s-unlinked">0</div><div class="stat-sub">entities with no links</div></div>
+  <section class="panel" id="changes" aria-labelledby="changes-h" aria-busy="true">
+    <div class="panel__head">
+      <h2 id="changes-h">What changed</h2>
+      <div class="end"><button class="linkbtn" type="button" id="added-btn" aria-expanded="false" aria-controls="added">Show what enrichment added</button></div>
+    </div>
+    <div class="panel__body" id="added" hidden>
+      <p class="said" id="added-said" role="status"></p>
+      <ul class="addlist" id="added-list"></ul>
+    </div>
+    <p class="panel__body said said--bad" id="changes-err" role="status" hidden></p>
+    <div class="oa-days">
+      <div><h3>Today</h3><ol class="trail" id="day-today"><li class="empty"><span class="skel skel--line"></span></li></ol></div>
+      <div><h3>Yesterday</h3><ol class="trail" id="day-yesterday"><li class="empty"><span class="skel skel--line"></span></li></ol></div>
+    </div>
   </section>
 
-  <!-- detail cards -->
-  <section class="grid">
-    <div class="card">
-      <h2>Sources</h2>
-      <div id="sources-body"><p class="empty">Loading…</p></div>
-    </div>
-    <div class="card">
-      <h2>Connections</h2>
-      <div id="connections-body"><p class="empty">Loading…</p></div>
-    </div>
-    <div class="card">
-      <h2>Daemon</h2>
-      <div class="kv"><span class="k">Version</span><span class="v" id="d-version">—</span></div>
-      <div class="kv"><span class="k">State</span><span class="v" id="d-state">—</span></div>
-      <div class="kv"><span class="k">Health</span><span class="v" id="d-health">—</span></div>
-      <div class="kv"><span class="k">Last push</span><span class="v" id="d-push">—</span></div>
-      <div class="kv"><span class="k">Open findings</span><span class="v" id="d-findings">—</span></div>
-      <div class="kv"><span class="k">Re-chunking</span><span class="v" id="d-reflow">—</span></div>
-    </div>
-    <div class="card" id="corrections-card" hidden>
-      <h2>Pending corrections</h2>
-      <p class="empty">Graph corrections Claude inferred and wants you to confirm.</p>
-      <div id="corrections-body"></div>
-    </div>
-  </section>
+  <div class="split">
+    <section class="panel" id="graph" aria-labelledby="graph-h" aria-busy="true">
+      <div class="panel__head"><h2 id="graph-h">Knowledge graph</h2><div class="end"><a class="link small" href="/graph">Open the graph</a></div></div>
+      <table class="table">
+        <thead><tr><th scope="col">Kind</th><th scope="col" class="num">Count</th></tr></thead>
+        <tbody>
+          <tr><td><a class="link" href="/graph?type=person">People</a></td><td class="num measured" id="g-person"><span class="skel">0</span></td></tr>
+          <tr><td><a class="link" href="/graph?type=org">Organisations</a></td><td class="num measured" id="g-org"><span class="skel">0</span></td></tr>
+          <tr><td><a class="link" href="/graph?type=topic">Topics</a></td><td class="num measured" id="g-topic"><span class="skel">0</span></td></tr>
+          <tr><td><a class="link" href="/graph?type=project">Projects</a></td><td class="num measured" id="g-project"><span class="skel">0</span></td></tr>
+          <tr><td><a class="link" href="/graph?type=meeting">Meetings</a></td><td class="num measured" id="g-meeting"><span class="skel">0</span></td></tr>
+          <tr><td><a class="link" href="/graph?view=circles">Circles</a> <span class="muted small">groups that work together</span></td><td class="num measured" id="g-circles"><span class="skel">0</span></td></tr>
+          <tr><td>Live links between them</td><td class="num measured" id="g-links"><span class="skel">0</span></td></tr>
+          <tr><td>Facts recorded</td><td class="num measured" id="g-facts"><span class="skel">0</span></td></tr>
+          <tr><td><a class="link muted" href="/graph?type=document&amp;type=thread">Documents and threads</a> <span class="muted small">kept as sources</span></td><td class="num measured muted" id="g-docs"><span class="skel">0</span></td></tr>
+        </tbody>
+      </table>
+      <div class="note"><span id="g-unlinked">Counting entities with no links.</span><a class="link" href="/graph?show=unlinked">Review unlinked entities</a></div>
+      <p class="panel__body said said--bad" id="graph-err" role="status" hidden></p>
+    </section>
+
+    <section class="panel" id="sources" aria-labelledby="sources-h" aria-busy="true">
+      <div class="panel__head"><h2 id="sources-h">Sources</h2></div>
+      <div class="scroll-x">
+        <table class="table table--action">
+          <thead><tr><th scope="col">Source</th><th scope="col">History</th><th scope="col">Last synced</th><th scope="col"><span class="visually-hidden">Actions</span></th></tr></thead>
+          <tbody id="src-body">
+            <tr><td><strong>Gmail</strong></td><td><span class="skel">0</span></td><td><span class="skel">00:00</span></td><td></td></tr>
+            <tr><td><strong>Drive</strong></td><td><span class="skel">0</span></td><td><span class="skel">00:00</span></td><td></td></tr>
+            <tr><td><strong>Calendar</strong></td><td><span class="skel">0</span></td><td><span class="skel">00:00</span></td><td></td></tr>
+            <tr><td><strong>Meetings</strong></td><td><span class="skel">0</span></td><td><span class="skel">00:00</span></td><td></td></tr>
+          </tbody>
+        </table>
+      </div>
+      <dl class="oa-sys" id="system" aria-label="System">
+        <div><dt>Version</dt><dd class="measured" id="sys-version"><span class="skel">0.0.0</span></dd></div>
+        <div><dt>Watchdog restarts</dt><dd class="measured" id="sys-watchdog"><span class="skel">0</span></dd></div>
+        <div><dt>Enrichment runs as</dt><dd><a class="link" href="/settings#connections">Hourly Claude task</a></dd></div>
+        <div id="sys-reflow-row" hidden><dt>Re-chunking</dt><dd><span id="sys-reflow"></span> <button class="linkbtn" type="button" id="sys-gaveup" hidden></button></dd></div>
+      </dl>
+    </section>
+  </div>
+</div>
 </main>
 
-<div id="toast"></div>
-
 <script>
-const TOKEN = "__MCPBRAIN_TOKEN__";
-const H = {headers: {Authorization: "Bearer " + TOKEN}};
-const reduce = window.matchMedia("(prefers-reduced-motion:reduce)").matches;
-let paused = false;      // last-known daemon paused state (drives the toggle)
-let firstLoad = true;    // count-up only on the first successful load
+"use strict";
+const C = window.mcpConsole;
+const api = C.api;
+
+// ---- small helpers -------------------------------------------------------
 
 function $(id){ return document.getElementById(id); }
+function fmt(n){ return (typeof n === "number" ? n : 0).toLocaleString("en-AU"); }
+function plural(n, one, many){ return fmt(n) + " " + (n === 1 ? one : (many || one + "s")); }
 
-function fmt(n){ return (typeof n === "number" ? n : 0).toLocaleString(); }
-
-function asofLabel(iso){
-  try{
-    return new Date(iso).toLocaleTimeString("en-AU",
-      {timeZone:"Australia/Perth", hour:"2-digit", minute:"2-digit", hour12:false});
-  }catch(e){ return ""; }
-}
-
-function trimDate(s){
-  // Backfill "reached" is an ISO datetime floor; show the date part only.
-  if(!s) return "";
-  return String(s).slice(0, 10);
-}
-
-function showToast(msg, ms){
-  const t = $("toast");
-  t.textContent = msg;
-  t.classList.add("show");
-  setTimeout(() => t.classList.remove("show"), ms || 3000);
-}
-
-// count-up a numeric readout; instant on refresh or reduced-motion
-function setNum(id, value, animate){
-  const el = $(id);
-  if(!animate || reduce){ el.textContent = fmt(value); return; }
-  const start = performance.now(), dur = 650;
-  function step(t){
-    const p = Math.min(1, (t - start) / dur);
-    el.textContent = fmt(Math.round(value * (1 - Math.pow(1 - p, 3))));
-    if(p < 1) requestAnimationFrame(step);
+/* Build an element. Every string goes in through textContent: summaries and
+   names come from mail, documents and the model. */
+function el(tag, attrs, ...kids){
+  const n = document.createElement(tag);
+  for (const [k, v] of Object.entries(attrs || {})) {
+    if (v == null || v === false) continue;
+    if (k === "text") n.textContent = v;
+    else if (k === "class") n.className = v;
+    else if (k.startsWith("on")) n.addEventListener(k.slice(2), v);
+    else n.setAttribute(k, v === true ? "" : String(v));
   }
-  requestAnimationFrame(step);
-}
-
-// ---- render ----
-
-// "3 min ago" / "5 h ago" / "2 d ago" for an ISO timestamp; "never" when absent.
-function ago(iso){
-  if(!iso) return "never";
-  const t = Date.parse(iso);
-  if(isNaN(t)) return "never";
-  const m = Math.max(0, Math.round((Date.now() - t) / 60000));
-  if(m < 1) return "just now";
-  if(m < 60) return m + " min ago";
-  if(m < 48 * 60) return Math.round(m / 60) + " h ago";
-  return Math.round(m / 1440) + " d ago";
-}
-
-function renderSources(sources){
-  const body = $("sources-body");
-  const frag = document.createDocumentFragment();
-  for(const s of (sources || [])){
-    const h = s.history || {};
-    const t = s.last_synced_at ? Date.parse(s.last_synced_at) : NaN;
-    const stale = !!s.stale;  // the server decides (STALE_HOURS)
-    const row = document.createElement("div");
-    row.className = "row";
-    const dot = document.createElement("span");
-    dot.className = "sdot " + (stale ? "warn" : (isNaN(t) ? "idle" : "ok"));
-    const name = document.createElement("span");
-    name.className = "name";
-    name.appendChild(document.createTextNode(s.label));
-    const small = document.createElement("small");
-    let sub = "synced " + ago(s.last_synced_at);
-    if(!h.done) sub += " · " + (h.reached ? "backfill → " + trimDate(h.reached) : "indexing…");
-    if(s.shared && s.shared.stale) sub += " · " + s.shared.stale + " of " + s.shared.total + " shared drives stale";
-    small.textContent = sub;
-    name.appendChild(small);
-    const badge = document.createElement("span");
-    badge.className = "badge " + (h.done ? "done" : "going");
-    badge.textContent = h.done ? "complete" : "indexing";
-    row.appendChild(dot); row.appendChild(name); row.appendChild(badge);
-    frag.appendChild(row);
+  for (const kid of kids.flat()) {
+    if (kid == null || kid === false) continue;
+    n.append(kid instanceof Node ? kid : document.createTextNode(String(kid)));
   }
-  body.innerHTML = "";
-  body.appendChild(frag);
+  return n;
+}
+function fill(node, ...kids){ node.replaceChildren(...kids.flat().filter(k => k != null && k !== false)); }
+function setText(id, text){ const n = $(id); if (n) n.textContent = text; }
+function said(node, text, kind){
+  node.textContent = text || "";
+  node.classList.remove("said--ok", "said--bad");
+  if (kind) node.classList.add("said--" + kind);
+  node.hidden = !text;
+}
+function errText(e){ return e && e.offline ? "mcpbrain is not responding." : (e && e.message) || "Something went wrong."; }
+
+/* Run an action from a button: disable it while the request runs, report the
+   result (or the server's reason, such as a 409's) next to it, and never
+   assume success. Resolves true when the action went through. */
+async function act(btn, out, run){
+  btn.disabled = true; btn.setAttribute("aria-busy", "true");
+  try {
+    const msg = await run();
+    if (out && msg) said(out, msg, "ok");
+    return true;
+  } catch (e) {
+    if (out) said(out, errText(e), "bad");
+    btn.disabled = false;
+    return false;
+  } finally {
+    btn.removeAttribute("aria-busy");
+  }
+}
+function reenable(btn, ms){ setTimeout(() => { btn.disabled = false; }, ms); }
+
+function monthYear(v){
+  const d = C.parse(/^\d{4}-\d{2}$/.test(String(v)) ? v + "-01T00:00:00" : v);
+  return d ? d.toLocaleDateString("en-AU", {month: "short", year: "numeric"}) : String(v || "");
 }
 
-const STATE_UI = {
-  ok:          {cls: "ok",   text: "OK"},
-  needs_action:{cls: "warn", text: "SET UP"},
-  not_started: {cls: "idle", text: "OFF"},
+// ---- state ---------------------------------------------------------------
+
+let data = null;          // last /api/dashboard/stats
+let settings = null;      // last /api/settings (source switches)
+let lastChanges = "";     // the last rendered feed, to skip redraws that change nothing
+let lastNeeds = "";
+
+// ---- health chip and offline ---------------------------------------------
+
+const CHIP = {
+  healthy: ["chip--ok", "Healthy"], needs_you: ["chip--person", "Needs you"],
+  behind: ["chip--person", "Behind"], stalled: ["chip--bad", "Stalled"],
+  paused: ["chip--quiet", "Paused"], offline: ["chip--bad", "Offline"],
+};
+function renderChip(state, reasons){
+  const [cls, label] = CHIP[state] || ["chip--quiet", "Unknown"];
+  const chip = $("health-chip");
+  chip.className = "chip " + cls;
+  chip.textContent = label;
+  chip.title = (reasons || []).join(". ");
+}
+document.addEventListener("mcpconsole:offline", () => {
+  $("offline").hidden = false;
+  renderChip("offline", ["mcpbrain is not responding"]);
+});
+document.addEventListener("mcpconsole:online", () => { $("offline").hidden = true; });
+
+// ---- reading panel -------------------------------------------------------
+
+function renderReading(){
+  const idx = data.index, en = data.enrich;
+  const pct = Math.max(0, Math.min(100, idx.pct || 0));
+  setText("r-pct", pct + "%");
+  const meter = $("r-meter");
+  meter.firstElementChild.style.setProperty("--v", String(pct / 100));
+  meter.setAttribute("aria-label", fmt(idx.enriched_eligible) + " of " + fmt(idx.eligible) + " items worth enriching are in the graph");
+  setText("r-waiting", fmt(idx.waiting));
+  setText("r-units", fmt(en.units_pending));
+  setText("r-pushes", fmt(en.pushes_24h));
+  setText("r-last", en.last_push_at ? C.relTime(en.last_push_at) : "none yet");
+  setText("r-total", fmt(idx.total));
+  setText("r-eligible", fmt(idx.eligible));
+  setText("r-skipped", fmt(idx.cold) + " low-signal kept out" + (idx.duplicate ? ", " + plural(idx.duplicate, "duplicate") + " counted once" : ""));
+  $("reading").setAttribute("aria-busy", "false");
+}
+
+// ---- Needs you -----------------------------------------------------------
+
+const KIND_LABEL = {
+  profiles: "People profile", circles: "Circle name", reference: "Reference file",
+  voice: "Voice file", consolidation: "Memory consolidation", tidy: "Graph tidy-up",
+  draft_style: "Draft style",
 };
 
-function renderConnections(conns){
-  const body = $("connections-body");
-  if(!conns || !conns.length){
-    body.innerHTML = '<p class="empty">No connections reported.</p>';
+/* One row that needs a decision: title, a plain sub-line, its buttons, and a
+   status line where the result or the server's reason appears. */
+function decisionRow(title, sub, buttons, extra){
+  const out = el("p", {class: "said", role: "status", hidden: true});
+  const li = el("li", {});
+  li.append(el("div", {}, el("strong", {text: title}), sub ? el("p", {class: "muted small", text: sub}) : null));
+  if (extra) li.append(extra);
+  li.append(el("div", {class: "acts"}, buttons(out, li)), out);
+  return li;
+}
+function disableRow(li){ li.querySelectorAll(".acts button").forEach(b => { b.disabled = true; }); }
+
+/* One finding group: summary, how often and since when, the log, and
+   Dismiss (undoable from here) or Mark fixed. */
+function findingItem(f, primary){
+  const since = f.detected_at ? ", latest " + C.relTime(f.detected_at) : "";
+  const sub = (f.count > 1 ? "Reported " + plural(f.count, "time") : "Reported once") + since
+    + (f.severity && f.severity !== "info" ? ", " + f.severity : "");
+  const log = f.detail ? el("details", {class: "more"}, el("summary", {text: "Show the log"}),
+    el("pre", {class: "log", text: f.detail})) : null;
+  return decisionRow(f.summary || f.finding_type, sub, (out, li) => [
+    el("button", {class: "btn", type: "button", text: "Dismiss",
+      onclick: (ev) => dismissFinding(ev.currentTarget, out, li, f)}),
+    el("button", {class: primary ? "btn btn--primary" : "btn", type: "button", text: "Mark fixed",
+      onclick: (ev) => act(ev.currentTarget, out, async () => {
+        await api(`/api/findings/${f.id}/fixed`, {method: "POST"});
+        disableRow(li);
+        return "Marked fixed. It comes back if the problem does.";
+      })}),
+  ], log);
+}
+
+async function dismissFinding(btn, out, li, f){
+  const ok = await act(btn, out, async () => {
+    await api(`/api/findings/${f.id}/dismiss`, {method: "POST"});
+    return "Dismissed.";
+  });
+  if (!ok) return;
+  disableRow(li);
+  // The dismissal is recorded as an undoable change: find it to offer Undo here.
+  try {
+    const feed = await api("/api/changes?hours=1");
+    const row = (feed.items || []).find(c => c.change_type === "finding_dismissed"
+      && c.ref_id === String(f.id) && c.undoable);
+    if (row) out.after(el("div", {class: "acts"}, undoButton(row, out, () => loadNeeds(true))));
+  } catch (e) { /* Undo stays available under What changed */ }
+}
+
+function pendingItem(p, primary){
+  const kind = KIND_LABEL[p.kind] || p.kind;
+  const sub = kind + ", proposed " + C.relTime(p.created_at)
+    + (p.kind === "consolidation" ? ". Memory consolidation waits until you decide this one." : "");
+  return decisionRow(p.summary || kind, sub, (out, li) => ["apply", "decline"].map((verb, i) =>
+    el("button", {class: primary && i === 0 ? "btn btn--primary" : "btn", type: "button",
+      text: verb === "apply" ? "Apply" : "Decline",
+      onclick: (ev) => act(ev.currentTarget, out, async () => {
+        await api(`/api/pending/${p.id}/${verb}`, {method: "POST"});
+        disableRow(li);
+        return verb === "apply" ? "Applied. You can undo it under What changed." : "Declined.";
+      })})));
+}
+
+function renderCorrections(list, primary){
+  return list.map((c, i) => {
+    const names = Object.values(c.names || {}).join(", ");
+    const sub = "Graph correction" + (names ? " for " + names : "") + (c.reason ? ". " + c.reason : "");
+    return decisionRow(c.summary || c.op, sub, (out, li) => ["apply", "decline"].map((verb, j) =>
+      el("button", {class: primary && i === 0 && j === 0 ? "btn btn--primary" : "btn", type: "button",
+        text: verb === "apply" ? "Apply" : "Decline",
+        onclick: (ev) => act(ev.currentTarget, out, async () => {
+          await api(`/api/corrections/${c.id}/${verb}`, {method: "POST"});
+          disableRow(li);
+          return verb === "apply" ? "Applied." : "Declined.";
+        })})));
+  });
+}
+
+function connectionItem(c){
+  return el("li", {}, el("div", {},
+    el("strong", {text: (c.label || c.name) + " needs attention"}),
+    c.detail ? el("p", {class: "muted small", text: c.detail}) : null),
+    el("div", {class: "acts"}, el("a", {class: "btn", href: "/settings#connections", text: "Fix in Settings"})));
+}
+
+function healthItem(h){
+  // Stalled and behind carry their own reasons; Needs you lists its items.
+  if (!["stalled", "behind"].includes(h.state)) return null;
+  const tip = h.state === "behind"
+    ? "Enrichment runs as an hourly task in Claude Desktop. If it has stopped, open Claude Desktop and check the task is still scheduled."
+    : "Sync now may clear it. If it doesn't, run Diagnostics in Settings.";
+  return el("li", {}, el("div", {}, el("strong", {text: h.reasons.join(". ")}),
+    el("p", {class: "muted small", text: tip})),
+    el("div", {class: "acts"}, el("a", {class: "btn", href: "/settings#system", text: "Open Diagnostics"})));
+}
+
+async function loadNeeds(force){
+  const box = $("needs");
+  const results = await Promise.allSettled([api("/api/findings"), api("/api/pending"), api("/api/corrections/pending")]);
+  const [fr, pr, cr] = results;
+  const findings = fr.status === "fulfilled" ? fr.value.items || [] : [];
+  const pending = pr.status === "fulfilled" ? pr.value.items || [] : [];
+  const corrections = cr.status === "fulfilled" ? cr.value.pending || [] : null;
+  const failed = results.filter(r => r.status === "rejected");
+  // Offline: keep the last list (the banner says why) rather than blank it.
+  if (lastNeeds && failed.length && failed.every(r => r.reason && r.reason.offline)) return;
+  const key = JSON.stringify([findings, pending, corrections, failed.length,
+    data && data.needs_you, data && data.health]);
+  if (!force && key === lastNeeds) return;
+  // Leave the list alone while the owner is working in it.
+  if (!force && box.contains(document.activeElement)) return;
+  lastNeeds = key;
+
+  const items = [];
+  const h = data ? data.health : null;
+  const hi = h ? healthItem(h) : null;
+  if (hi) items.push(hi);
+  for (const c of (data ? data.needs_you.connections : [])) items.push(connectionItem(c));
+  // One filled button on the page: the first decision's main action.
+  let primary = true;
+  for (const p of pending) { items.push(pendingItem(p, primary)); primary = false; }
+  if (corrections && corrections.length) { items.push(...renderCorrections(corrections, primary)); primary = false; }
+  for (const f of findings) { items.push(findingItem(f, primary)); primary = false; }
+  const count = items.length;
+  if (failed.length) items.push(el("li", {}, el("p", {class: "said said--bad", role: "status",
+    text: "Could not load everything that might need you. " + errText(failed[0].reason)}),
+    el("div", {class: "acts"}, el("button", {class: "btn btn--sm", type: "button", text: "Try again",
+      onclick: () => loadNeeds(true)}))));
+
+  setText("needs-title", count === 0 ? (failed.length ? "Could not check what needs you" : "Nothing needs you")
+    : count === 1 ? "One thing needs you" : fmt(count) + " things need you");
+  box.classList.toggle("panel--person", count > 0);
+  if (!items.length) items.push(el("li", {}, el("p", {class: "muted small",
+    text: h && h.state === "paused" ? "mcpbrain is paused. Resume to sync and enrich again."
+      : "Sync, enrichment and the graph are running without you."})));
+  fill($("needs-list"), items);
+  setText("needs-corrections", corrections && corrections.length === 0 ? "No graph corrections are waiting." : "");
+  box.setAttribute("aria-busy", "false");
+}
+
+function renderStatusLine(){
+  const gmail = data.sources.find(s => s.name === "gmail");
+  setText("st-email", gmail && gmail.last_synced_at ? C.relTime(gmail.last_synced_at) : "not yet");
+  setText("st-enrich", data.enrich.last_push_at ? C.relTime(data.enrich.last_push_at) : "none yet");
+  const backup = (data.connections || []).find(c => c.name === "backup");
+  setText("st-backup", backup ? (backup.detail || String(backup.state).replace(/_/g, " ")) : "not set up");
+  const b = $("pause");
+  b.textContent = data.system.paused ? "Resume" : "Pause";
+}
+
+$("sync-all").addEventListener("click", (ev) => {
+  const btn = ev.currentTarget;
+  act(btn, $("st-said"), async () => {
+    await api("/api/sync-now", {method: "POST"});
+    reenable(btn, 5000);
+    return "Sync started. The times update when it finishes.";
+  });
+});
+$("pause").addEventListener("click", (ev) => {
+  const btn = ev.currentTarget;
+  const resume = !!(data && data.system.paused);
+  act(btn, $("st-said"), async () => {
+    await api(resume ? "/api/resume" : "/api/pause", {method: "POST"});
+    btn.disabled = false;
+    await refresh(true);
+    return resume ? "Resumed." : "Paused. Nothing syncs or enriches until you resume.";
+  });
+});
+$("backup-now").addEventListener("click", (ev) => {
+  const btn = ev.currentTarget;
+  act(btn, $("st-said"), async () => {
+    try {
+      await api("/api/backup/run", {method: "POST"});
+    } catch (e) {
+      if (e.status === 409) throw new Error("Backup isn't set up yet. Set it up in Settings.");
+      throw e;
+    }
+    reenable(btn, 5000);
+    return "Backup requested. It runs on the next pass, usually within a minute.";
+  });
+});
+
+// ---- What changed ----------------------------------------------------------
+
+const TYPE_LABEL = {
+  profile_updated: ["people profile rewritten", "people profiles rewritten"],
+  community_titled: ["circle named", "circles named"],
+  ingest_skip: ["item skipped", "items skipped"],
+  capture_ingest: ["note captured", "notes captured"],
+  capture_action: ["action captured", "actions captured"],
+  capture_action_update: ["action updated", "actions updated"],
+  finding_dismissed: ["finding dismissed", "findings dismissed"],
+  finding_fixed: ["finding marked fixed", "findings marked fixed"],
+  consolidation_pass: ["memory consolidation", "memory consolidations"],
+  gardener_write: ["reference file updated", "reference files updated"],
+  voice_apply: ["voice file update", "voice file updates"],
+  bandit_applied: ["draft style change", "draft style changes"],
+  tidy_suppress: ["entity hidden by tidy-up", "entities hidden by tidy-up"],
+  tidy_org: ["organisation set by tidy-up", "organisations set by tidy-up"],
+  tidy_org_rewrite: ["organisation rewritten by tidy-up", "organisations rewritten by tidy-up"],
+  tidy_owner: ["owner assigned by tidy-up", "owners assigned by tidy-up"],
+  tidy_merge: ["duplicate merged by tidy-up", "duplicates merged by tidy-up"],
+  entity_edited: ["entity edited", "entities edited"],
+  entity_merged: ["entity merged", "entities merged"],
+  entity_suppressed: ["entity hidden", "entities hidden"],
+};
+// Changes whose ref_id is an entity id: they open in the graph by it.
+const ENTITY_TYPES = new Set(["profile_updated", "tidy_suppress", "tidy_org", "tidy_org_rewrite",
+  "tidy_owner", "tidy_merge", "entity_edited", "entity_merged", "entity_suppressed"]);
+
+function circleTitle(c){
+  const m = /^Title set for community \d+: ([\s\S]*)$/.exec(c.summary || "");
+  return m ? m[1] : "";
+}
+// ingest_skip summaries read "<kind>: <detail>"; say it in words.
+const SKIP_WHY = {unsupported_mime: "a file type mcpbrain can't read",
+  extraction_empty: "no text could be read from it", gmail_excluded: "excluded by your keep-out rules"};
+function skipText(summary){
+  const m = /^([a-z_]+)(?::\s*([\s\S]*))?$/.exec(summary);
+  if (!m) return summary;
+  const why = SKIP_WHY[m[1]] || m[1].replace(/_/g, " ");
+  return m[2] ? "Skipped " + m[2] + ", " + why : "Skipped, " + why;
+}
+function rowText(c){
+  if (c.change_type === "community_titled") {
+    const t = circleTitle(c);
+    return t ? "Circle named " + t : c.summary;
+  }
+  if (c.change_type === "profile_updated") return "Profile rewritten";
+  if (c.change_type === "ingest_skip") return skipText(c.summary || "");
+  return c.summary || (TYPE_LABEL[c.change_type] || [c.change_type])[0];
+}
+
+/* Undo one change. The feed can mark a row undoable that the server then
+   refuses (a later change holds the value): the reason shows in place. */
+function undoButton(c, out, after){
+  return el("button", {class: "btn btn--sm", type: "button", text: "Undo",
+    onclick: async (ev) => {
+      const btn = ev.currentTarget;
+      const ok = await act(btn, out, async () => {
+        await api(`/api/changes/${c.id}/undo`, {method: "POST"});
+        return "Undone.";
+      });
+      if (ok) {
+        btn.hidden = true;
+        const li = btn.closest("li");
+        if (li) li.classList.add("is-undone");
+        if (after) after();
+      }
+    }});
+}
+
+function renameForm(c, nameNode, out){
+  const input = el("input", {class: "input", type: "text", value: circleTitle(c), maxlength: 200,
+    "aria-label": "New circle name"});
+  const form = el("form", {hidden: true}, input,
+    el("button", {class: "btn btn--sm", type: "submit", text: "Save"}),
+    el("button", {class: "btn btn--sm", type: "button", text: "Cancel", onclick: () => { form.hidden = true; }}));
+  form.addEventListener("submit", (ev) => {
+    ev.preventDefault();
+    const title = input.value.trim();
+    if (!title) { input.setAttribute("aria-invalid", "true"); said(out, "A circle needs a name.", "bad"); return; }
+    input.removeAttribute("aria-invalid");
+    act(form.querySelector("[type=submit]"), out, async () => {
+      await api(`/api/circles/${c.ref_id}/title`, {method: "POST", body: {title}});
+      nameNode.textContent = "Circle named " + title;
+      form.hidden = true;
+      return "Renamed.";
+    });
+  });
+  return form;
+}
+
+/* Actions for one change: open it, Undo, and the type's own actions. */
+function rowActions(c, nameNode, out){
+  const acts = [];
+  if (ENTITY_TYPES.has(c.change_type) && c.ref_id)
+    acts.push(el("a", {class: "linkbtn", href: "/graph?entity=" + encodeURIComponent(c.ref_id), text: "Open"}));
+  if (c.change_type === "profile_updated" && c.ref_id)
+    acts.push(el("a", {class: "linkbtn", href: "/graph?entity=" + encodeURIComponent(c.ref_id), text: "Merge with someone"}));
+  let form = null;
+  if (c.change_type === "community_titled" && c.ref_id && !c.undone) {
+    form = renameForm(c, nameNode, out);
+    acts.push(el("button", {class: "linkbtn", type: "button", text: "Rename",
+      onclick: () => { form.hidden = false; form.querySelector("input").focus(); }}));
+  }
+  if (c.undone) acts.push(el("span", {class: "said", text: "Undone"}));
+  else if (c.undoable) acts.push(undoButton(c, out));
+  return {acts, form};
+}
+
+function itemLi(c){
+  const name = el("span", {class: "name", text: rowText(c)});
+  const out = el("p", {class: "said", role: "status", hidden: true});
+  const {acts, form} = rowActions(c, name, out);
+  return el("li", {class: c.undone ? "is-undone" : null, "data-ref": c.ref_id, "data-type": c.change_type},
+    name, el("span", {class: "acts"}, acts), form, out);
+}
+
+/* The change summary carries only an entity id: look the names up when the
+   owner opens the list (at most 40 at a time). */
+async function entityName(id){
+  try {
+    const d = await api("/api/graph/entity/" + encodeURIComponent(id));
+    return (d && d.name) || "";
+  } catch (e) { return ""; }
+}
+async function nameEntities(list){
+  const lis = [...list.querySelectorAll("li[data-ref]")].filter(li =>
+    ENTITY_TYPES.has(li.dataset.type) && li.dataset.ref && !li.dataset.named).slice(0, 40);
+  await Promise.all(lis.map(async li => {
+    li.dataset.named = "1";
+    const n = await entityName(li.dataset.ref);
+    if (n) li.querySelector(".name").textContent = n;
+  }));
+}
+
+function groupLi(rows){
+  const c = rows[0];
+  const time = el("span", {class: "measured measured--cool", text: C.time(c.created_at)});
+  if (rows.length === 1) {
+    const name = el("span", {class: "what", text: rowText(c)});
+    const out = el("p", {class: "said", role: "status", hidden: true});
+    const {acts, form} = rowActions(c, name, out);
+    if (ENTITY_TYPES.has(c.change_type) && c.ref_id)
+      entityName(c.ref_id).then(n => { if (n) name.textContent = rowText(c) + ": " + n; });
+    return el("li", {class: c.undone ? "is-undone" : null}, time, name,
+      acts.length || form ? el("div", {class: "acts"}, acts, form) : null, out);
+  }
+  const [one, many] = TYPE_LABEL[c.change_type] || ["change", "changes"];
+  const undoable = rows.filter(r => r.undoable).length;
+  const list = el("ul", {class: "items"}, rows.map(itemLi));
+  const det = el("details", {class: "more"}, el("summary", {text: "Review " + fmt(rows.length)}), list);
+  det.addEventListener("toggle", () => { if (det.open) nameEntities(list); });
+  return el("li", {}, time,
+    el("span", {class: "what"}, fmt(rows.length) + " " + (rows.length === 1 ? one : many),
+      undoable ? el("span", {text: fmt(undoable) + " can be undone"}) : null),
+    el("div", {class: "acts"}, det));
+}
+
+function renderDay(id, rows, emptyText){
+  const groups = [];
+  const byKey = new Map();
+  for (const r of rows) {
+    let g = byKey.get(r.group);
+    if (!g) { g = []; byKey.set(r.group, g); groups.push(g); }
+    g.push(r);
+  }
+  fill($(id), groups.length ? groups.map(groupLi) : el("li", {class: "empty", text: emptyText}));
+}
+
+async function loadChanges(force){
+  const box = $("changes");
+  let feed;
+  try {
+    feed = await api("/api/changes?hours=48");
+  } catch (e) {
+    said($("changes-err"), "Could not load what changed. " + errText(e), "bad");
+    if (box.getAttribute("aria-busy") === "true") {
+      fill($("day-today"), el("li", {class: "empty", text: "Not loaded."}));
+      fill($("day-yesterday"), el("li", {class: "empty", text: "Not loaded."}));
+    }
+    box.setAttribute("aria-busy", "false");
     return;
   }
-  const frag = document.createDocumentFragment();
-  for(const c of conns){
-    const ui = STATE_UI[c.state] || STATE_UI.not_started;
-    const row = document.createElement("div");
-    row.className = "row";
-    const dot = document.createElement("span");
-    dot.className = "sdot " + ui.cls;
-    const name = document.createElement("span");
-    name.className = "name";
-    name.appendChild(document.createTextNode(c.label));
-    if(c.detail){
-      const small = document.createElement("small");
-      small.textContent = c.detail;
-      name.appendChild(small);
-    }
-    const state = document.createElement("span");
-    state.className = "state " + ui.cls;
-    state.textContent = ui.text;
-    row.appendChild(dot); row.appendChild(name); row.appendChild(state);
-    frag.appendChild(row);
+  said($("changes-err"), "");
+  const items = feed.items || [];
+  const key = JSON.stringify(items);
+  if (!force && key === lastChanges) return;
+  // Leave the trail alone while the owner has a list open or is renaming.
+  if (!force && box.querySelector(".oa-days details[open], .oa-days form:not([hidden])")) return;
+  lastChanges = key;
+  const now = new Date();
+  const today = C.dayKey(now.toISOString());
+  const yest = C.dayKey(new Date(now.getTime() - 86400000).toISOString());
+  renderDay("day-today", items.filter(c => C.dayKey(c.created_at) === today), "Nothing changed today.");
+  renderDay("day-yesterday", items.filter(c => C.dayKey(c.created_at) === yest), "Nothing changed yesterday.");
+  box.setAttribute("aria-busy", "false");
+}
+
+$("added-btn").addEventListener("click", async (ev) => {
+  const btn = ev.currentTarget, panel = $("added");
+  if (!panel.hidden) {
+    panel.hidden = true;
+    btn.textContent = "Show what enrichment added";
+    btn.setAttribute("aria-expanded", "false");
+    return;
   }
-  body.innerHTML = "";
-  body.appendChild(frag);
+  panel.hidden = false;
+  btn.textContent = "Hide what enrichment added";
+  btn.setAttribute("aria-expanded", "true");
+  said($("added-said"), "Loading.");
+  fill($("added-list"));
+  try {
+    const out = await api("/api/changes/added?hours=24");
+    const items = out.items || [];
+    said($("added-said"), items.length
+      ? plural(items.length, "entity", "entities") + " gained links or facts in the last 24 h."
+      : "Nothing new reached the graph in the last 24 h.");
+    fill($("added-list"), items.slice(0, 80).map(i => el("li", {},
+      el("a", {class: "link", href: "/graph?entity=" + encodeURIComponent(i.entity_id), text: i.name}))),
+      items.length > 80 ? el("li", {class: "muted", text: "and " + fmt(items.length - 80) + " more in the graph"}) : null);
+  } catch (e) {
+    said($("added-said"), "Could not load it. " + errText(e), "bad");
+  }
+});
+
+// ---- item lists: skipped, waiting, re-chunking gave up ---------------------
+
+const CHUNKS = {
+  cold: {path: "/api/chunks/cold", title: "Kept out of the graph",
+    intro: "Low-signal items mcpbrain indexed but did not enrich. They stay searchable. Include any that matter and they join the enrichment queue.",
+    act: "Include in the graph", post: "/api/chunks/reinclude",
+    done: (n) => plural(n, "item") + " included. They join the enrichment queue."},
+  waiting: {path: "/api/chunks/waiting", title: "Waiting for enrichment",
+    intro: "In the order the hourly enrichment task takes them.",
+    act: "Queue first", post: "/api/chunks/prioritise",
+    done: (n) => plural(n, "item") + " moved to the front of the queue."},
+  gaveup: {path: "/api/chunks/reflow-gave-up", title: "Re-chunking couldn't carry these",
+    intro: "Re-chunking gave up on these, so they fell back to fresh enrichment.",
+    act: "Retry re-chunking", post: "/api/chunks/reflow-retry",
+    done: () => "Queued for the next re-chunking pass. It isn't done yet."},
+};
+const PAGE_SIZE = 50;
+let chunkKind = null, chunkPage = 1;
+
+function selectedChunks(){
+  return [...$("chunks-body").querySelectorAll("input[type=checkbox]:checked")].map(b => b.value);
+}
+function syncChunkAct(){
+  const n = selectedChunks().length;
+  const b = $("chunks-act");
+  b.disabled = n === 0;
+  b.textContent = CHUNKS[chunkKind].act + (n ? " (" + fmt(n) + ")" : "");
 }
 
-const HEALTH_TEXT = {healthy: "Healthy", paused: "Paused", stalled: "Stalled",
-                     needs_you: "Needs you", behind: "Behind"};
-const HEALTH_COLOR = {healthy: "var(--ok)", paused: "var(--idle)", stalled: "var(--err)",
-                      needs_you: "var(--warn)", behind: "var(--warn)"};
+async function openChunks(kind, page){
+  chunkKind = kind; chunkPage = page || 1;
+  const cfg = CHUNKS[kind];
+  const box = $("chunks");
+  box.hidden = false;
+  setText("chunks-h", cfg.title);
+  setText("chunks-intro", cfg.intro);
+  said($("chunks-said"), "");
+  $("chunks-all").checked = false;
+  fill($("chunks-body"), el("tr", {}, el("td", {colspan: 5}, el("span", {class: "skel skel--line"}))));
+  syncChunkAct();
+  if (page == null) { box.scrollIntoView({block: "start"}); $("chunks-h").setAttribute("tabindex", "-1"); $("chunks-h").focus({preventScroll: true}); }
+  try {
+    const out = await api(`${cfg.path}?page=${chunkPage}&page_size=${PAGE_SIZE}`);
+    const items = out.items || [];
+    const pages = Math.max(1, Math.ceil((out.total || 0) / PAGE_SIZE));
+    setText("chunks-page", "Page " + fmt(chunkPage) + " of " + fmt(pages) + ", " + plural(out.total || 0, "item"));
+    $("chunks-prev").disabled = chunkPage <= 1;
+    $("chunks-next").disabled = chunkPage >= pages;
+    fill($("chunks-body"), items.length ? items.map(i => el("tr", {},
+      el("td", {}, el("input", {type: "checkbox", value: i.doc_id, "aria-label": "Select " + (i.title || i.doc_id), onchange: syncChunkAct})),
+      el("td", {}, el("strong", {text: i.title || i.doc_id})),
+      el("td", {text: i.source || ""}),
+      el("td", {class: "measured", text: String(i.date || "").slice(0, 10)}),
+      el("td", {text: i.reason || ""}))) : el("tr", {}, el("td", {colspan: 5, class: "muted", text: "Nothing here."})));
+  } catch (e) {
+    setText("chunks-page", "");
+    fill($("chunks-body"), el("tr", {}, el("td", {colspan: 5}, el("span", {class: "said said--bad", text: "Could not load the list. " + errText(e)}))));
+  }
+}
+document.querySelectorAll("[data-chunks]").forEach(b => b.addEventListener("click", () => openChunks(b.dataset.chunks)));
+$("chunks-close").addEventListener("click", () => { $("chunks").hidden = true; });
+$("chunks-prev").addEventListener("click", () => openChunks(chunkKind, chunkPage - 1));
+$("chunks-next").addEventListener("click", () => openChunks(chunkKind, chunkPage + 1));
+$("chunks-all").addEventListener("change", (ev) => {
+  $("chunks-body").querySelectorAll("input[type=checkbox]:not(:disabled)").forEach(b => { b.checked = ev.target.checked; });
+  syncChunkAct();
+});
+$("chunks-act").addEventListener("click", (ev) => {
+  const cfg = CHUNKS[chunkKind], ids = selectedChunks();
+  act(ev.currentTarget, $("chunks-said"), async () => {
+    const out = await api(cfg.post, {method: "POST", body: {doc_ids: ids}});
+    $("chunks-body").querySelectorAll("input[type=checkbox]:checked").forEach(b => { b.checked = false; b.disabled = true; });
+    $("chunks-all").checked = false;
+    const n = typeof out.changed === "number" ? out.changed : ids.length;
+    return cfg.done(n);
+  });
+});
 
-function renderDaemon(data){
-  const sys = data.system || {}, h = data.health || {}, enr = data.enrich || {};
-  paused = !!sys.paused;
-  $("d-version").textContent = sys.version ? "v" + sys.version : "—";
-  const st = $("d-state");
-  st.textContent = paused ? "paused" : "running";
-  st.style.color = paused ? "var(--idle)" : "var(--ok)";
-  const hv = $("d-health");
-  hv.textContent = HEALTH_TEXT[h.state] || "—";
-  hv.style.color = HEALTH_COLOR[h.state] || "";
-  hv.title = (h.reasons || []).join("; ");
-  $("d-push").textContent = enr.last_push_at
-    ? ago(enr.last_push_at) + (enr.pushes_24h ? " · " + fmt(enr.pushes_24h) + " in 24h" : "")
-    : "none yet";
-  $("d-findings").textContent = fmt((data.needs_you || {}).findings || 0);
-  document.body.classList.toggle("paused", paused);
-  $("live-text").textContent = paused ? "paused" : "live";
+// ---- knowledge graph -----------------------------------------------------
+
+function renderGraph(){
+  const g = data.graph, t = g.by_type;
+  for (const k of ["person", "org", "topic", "project", "meeting"]) setText("g-" + k, fmt(t[k] || 0));
+  setText("g-circles", fmt(g.circles || 0));
+  setText("g-links", fmt(g.relations_live));
+  setText("g-facts", fmt(g.observations_live));
+  setText("g-docs", fmt((t.document || 0) + (t.thread || 0)));
+  // Unlinked counts every kind, so say so: it is not a share of the rows above.
+  const all = Object.values(t).reduce((a, b) => a + b, 0);
+  setText("g-unlinked", fmt(g.unlinked) + " of all " + fmt(all) + " entities have no live links, counting every kind including documents and threads.");
+  $("graph").setAttribute("aria-busy", "false");
 }
 
-// Background reflow (extraction fidelity): halted, blocked (the last seed was
-// gated or failed -- never shown as idle/done while it is), progress, idle.
+// ---- sources and system --------------------------------------------------
+
+function sourceOn(name){
+  if (!settings) return true;
+  if (name === "anarlog") return !!(settings.anarlog && settings.anarlog.enabled);
+  return !settings.sources || settings.sources[name] !== false;
+}
+function historyText(s){
+  if (s.name === "anarlog") return "As they arrive";
+  const h = s.history || {};
+  if (h.done) return h.reached ? "Full, from " + monthYear(h.reached) : "Full history";
+  return h.reached ? "Backfilling, reached " + monthYear(h.reached) : "Backfilling";
+}
+function renderSources(){
+  fill($("src-body"), data.sources.map(s => {
+    const on = sourceOn(s.name);
+    const out = el("span", {class: "said", role: "status", hidden: true});
+    const last = s.last_synced_at ? C.relTime(s.last_synced_at) : "never";
+    const shared = s.shared && s.shared.total
+      ? el("span", {class: "muted small", text: " " + plural(s.shared.total, "shared drive")
+          + (s.shared.stale ? ", " + fmt(s.shared.stale) + " behind" : "")}) : null;
+    const btn = el("button", {class: "btn btn--sm", type: "button", text: "Sync", disabled: !on,
+      title: on ? null : "Switched off in Settings", "aria-label": "Sync " + s.label,
+      onclick: (ev) => {
+        const b = ev.currentTarget;
+        act(b, out, async () => {
+          try { await api("/api/sync-now", {method: "POST", body: {source: s.name}}); }
+          catch (e) { if (e.status === 409) throw new Error(s.label + " is switched off in Settings."); throw e; }
+          reenable(b, 5000);
+          return "Sync started.";
+        });
+      }});
+    return el("tr", {},
+      el("td", {}, el("strong", {text: s.label}), on ? null : el("span", {class: "muted small", text: " switched off"}), shared),
+      el("td", {text: historyText(s)}),
+      el("td", {class: s.stale ? "measured nowrap said--bad" : "measured nowrap measured--cool",
+        text: s.stale ? last + ", behind" : last}),
+      el("td", {}, btn, out));
+  }));
+  $("sources").setAttribute("aria-busy", "false");
+}
+
+// Background re-chunking: halted, blocked (the last seed was gated or failed,
+// never shown as idle while it is), progress, idle. Same rule as doctor.
 function reflowText(r){
-  if(!r) return "—";
-  if(r.halted) return "halted — see doctor";
+  if(!r) return "Not running";
+  if(r.halted) return "Halted, run Diagnostics in Settings";
   const last = (r.last_seed || {}).status;
   const pending = (r.queued || 0) + (r.remaining || 0);
   const done = r.owners_done || 0;
-  // Same rule as doctor's reflow_line: blocked only while work remains. A
-  // null remaining is UNKNOWN (a first-ever error tick, a failed count), so a
+  // A null remaining is unknown (a first error tick, a failed count), so a
   // gated seed with it is treated as having work left.
   const gated = ["no_recent_backup", "disabled", "error"].includes(last);
   if(gated && (pending || r.remaining == null))
-    return "blocked: " + last.replace(/_/g, " ");
-  // remaining includes owners the loop guard holds (ordinary path did not
-  // converge); say so rather than letting them read as ordinary progress.
-  const held = r.held ? " · " + fmt(r.held) + " held" : "";
+    return "Blocked: " + last.replace(/_/g, " ");
+  // remaining includes owners the loop guard holds back; say so.
+  const held = r.held ? ", " + fmt(r.held) + " held back" : "";
   if(pending)
     return fmt(done) + (r.total != null ? " of " + fmt(r.total) : "") + " done" + held;
-  return done ? "done (" + fmt(done) + ")" : "idle";
+  return done ? "Finished, " + fmt(done) + " done" : "Idle";
 }
 
-// The chunk side of a reflow (dry run #2 D4): carried vs the two kinds of
-// unenriched rows -- genuinely new text (the real extraction cost) and text
-// whose old chunks were never enriched either (cold by design, or pending).
+// The chunk side of a reflow: carried, against the two kinds of unenriched rows.
 function reflowChunksText(r){
   if(!r) return "";
-  return fmt(r.chunks_carried || 0) + " chunks carried · "
-    + fmt(r.chunks_uncovered || 0) + " new text to enrich · "
+  return fmt(r.chunks_carried || 0) + " chunks carried, "
+    + fmt(r.chunks_uncovered || 0) + " new text to enrich, "
     + fmt(r.chunks_inherited_unenriched || 0) + " inherited unenriched";
 }
 
-function render(data){
-  // Re-chunking now arrives under system.reflow (null once it has finished).
-  data = Object.assign({}, data, {reflow: (data.system || {}).reflow || null});
-  const idx = data.index || {}, g = data.graph || {}, bt = g.by_type || {},
-        enr = data.enrich || {};
-
-  setNum("s-indexed", idx.total || 0, firstLoad);
-  setNum("s-enriched", idx.enriched_eligible || 0, firstLoad);
-  $("s-cold-line").innerHTML = "chunks captured"
-    + (idx.cold ? ' · <span class="skipped" title="Low-value items (promotions, tables, '
-      + 'short docs) — indexed and searchable, but skipped from graph enrichment">'
-      + '<b>' + fmt(idx.cold) + '</b> low-signal, skipped</span>' : "");
-  const pct = idx.pct || 0;
-  const ml = $("meter-label");
-  ml.textContent = pct + "% digested into the graph";
-  ml.title = "Share of eligible chunks extracted into the graph — "
-    + "low-signal items are excluded from the denominator.";
-  $("meter-sub").textContent = fmt(idx.waiting || 0) + " waiting, "
-    + fmt(enr.units_pending || 0) + " queued for Claude";
-  requestAnimationFrame(() => { $("meter-fill").style.width = pct + "%"; });
-
-  const entities = ["person", "org", "project", "topic", "meeting", "event"]
-    .reduce((n, k) => n + (bt[k] || 0), 0);
-  setNum("s-entities", entities, firstLoad);
-  setNum("s-relations", g.relations_live || 0, firstLoad);
-  setNum("s-observations", g.observations_live || 0, firstLoad);
-  setNum("s-communities", g.circles || 0, firstLoad);
-  setNum("s-unlinked", g.unlinked || 0, firstLoad);
-
-  renderSources(data.sources);
-  renderConnections(data.connections);
-  renderDaemon(data);
-  $("d-reflow").textContent = reflowText(data.reflow);
-  $("d-reflow").title = reflowChunksText(data.reflow);
-
-  const live = $("live-text");
-  if(!paused && data.as_of) live.textContent = "live · " + asofLabel(data.as_of);
-  firstLoad = false;
-}
-
-// ---- refresh loop ----
-
-let fetching = false;
-
-async function refresh(){
-  if(fetching) return;
-  fetching = true;
-  const btn = $("refresh-btn"), sp = $("spinner");
-  btn.disabled = true; sp.classList.add("active");
-  try{
-    const res = await fetch("/api/dashboard/stats", H);
-    if(!res.ok) throw new Error("HTTP " + res.status);
-    render(await res.json());
-  }catch(e){
-    $("live-text").textContent = "offline";
-    showToast("Couldn't load stats. Retrying in 60s.");
-  }finally{
-    fetching = false; btn.disabled = false; sp.classList.remove("active");
+function renderSystem(){
+  const system = data.system;
+  setText("sys-version", system.version || "unknown");
+  setText("sys-watchdog", fmt(system.watchdog_exits));
+  // Re-chunking shows only while it runs, is blocked or has halted.
+  const row = $("sys-reflow-row");
+  row.hidden = !system.reflow;
+  if (system.reflow) {
+    const r = $("sys-reflow");
+    r.textContent = reflowText(system.reflow);
+    r.title = reflowChunksText(system.reflow);
+    const gave = (system.reflow.by_outcome || {}).gave_up || 0;
+    const b = $("sys-gaveup");
+    b.hidden = !gave;
+    b.textContent = "Show the " + fmt(gave) + " it gave up on";
   }
 }
+$("sys-gaveup").addEventListener("click", () => openChunks("gaveup"));
 
-// ---- pending graph corrections (Apply/Decline) ----
+// ---- refresh -------------------------------------------------------------
 
-async function loadCorrections(){
+async function loadStats(){
   try {
-    const res = await fetch("/api/corrections/pending", H);
-    if (!res.ok) return;
-    const {pending} = await res.json();
-    const card = $("corrections-card"), body = $("corrections-body");
-    card.hidden = pending.length === 0;
-    body.replaceChildren(...pending.map(c => {
-      const row = document.createElement("div");
-      row.className = "kv";
-      const label = document.createElement("span");
-      label.className = "k";
-      const names = Object.entries(c.names || {}).map(([id, n]) => `${n} (${id})`).join(", ");
-      label.textContent = c.summary + (names ? "; " + names : "") +
-                          (c.reason ? " (" + c.reason + ")" : "");
-      const actions = document.createElement("span");
-      actions.className = "v";
-      for (const [verb, text] of [["apply", "Apply"], ["decline", "Decline"]]) {
-        const b = document.createElement("button");
-        b.textContent = text;
-        b.onclick = async () => {
-          const r = await fetch(`/api/corrections/${c.id}/${verb}`,
-                                {method: "POST", headers: H.headers, body: "{}"});
-          const out = await r.json().catch(() => ({}));
-          showToast(r.ok ? `${text}: ${c.summary}` : (out.error || "Failed"));
-          loadCorrections();
-        };
-        actions.appendChild(b);
-      }
-      row.append(label, actions);
-      return row;
-    }));
-  } catch (e) { /* the rest of the dashboard must keep working */ }
+    data = await api("/api/dashboard/stats");
+  } catch (e) {
+    if (!data) {
+      for (const id of ["reading", "graph", "sources"]) $(id).setAttribute("aria-busy", "false");
+      said($("reading-err"), "Could not load the figures. " + errText(e), "bad");
+      said($("graph-err"), "Not loaded.", "bad");
+    }
+    if (!e.offline) renderChip(null, [errText(e)]);
+    return false;
+  }
+  said($("reading-err"), "");
+  said($("graph-err"), "");
+  renderChip(data.health.state, data.health.reasons);
+  setText("asof", C.time(data.as_of));
+  renderReading();
+  renderStatusLine();
+  renderGraph();
+  renderSources();
+  renderSystem();
+  return true;
 }
 
-refresh();
-loadCorrections();
-setInterval(refresh, 60000);
-setInterval(loadCorrections, 60000);
+async function refresh(force){
+  if (!C.tz) {
+    try { const cfg = await api("/api/config"); if (cfg && cfg.timezone) C.tz = cfg.timezone; }
+    catch (e) { /* the Mac's own zone until the config loads */ }
+  }
+  try { settings = await api("/api/settings"); } catch (e) { /* keep the last switches */ }
+  await loadStats();
+  await Promise.all([loadNeeds(force), loadChanges(force)]);
+}
 
-// ---- constellation motif in the graph panel (teaser for the interactive view) ----
-const cv = $("constellation");
-const ctx = cv.getContext("2d");
-let nodes = [], raf = null;
-function seed(){
-  const r = cv.getBoundingClientRect(), dpr = window.devicePixelRatio || 1;
-  cv.width = r.width * dpr; cv.height = r.height * dpr;
-  ctx.setTransform(1, 0, 0, 1, 0, 0); ctx.scale(dpr, dpr);
-  nodes = Array.from({length: 16}, () => ({
-    x: Math.random() * r.width, y: Math.random() * r.height,
-    vx: (Math.random() - .5) * 0.18, vy: (Math.random() - .5) * 0.18
-  }));
-}
-function draw(){
-  const r = cv.getBoundingClientRect();
-  ctx.clearRect(0, 0, r.width, r.height);
-  for(const n of nodes){
-    if(!reduce){ n.x += n.vx; n.y += n.vy;
-      if(n.x < 0 || n.x > r.width) n.vx *= -1;
-      if(n.y < 0 || n.y > r.height) n.vy *= -1; }
-  }
-  for(let i = 0; i < nodes.length; i++) for(let j = i + 1; j < nodes.length; j++){
-    const a = nodes[i], b = nodes[j], d = Math.hypot(a.x - b.x, a.y - b.y);
-    if(d < 120){ ctx.strokeStyle = "rgba(106,76,255," + (0.15 * (1 - d / 120)) + ")";
-      ctx.lineWidth = 1; ctx.beginPath(); ctx.moveTo(a.x, a.y); ctx.lineTo(b.x, b.y); ctx.stroke(); }
-  }
-  for(const n of nodes){ ctx.fillStyle = "rgba(106,76,255,.5)";
-    ctx.beginPath(); ctx.arc(n.x, n.y, 2.2, 0, 7); ctx.fill(); }
-  if(!reduce) raf = requestAnimationFrame(draw);
-}
-seed(); draw();
-window.addEventListener("resize", () => { if(raf) cancelAnimationFrame(raf); seed(); draw(); });
+$("refresh").addEventListener("click", (ev) => {
+  const b = ev.currentTarget;
+  b.disabled = true;
+  refresh(true).finally(() => { b.disabled = false; });
+});
+$("offline-retry").addEventListener("click", () => refresh(true));
+refresh(true);
+setInterval(() => refresh(false), 60000);
 </script>
 </body>
 </html>

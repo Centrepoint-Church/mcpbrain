@@ -59,6 +59,15 @@ def test_dashboard_html_present():
     assert html.is_file(), f"dashboard HTML missing at {html}"
 
 
+def test_console_assets_present():
+    # The shared console stylesheet, script and vendored fonts are served by
+    # /static/; a wheel without them renders every console page unstyled.
+    wiz = _pkg_dir() / "wizard"
+    for rel in ("console.css", "console.js", "fonts/OFL.txt",
+                "fonts/HostGrotesk-400.woff2", "fonts/AtkinsonHyperlegibleMono-400.woff2"):
+        assert (wiz / rel).is_file(), f"console asset missing at {wiz / rel}"
+
+
 def test_records_claude_template_present():
     # The records-repo CLAUDE.md template is copied into a freshly-scaffolded
     # records repo. packages.find skips .md, so without the package-data
