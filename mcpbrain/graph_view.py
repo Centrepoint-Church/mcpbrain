@@ -219,6 +219,7 @@ def _kinds_sql(types, params: dict) -> str:
 
 UNLINKED_PAGE_MIN = 10
 UNLINKED_PAGE_MAX = 200
+UNLINKED_PAGE_LAST = 1_000_000
 
 
 def list_unlinked(store, *, page: int = 1, page_size: int = 50,

@@ -349,3 +349,47 @@ def test_merge_and_hide_refresh_the_list_page():
 def test_dashboard_review_link_opens_the_list():
     dash = (_WIZ / "dashboard.html").read_text(encoding="utf-8")
     assert '<a class="link" href="/graph?show=unlinked">Review unlinked entities</a>' in dash
+
+
+# --- Follow-up Task 2, review minors ----------------------------------------------
+
+@pytest.mark.skipif(shutil.which("node") is None, reason="node not installed")
+def test_the_list_drops_the_last_24_hours(tmp_path):
+    js = _url_state_js() + r"""
+console.log(JSON.stringify({
+  list: readUrlState("?show=unlinked&since=24h"),
+  map: readUrlState("?show=unlinked&as=map&since=24h"),
+  plain: readUrlState("?since=24h")
+}));
+"""
+    p = tmp_path / "s.js"; p.write_text(js)
+    r = subprocess.run(["node", str(p)], capture_output=True, text=True)
+    assert r.returncode == 0, r.stderr
+    o = json.loads(r.stdout)
+    assert o["list"]["sinceHours"] == 0
+    assert o["map"]["sinceHours"] == 24 and o["plain"]["sinceHours"] == 24
+
+
+@pytest.mark.skipif(shutil.which("node") is None, reason="node not installed")
+def test_focus_lands_on_the_next_row_after_a_hide_or_merge(tmp_path):
+    js = _block("unlinked-words") + r"""
+console.log(JSON.stringify([focusIndexAfter(2, 10), focusIndexAfter(9, 9), focusIndexAfter(0, 0),
+                            focusIndexAfter(-1, 5)]));
+"""
+    p = tmp_path / "f.js"; p.write_text(js)
+    r = subprocess.run(["node", str(p)], capture_output=True, text=True)
+    assert r.returncode == 0, r.stderr
+    # The row that took its place, the new last row when it was last, none when empty.
+    assert json.loads(r.stdout) == [2, 8, -1, 0]
+
+
+def test_hide_and_merge_hand_focus_back_to_the_list():
+    rows = _block("unlinked-rows")
+    assert "focusAfter = " in rows
+    merge = re.search(r"function doMerge\(.*?\n\}", GRAPH, re.S).group(0)
+    assert "focusAfter = " in merge
+    load_list = re.search(r"async function loadList\(mine\)\{.*?\n\}", GRAPH, re.S).group(0)
+    assert "focusListRow(" in load_list
+    assert 'id="ul-said" role="status" tabindex="-1"' in GRAPH
+    fn = re.search(r"function focusListRow\(.*?\n\}", GRAPH, re.S).group(0)
+    assert '$("ul-said").focus()' in fn and ".focus()" in fn

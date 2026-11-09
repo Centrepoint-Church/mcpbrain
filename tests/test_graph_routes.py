@@ -814,3 +814,26 @@ def test_graph_page_serves_the_list_and_map_views(tmp_path):
                 assert r.status == 200
     finally:
         srv.stop()
+
+
+def test_unlinked_route_refuses_a_page_too_far_in_words(tmp_path):
+    s = _unlinked_store(tmp_path)
+    srv = ControlServer(_Daemon(), str(tmp_path), store=s); srv.start()
+    try:
+        base = f"http://127.0.0.1:{srv.port}/api/graph/unlinked"
+        for q in ("?page=99999999999999999999", "?page=1000001"):
+            try:
+                _get(base + q, srv.token)
+                assert False, f"expected 400 for {q}"
+            except urllib.error.HTTPError as e:
+                assert e.code == 400, q
+                body = json.loads(e.read())
+                assert body["worded"] is True and body["reason"].endswith("."), q
+        # The last page allowed still answers, empty.
+        code, body = _get(base + "?page=1000000", srv.token)
+        assert code == 200 and body["items"] == [] and body["total"] == 15
+        # A huge page size clamps rather than overflowing.
+        code, body = _get(base + "?page_size=99999999999999999999", srv.token)
+        assert code == 200 and body["page_size"] == 200
+    finally:
+        srv.stop()

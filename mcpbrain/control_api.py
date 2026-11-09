@@ -341,7 +341,9 @@ class ControlServer:
                         page = int(q.get("page", ["1"])[0])
                     except (TypeError, ValueError):
                         page = 0
-                    if page < 1:
+                    # A page beyond a million is never a real list; past it
+                    # the OFFSET would overflow SQLite's integer.
+                    if page < 1 or page > graph_view.UNLINKED_PAGE_LAST:
                         return h_json(self, 400, worded(
                             "That page isn't in the list. Pages are numbered from 1."))
                     try:

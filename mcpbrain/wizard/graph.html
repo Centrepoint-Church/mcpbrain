@@ -125,7 +125,7 @@
           <button class="btn btn--sm" type="button" id="ul-map">Show on the map</button>
         </div>
       </div>
-      <p class="said" id="ul-said" role="status" hidden></p>
+      <p class="said" id="ul-said" role="status" tabindex="-1" hidden></p>
       <div class="scroll-x">
         <table class="table table--action ulist__table" aria-labelledby="ul-h">
           <thead><tr><th scope="col">Name</th><th scope="col">Kind</th><th scope="col">Organisation</th><th scope="col">Last seen</th><th scope="col"><span class="visually-hidden">Actions</span></th></tr></thead>
@@ -192,7 +192,7 @@ function readUrlState(search){
   const p = new URLSearchParams(search || "");
   const since = /^(\d{1,3})h$/.exec(p.get("since") || "");
   const page = /^\d{1,6}$/.test(p.get("page") || "") ? Number(p.get("page")) : 1;
-  return {
+  const s = {
     types: p.getAll("type").filter(Boolean),
     entity: p.get("entity") || "",
     rel: p.get("rel") || "",
@@ -204,6 +204,9 @@ function readUrlState(search){
     sinceHours: since ? Math.min(720, Number(since[1])) : 0,
     circle: /^\d+$/.test(p.get("circle") || "") ? p.get("circle") : ""
   };
+  // The list has no "last 24 hours": drop it rather than leave it ticked and ignored.
+  if (listView(s)) s.sinceHours = 0;
+  return s;
 }
 function writeUrlState(s){
   const p = new URLSearchParams();
@@ -1144,7 +1147,7 @@ function doMerge(btn, out, loserId, winnerId, name){
     const r = await api("/api/graph/merge", {method: "POST", body: { loser_id: loserId, winner_id: winnerId, name }});
     closeDrawer(true);
     const msg = "Merged. Kept " + (r.winner_name || "the more linked one") + ".";
-    if (listView(url)) said($("ul-said"), msg, "ok");
+    if (listView(url)){ said($("ul-said"), msg, "ok"); focusAfter = Math.max(0, rowIndexOf(loserId, winnerId)); }
     else setSearchStatus(msg);
     load();
     return "";
@@ -1181,6 +1184,15 @@ async function loadHidden(){
 // ---- the unlinked list: a page at a time, worked through row by row ----
 const LIST_SIZE = 50;
 let LIST = null;   // the page on screen: {items, total, page, page_size}
+let focusAfter = null;   // the row a hide or merge took away, for focus once the list reloads
+function rowIndexOf(...ids){ return LIST ? LIST.items.findIndex(r => ids.includes(r.id)) : -1; }
+// Keyboard focus goes to the row that moved up, never back to the page.
+function focusListRow(i){
+  const at = focusIndexAfter(i, $("ul-body").rows.length);
+  const btn = at >= 0 ? $("ul-body").rows[at].querySelector("button") : null;
+  if (btn) btn.focus();
+  else $("ul-said").focus();
+}
 /* unlinked-words:start */
 function pageCount(total, size){ return Math.max(1, Math.ceil(total / size)); }
 function pagerWords(page, total, size){
@@ -1195,6 +1207,12 @@ function emptyWords(q, kindsLimited){
   if (q) return "No unlinked entity has \u201c" + q + "\u201d in its name.";
   if (kindsLimited) return "No unlinked entities among the kinds switched on under Kinds.";
   return "No unlinked entities. Everything has at least one link.";
+}
+// After a hide or a merge takes row i away: the row that took its place, the
+// new last row when it was last, or -1 when the page is empty.
+function focusIndexAfter(i, rows){
+  if (rows <= 0) return -1;
+  return Math.max(0, Math.min(i, rows - 1));
 }
 /* unlinked-words:end */
 
@@ -1237,6 +1255,7 @@ function hideFromList(btn, r, name){
   act(btn, $("ul-said"), async () => {
     const out = await api("/api/graph/entity/" + encodeURIComponent(r.id), {method: "DELETE"});
     if (dwId === r.id) closeDrawer(true);
+    focusAfter = Math.max(0, rowIndexOf(r.id));
     offerUndo($("ul-said"), name + " is hidden from the graph.", out.change_id,
       async () => { await load(); loadHidden(); });
     await load(); loadHidden();
@@ -1271,6 +1290,7 @@ async function loadList(mine){
   $("ul-next").disabled = data.page >= pageCount(data.total, data.page_size);
   showCount();
   renderViewNote({list: true, total: data.total});
+  if (focusAfter !== null){ const i = focusAfter; focusAfter = null; focusListRow(i); }
   if (url.entity && dwId !== url.entity) await openEntity(url.entity, {fromUrl: true});
 }
 async function turnPage(step){
