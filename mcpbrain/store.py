@@ -2567,12 +2567,15 @@ class Store:
         could double-count or silently drop a re-processed envelope.
         """
         with self._connect(write=True) as db:
-            cur = db.execute("SELECT rowid, content_hash FROM chunks WHERE doc_id=?", (doc_id,))
+            cur = db.execute(
+                f"SELECT rowid, content_hash, {_meta_extract('$.force_enrich')} AS fe "
+                "FROM chunks WHERE doc_id=?", (doc_id,))
             row = cur.fetchone()
             if row and row["content_hash"] == content_hash:
                 return False  # idempotent: unchanged
             self._uncover_changed_chunk(db, doc_id)
             if row:
+                metadata = self._keep_force_enrich(metadata, row["fe"])
                 db.execute(
                     "UPDATE chunks SET text=?,content_hash=?,metadata=?,embedded=0,"
                     "enriched=0,dup_of=NULL,"
@@ -2590,6 +2593,16 @@ class Store:
                 )
             self._carry_duplicate(db, doc_id, text, content_hash, metadata)
             return True
+
+    @staticmethod
+    def _keep_force_enrich(metadata, old_flag):
+        """The owner's re-include (reinclude_chunks) is a standing choice about
+        this chunk, not about one version of its text: a rewrite with fresh
+        metadata from the source keeps `force_enrich`. `old_flag` is the
+        stored row's json_extract of it (1 for true)."""
+        if old_flag in (1, True) and not (metadata or {}).get("force_enrich"):
+            return {**(metadata or {}), "force_enrich": True}
+        return metadata
 
     # A chunk shorter than this is never carried as a duplicate: short lines
     # (sign-offs, boilerplate, "Thanks!") repeat across unrelated sources.
@@ -3968,10 +3981,16 @@ class Store:
         index_pending embeds it locally (a cache import whose passage is over
         the window: the peer's vector may be of its truncated head)."""
         embedded = 0 if vector is None else 1
-        row = db.execute("SELECT rowid, content_hash FROM chunks WHERE doc_id=?",
-                         (doc_id,)).fetchone()
+        row = db.execute(
+            f"SELECT rowid, content_hash, {_meta_extract('$.force_enrich')} AS fe "
+            "FROM chunks WHERE doc_id=?", (doc_id,)).fetchone()
         if uncover and (row is None or row["content_hash"] != content_hash):
             Store._uncover_changed_chunk(db, doc_id)
+        if row and uncover:
+            # Same identity (a cache import of this chunk): keep a re-include.
+            # apply_reflow (uncover=False) reuses positional ids for DIFFERENT
+            # text, so it carries the flag along its remap itself.
+            metadata = Store._keep_force_enrich(metadata, row["fe"])
         if row:
             rowid = row["rowid"]
             db.execute(
@@ -4721,10 +4740,23 @@ class Store:
                         f"WHERE doc_id IN ({','.join('?' * len(batch))}) "
                         "AND dup_of IS NOT NULL", batch):
                     old_dups.setdefault(r["content_hash"], r["dup_of"])
+            # The owner's re-include follows the text: a new chunk the plan
+            # remaps an old re-included chunk onto keeps force_enrich.
+            forced_new: set = set()
+            for i in range(0, len(old_ids), 500):
+                batch = old_ids[i:i + 500]
+                for r in db.execute(
+                        "SELECT doc_id FROM chunks "
+                        f"WHERE doc_id IN ({','.join('?' * len(batch))}) "
+                        f"AND {_meta_extract('$.force_enrich')} = 1", batch):
+                    if r["doc_id"] in plan.remap:
+                        forced_new.add(plan.remap[r["doc_id"]])
             for row, vec in zip(rows, vectors):
                 c = row.chunk
+                meta = (self._keep_force_enrich(c.metadata, 1)
+                        if c.doc_id in forced_new else c.metadata)
                 self._write_cached_chunk_row(
-                    db, c.doc_id, c.text, c.content_hash, c.metadata, vec,
+                    db, c.doc_id, c.text, c.content_hash, meta, vec,
                     enriched=bool(row.enriched), enriched_version=row.enriched_version,
                     home=home)
                 # Covered rows carry the majority state of the old text they
@@ -5021,7 +5053,8 @@ class Store:
     _REFLOW_SOURCE_TYPE = {"reflow:drive": "gdrive", "reflow:gmail": "gmail",
                            "reflow:anarlog": "anarlog", "reflow:calendar": "calendar"}
 
-    def retry_reflow_gave_up(self, *, sources=None, apply: bool = True) -> dict:
+    def retry_reflow_gave_up(self, *, sources=None, apply: bool = True,
+                             doc_ids=None) -> dict:
         """Undo the `reflow_skipped="gave_up"` stamp: remove reflow_skipped,
         split_version and extraction_version from every such chunk (so the
         level-triggered selector matches its owner again) and drop the owners'
@@ -5029,22 +5062,45 @@ class Store:
         (source_gone / unsupported / source_disabled) are never touched. A
         genuinely broken owner simply gives up again after five real attempts.
         Returns {"owners", "chunks"} (what it would change when not `apply`).
-        Attended only (bin/reflow_drain.py --retry-gave-up)."""
+        Attended (bin/reflow_drain.py --retry-gave-up), or scoped by `doc_ids`
+        from the console's gave-up list: only the owners those chunks belong to
+        are retried (every gave-up chunk of each such owner, so the owner is
+        whole again for the selector)."""
         from mcpbrain.embed import contextual_prefix
         types = ({self._REFLOW_SOURCE_TYPE[s] for s in sources if s in self._REFLOW_SOURCE_TYPE}
                  if sources else None)
         skipped = _meta_extract("$.reflow_skipped")
         owners: set[tuple[str, str]] = set()
         updates: list[tuple] = []
+
+        def _owner_of(doc_id, meta):
+            field, kind = self._REFLOW_OWNER_FIELD.get(meta.get("source_type"),
+                                                       (None, meta.get("source_type")))
+            owner = meta.get(field) if field else None
+            return kind, owner or doc_id
+
         with self._connect(write=apply) as db:
+            wanted = None
+            if doc_ids is not None:
+                ids = [d for d in dict.fromkeys(doc_ids) if d]
+                wanted = set()
+                for i in range(0, len(ids), 500):
+                    part = ids[i:i + 500]
+                    for r in db.execute(
+                            f"SELECT doc_id, metadata FROM chunks WHERE {skipped}='gave_up' "
+                            f"AND doc_id IN ({','.join('?' * len(part))})", part):
+                        wanted.add(_owner_of(r["doc_id"], json.loads(r["metadata"])))
+                if not wanted:
+                    return {"owners": 0, "chunks": 0}
             for r in db.execute(f"SELECT doc_id, metadata FROM chunks WHERE {skipped}='gave_up'"):
                 meta = json.loads(r["metadata"])
                 stype = meta.get("source_type")
                 if types is not None and stype not in types:
                     continue
-                field, kind = self._REFLOW_OWNER_FIELD.get(stype, (None, stype))
-                owner = meta.get(field) if field else None
-                owners.add((kind, owner or r["doc_id"]))
+                key = _owner_of(r["doc_id"], meta)
+                if wanted is not None and key not in wanted:
+                    continue
+                owners.add(key)
                 before = contextual_prefix(meta)
                 for k in ("reflow_skipped", "split_version", "extraction_version"):
                     meta.pop(k, None)
@@ -5358,7 +5414,8 @@ class Store:
             return db.execute("SELECT count(*) FROM sync_queue WHERE source=?",
                               (source,)).fetchone()[0]
 
-    def due_sync_items(self, *, limit: int, now: str, sources=None) -> list[dict]:
+    def due_sync_items(self, *, limit: int, now: str, sources=None,
+                       exclude=None) -> list[dict]:
         """Queue rows ready to work, newest-first. A PURE READ -- no lease.
 
         The daemon is the only worker and holds the single-writer lock, and a
@@ -5371,15 +5428,22 @@ class Store:
 
         `sources` (prefixes, e.g. ("drive",)) narrows the selection to those
         sources and their `<prefix>:<id>` sub-sources -- a per-source sync.
+        `exclude` (prefixes, same matching) leaves those rows out entirely --
+        a switched-off source, whose rows must neither be worked nor take a
+        slot of `limit` from the sources still on.
         """
         where = "(next_attempt_at IS NULL OR next_attempt_at <= ?)"
         args: list = [now]
-        if sources:
-            prefs = [str(p) for p in sources]
-            where += " AND (" + " OR ".join(
-                "source = ? OR substr(source, 1, ?) = ?" for _ in prefs) + ")"
+
+        def _match(prefs):
+            nonlocal args
             for p in prefs:
                 args += [p, len(p) + 1, p + ":"]
+            return " OR ".join("source = ? OR substr(source, 1, ?) = ?" for _ in prefs)
+        if sources:
+            where += " AND (" + _match([str(p) for p in sources]) + ")"
+        if exclude:
+            where += " AND NOT (" + _match([str(p) for p in exclude]) + ")"
         with self._connect() as db:
             return [dict(r) for r in db.execute(
                 "SELECT source, ref_id, version, event, modified_at, discovered_at, "
@@ -6674,8 +6738,11 @@ class Store:
         cleared, enriched/enriched_version/enrich_attempts reset to 0, and
         `metadata.force_enrich = true` is stamped so prepare's salience and
         derived gates (should_enrich / _is_derived) do not cold-mark the chunk
-        again on the next pass. Returns the number of chunks changed (unknown
-        ids are ignored). One transaction."""
+        again on the next pass. The flag is kept when the chunk is rewritten
+        later -- a source refetch through upsert_chunk, a cache import, or a
+        reflow re-chunk (carried along the plan's remap) -- so the re-include
+        sticks. Returns the number of chunks changed (unknown ids are ignored).
+        One transaction."""
         ids = [d for d in dict.fromkeys(doc_ids or []) if d]
         if not ids:
             return 0
@@ -6701,8 +6768,11 @@ class Store:
         return changed
 
     def prioritise_chunks(self, doc_ids) -> int:
-        """Move chunks to the front of the enrichment queue (priority=1;
-        unenriched_chunks orders priority DESC). Returns rows changed."""
+        """Move waiting chunks to the front of the enrichment queue
+        (priority=1; unenriched_chunks orders priority DESC). Only chunks still
+        waiting (enriched=0) are touched, so the count is what actually moved:
+        an already-enriched chunk is not re-queued by this (a reflow that gave
+        up is retried with retry_reflow_gave_up instead)."""
         ids = [d for d in dict.fromkeys(doc_ids or []) if d]
         if not ids:
             return 0
@@ -6711,8 +6781,8 @@ class Store:
             for i in range(0, len(ids), 500):
                 part = ids[i:i + 500]
                 ph = ",".join("?" * len(part))
-                changed += db.execute(f"UPDATE chunks SET priority=1 WHERE doc_id IN ({ph})",
-                                      part).rowcount
+                changed += db.execute(f"UPDATE chunks SET priority=1 WHERE enriched=0 "
+                                      f"AND doc_id IN ({ph})", part).rowcount
         return changed
 
     # The console's chunk lists (source_controls): which chunks each names.

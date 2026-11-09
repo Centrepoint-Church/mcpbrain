@@ -26,12 +26,13 @@ def _utc_now_iso() -> str:
 
 
 def work_queue(store, *, handlers: dict, limit: int, budget=None,
-               now: str | None = None, sources=None) -> dict:
+               now: str | None = None, sources=None, exclude=None) -> dict:
     """Work up to `limit` queued items, newest-first. Returns counts.
 
     `sources`, when given, limits the rows selected to those source prefixes
     (`"drive"` covers `"drive"` and every `"drive:<id>"`); other rows are not
-    read, so they keep their place and their attempts.
+    read, so they keep their place and their attempts. `exclude` (prefixes)
+    leaves those sources' rows out the same way.
 
     A handler that returns is a success (its row is deleted); one that raises
     is a failure (attempts+1, backoff, row retained); one that returns DEFER
@@ -41,7 +42,11 @@ def work_queue(store, *, handlers: dict, limit: int, budget=None,
     processed = failed = 0
     # `sources` only when narrowing: store wrappers that override
     # due_sync_items (bin/reflow_drain.py's _DrainStore) take limit/now only.
-    narrow = {"sources": sources} if sources else {}
+    narrow = {}
+    if sources:
+        narrow["sources"] = sources
+    if exclude:
+        narrow["exclude"] = exclude
     for item in store.due_sync_items(limit=limit, now=now, **narrow):
         if budget is not None and budget.expired():
             break               # free: every unreached row is still queued

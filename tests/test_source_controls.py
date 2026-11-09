@@ -4,8 +4,6 @@ import base64
 import json
 import urllib.error
 import urllib.request
-from datetime import datetime, timezone
-
 import pytest
 
 from mcpbrain import config
@@ -75,10 +73,8 @@ def test_disabled_gmail_skips_discovery_and_defers_queued_rows(tmp_path, monkeyp
     assert out["worked"] == {"processed": 0, "failed": 0}
     row = _queue_row(s, "gmail", "m1")
     assert row is not None, "a disabled source's row is kept, not dropped"
-    assert row["attempts"] == 0 and not row["last_error"], "deferred, not failed"
-    # Delayed, so it does not hold the head of the queue every cycle.
-    assert row["next_attempt_at"] and row["next_attempt_at"] > datetime.now(
-        timezone.utc).replace(tzinfo=None).isoformat()
+    assert row["attempts"] == 0 and not row["last_error"], "left alone, not failed"
+    assert row["next_attempt_at"] is None, "not even read: no defer stamp"
 
 
 def test_disabled_anarlog_defers_queued_rows(tmp_path):
@@ -501,3 +497,139 @@ def test_enrich_backfill_routes_are_gone(srv):
     server, _, _ = srv
     assert _call(server, "/api/enrich-backfill/start", {})[0] == 404
     assert _call(server, "/api/enrich-backfill/cancel", {})[0] == 404
+
+
+# --- fix round 1 -------------------------------------------------------------
+
+def test_disabled_rows_do_not_use_up_the_work_limit(tmp_path, monkeypatch):
+    """More than `limit` newer disabled rows must not starve an enabled one."""
+    from mcpbrain import sync as sync_mod
+    _cfg(tmp_path, {"sources": {"gmail": False}, "sync_work_limit": 5})
+    s = _store(tmp_path)
+    for i in range(12):
+        _queue(s, "gmail", f"m{i}", modified_at=f"2026-09-10T00:00:{i:02d}")
+    _queue(s, "drive", "f1", modified_at="2026-09-01T00:00:00")
+    monkeypatch.setattr(sync_mod, "discover_drive", lambda *a, **k: 0)
+    worked = []
+    monkeypatch.setattr(sync_mod, "handle_drive_item",
+                        lambda svc, store, it, **k: worked.append(it["ref_id"]))
+    from mcpbrain import config as cfg_mod
+    monkeypatch.setattr(cfg_mod, "sync_work_limit", lambda home: 5)
+    out = sync_mod.run_sync_cycle(s, embedder=None, drive_service=object(),
+                                  home=str(tmp_path))
+    assert worked == ["f1"]
+    assert out["worked"] == {"processed": 1, "failed": 0}
+    for i in range(12):
+        row = _queue_row(s, "gmail", f"m{i}")
+        assert row["attempts"] == 0 and row["next_attempt_at"] is None
+
+
+def test_prioritise_counts_only_unenriched_chunks(tmp_path):
+    s = _store(tmp_path)
+    _chunk(s, "e1", thread="t1")
+    _chunk(s, "u1", thread="t2")
+    s.mark_enriched(["e1"])
+    assert s.prioritise_chunks(["e1"]) == 0
+    assert s.prioritise_chunks(["e1", "u1"]) == 1
+
+
+def _gave_up(store, doc_id, mid):
+    _chunk(store, doc_id, thread="t-" + mid, reflow_skipped="gave_up",
+           split_version=1, extraction_version=1)
+    meta = store.get_chunk(doc_id)["metadata"]
+    meta["message_id"] = mid
+    with store._connect(write=True) as db:
+        db.execute("UPDATE chunks SET metadata=? WHERE doc_id=?",
+                   (json.dumps(meta), doc_id))
+    store.record_reflow_outcome(mid, "gmail", "gave_up")
+    store.mark_enriched([doc_id])
+
+
+def test_retry_reflow_gave_up_scoped_to_chosen_owners(tmp_path):
+    s = _store(tmp_path)
+    _gave_up(s, "a0", "ma")
+    _gave_up(s, "a1", "ma")          # second chunk of the same owner
+    _gave_up(s, "b0", "mb")
+    out = s.retry_reflow_gave_up(doc_ids=["a0"])
+    assert out == {"owners": 1, "chunks": 2}
+    assert "reflow_skipped" not in s.get_chunk("a1")["metadata"]
+    assert s.get_chunk("b0")["metadata"]["reflow_skipped"] == "gave_up"
+    with s._connect() as db:
+        left = {r["owner"] for r in db.execute(
+            "SELECT owner FROM reflow_owners WHERE outcome='gave_up'")}
+    assert left == {"mb"}
+
+
+def test_reflow_retry_route(srv):
+    server, _, s = srv
+    _gave_up(s, "a0", "ma")
+    _gave_up(s, "b0", "mb")
+    code, body = _call(server, "/api/chunks/reflow-retry", {"doc_ids": ["b0"]})
+    assert code == 200 and body == {"ok": True, "owners": 1, "chunks": 1}
+    assert s.get_chunk("a0")["metadata"]["reflow_skipped"] == "gave_up"
+    assert _call(server, "/api/chunks/reflow-retry", {"doc_ids": []})[0] == 400
+
+
+def test_reinclude_survives_reupsert_with_fresh_metadata(tmp_path, monkeypatch):
+    from mcpbrain import prepare
+    monkeypatch.setenv("MCPBRAIN_HOME", str(tmp_path))
+    _cfg(tmp_path, {"salience_gate": True})
+    s = _store(tmp_path)
+    _chunk(s, "promo-1", thread="t-promo", labels="INBOX,CATEGORY_PROMOTIONS")
+    s.set_enrich_state(["promo-1"], "cold")
+    s.reinclude_chunks(["promo-1"])
+    # The source changed: fresh text and metadata without the flag.
+    assert s.upsert_chunk(
+        "promo-1", "Updated: can you confirm the booking for Sunday afternoon?",
+        "h-promo-1-v2", {"source_type": "gmail", "thread_id": "t-promo",
+                         "message_id": "promo-1", "subject": "Hall B",
+                         "sender": "Sam Chen <sam@example.org>",
+                         "labels": "INBOX,CATEGORY_PROMOTIONS",
+                         "content_type": "email_body"})
+    assert s.get_chunk("promo-1")["metadata"]["force_enrich"] is True
+    prepare.prepare_units(s, thread_cap=10, char_budget=100000,
+                          resolution_due=False, home=str(tmp_path))
+    assert "promo-1" in {c["doc_id"] for c in s.unenriched_chunks()}
+
+
+def test_cache_import_carries_force_enrich(tmp_path):
+    s = _store(tmp_path)
+    _chunk(s, "c1", thread="t1")
+    s.reinclude_chunks(["c1"])
+    s.import_cached_chunk("c1", "new text from a peer", "h-new",
+                          {"source_type": "gmail", "thread_id": "t1"}, [0.1] * 4)
+    assert s.get_chunk("c1")["metadata"]["force_enrich"] is True
+
+
+def test_reflow_rechunk_carries_force_enrich_along_the_remap(tmp_path):
+    from mcpbrain.reflow import plan
+    from mcpbrain.sync.normalise import Chunk
+    s = _store(tmp_path)
+    for i in range(2):
+        s.upsert_chunk(f"gdrive-F-{i}", f"text F {i}", f"F{i}",
+                       {"source_type": "gdrive", "file_id": "F", "chunk_index": i,
+                        "chunk_total": 2, "mime_type": "application/pdf"})
+    s.reinclude_chunks(["gdrive-F-1"])
+    old = s.owner_chunks(["gdrive-F-"])
+    new = [Chunk("gdrive-F-0", "text F 0\ntext F 1", "n",
+                 {"source_type": "gdrive", "file_id": "F", "chunk_index": 0},
+                 ["text F 0", "text F 1"])]
+    s.apply_reflow("F", "drive", plan(old, new), [[0.1] * 4])
+    assert s.get_chunk("gdrive-F-1") is None
+    assert s.get_chunk("gdrive-F-0")["metadata"]["force_enrich"] is True
+
+
+def test_reflow_does_not_spread_force_enrich_to_other_text(tmp_path):
+    from mcpbrain.reflow import plan
+    from mcpbrain.sync.normalise import Chunk
+    s = _store(tmp_path)
+    for i in range(2):
+        s.upsert_chunk(f"gdrive-G-{i}", f"text G {i}", f"G{i}",
+                       {"source_type": "gdrive", "file_id": "G", "chunk_index": i,
+                        "chunk_total": 2, "mime_type": "application/pdf"})
+    old = s.owner_chunks(["gdrive-G-"])
+    new = [Chunk(f"gdrive-G-{i}", f"text G {i}", f"G{i}",
+                 {"source_type": "gdrive", "file_id": "G", "chunk_index": i}, [f"text G {i}"])
+           for i in range(2)]
+    s.apply_reflow("G", "drive", plan(old, new), [[0.1] * 4] * 2)
+    assert "force_enrich" not in s.get_chunk("gdrive-G-0")["metadata"]

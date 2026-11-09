@@ -666,7 +666,8 @@ class ControlServer:
                 out = gc.decline(self.store, cid)
                 return h_json(h, 200 if out["status"] == "declined" else 404, out)
 
-            if h.path in ("/api/chunks/reinclude", "/api/chunks/prioritise"):
+            if h.path in ("/api/chunks/reinclude", "/api/chunks/prioritise",
+                          "/api/chunks/reflow-retry"):
                 if self.store is None:
                     return h_json(h, 503, {"error": "dashboard not available"})
                 ids = body.get("doc_ids")
@@ -675,6 +676,11 @@ class ControlServer:
                     return h_json(h, 400, {"error": "doc_ids must be a non-empty list of strings"})
                 if len(ids) > 1000:
                     return h_json(h, 400, {"error": "at most 1000 doc_ids per request"})
+                if h.path == "/api/chunks/reflow-retry":
+                    # The gave-up list's action: un-stamp the chosen owners so
+                    # the reflow selector re-queues them on its next seed.
+                    out = self.store.retry_reflow_gave_up(doc_ids=ids)
+                    return h_json(h, 200, {"ok": True, **out})
                 if h.path == "/api/chunks/reinclude":
                     changed = self.store.reinclude_chunks(ids)
                 else:

@@ -19,24 +19,6 @@ from mcpbrain.sync.gmail import discover_gmail, generated_label_ids, handle_gmai
 
 log = logging.getLogger(__name__)
 
-# How long a switched-off source's queued row waits before it is looked at
-# again (deferred again if the source is still off). Short, because switching
-# the source back on should resume its backlog within minutes; the same delay
-# reflow uses for a missing service (reflow_handler.DEFER_DELAY_S).
-_DISABLED_DEFER_S = 600
-
-
-def _defer_disabled(store):
-    from mcpbrain.sync.queue import DEFER
-
-    def handler(item):
-        until = (datetime.now(timezone.utc).replace(tzinfo=None)
-                 + timedelta(seconds=_DISABLED_DEFER_S)).isoformat()
-        store.defer_sync_item(item["source"], item["ref_id"], until)
-        return DEFER
-    return handler
-
-
 def _gmail_exclusions(store, gmail_service, home):
     """This cycle's GmailExclusions from config, label names resolved to ids.
     Best-effort on the label lookup: a failure still applies every rule typed
@@ -171,9 +153,10 @@ def run_sync_cycle(store, embedder, *, gmail_service=None,
 
     Source controls (console Settings, spec 9): a source switched off in
     config (`config.source_enabled`) has its service treated as absent for
-    the whole cycle, and its already-queued rows are DEFERRED with a delay,
-    never failed -- failing them would spend their attempts and back them off,
-    so switching the source back on would find them stale. `only` (one of
+    the whole cycle, and its already-queued rows are not selected at all
+    (work_queue `exclude`): never failed -- that would spend their attempts
+    and back them off -- and never taking a slot of the work limit from the
+    sources still on. They are worked once the source is switched back on. `only` (one of
     gmail/drive/calendar/anarlog, from a per-source "Sync now") runs that one
     source this cycle: every other source is skipped and the work queue
     selects only that source's rows (not reflow rows), so every other row is
@@ -532,15 +515,13 @@ def run_sync_cycle(store, embedder, *, gmail_service=None,
         handlers["reflow"] = _reflow.handle
     else:
         handlers["reflow"] = lambda it: DEFER
-    # A switched-off source keeps its queued rows: defer them with a delay
-    # (attempts untouched) so they neither fail nor sit at the head of the
-    # queue every cycle. They are worked when the source is switched back on.
-    for name in disabled:
-        handlers[name] = _defer_disabled(store)
+    # A switched-off source keeps its queued rows untouched: they are left out
+    # of the selection, so they neither fail nor use up the work limit.
     result["worked"] = work_queue(
         store, handlers=handlers,
         limit=config.sync_work_limit(home) if home else 50,
-        budget=budget, sources=(only,) if only is not None else None)
+        budget=budget, sources=(only,) if only is not None else None,
+        exclude=tuple(sorted(disabled)) or None)
     # Flush each source's accumulated skip tally now that work_queue has
     # drained everything it will this cycle -- a source with nothing skipped
     # never populated its dict (`setdefault` above only creates an entry once
