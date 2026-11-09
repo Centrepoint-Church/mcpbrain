@@ -1,3 +1,4 @@
+import contextvars
 import hashlib
 import json
 import re
@@ -130,14 +131,28 @@ def _field_is_locked(db, entity_id: str, field: str) -> bool:
                       (entity_id, field)).fetchone() is not None
 
 
+# The pending_changes row an approval is applying right now (auto_changes.
+# decide sets it around APPLY[kind]). While set, every change recorded here
+# also marks that row applied with its change id, in the same transaction as
+# the change itself: once the change lands, a later failure can never put the
+# row back in the queue to be applied twice.
+SETTLING_PENDING: contextvars.ContextVar = contextvars.ContextVar(
+    "mcpbrain_settling_pending", default=None)
+
+
 def _log_change_tx(db, change_type: str, *, ref_id: str = "", summary: str = "",
                    detail: str = "", revert_ref: str = "", source: str = "") -> int:
     """Insert one change_log row on the caller's open connection, so a writer
     can record a change in the same transaction as the write itself."""
-    return db.execute(
+    cid = db.execute(
         "INSERT INTO change_log(change_type, ref_id, summary, detail, revert_ref, source) "
         "VALUES(?,?,?,?,?,?)",
         (change_type, ref_id, summary, detail, revert_ref, source)).lastrowid
+    pending = SETTLING_PENDING.get()
+    if pending is not None:
+        db.execute("UPDATE pending_changes SET status='applied', change_log_id=? "
+                   "WHERE id=? AND status IN ('deciding', 'applied')", (cid, pending))
+    return cid
 
 
 def _chunk_enrich_snapshot(row, meta: dict) -> dict:

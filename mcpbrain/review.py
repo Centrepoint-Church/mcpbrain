@@ -16,6 +16,32 @@ TIDY_BLOCK_KEYS = {
 }
 TIDY_FINDING_TYPES = tuple(TIDY_BLOCK_KEYS)
 
+# The verdict a tidy lint finding is closed with while graph tidy-up is off.
+# A verdict keeps record_finding from reopening it; release_tidy_off clears it
+# when tidy-up is switched back on, so the lint pass can record it again.
+TIDY_OFF_VERDICT = "tidy_off"
+
+
+def close_for_tidy_off(store) -> int:
+    """Graph tidy-up is off: close every open tidy lint finding (nobody will
+    act on them). Returns how many were closed."""
+    from datetime import datetime, timezone
+    now = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+    marks = ",".join("?" * len(TIDY_FINDING_TYPES))
+    with store._connect(write=True) as db:
+        return db.execute(
+            f"UPDATE proactive_findings SET resolved_at=?, verdict=? "
+            f"WHERE resolved_at IS NULL AND finding_type IN ({marks})",
+            (now, TIDY_OFF_VERDICT, *TIDY_FINDING_TYPES)).rowcount
+
+
+def release_tidy_off(store) -> int:
+    """Graph tidy-up is on again: drop the tidy_off verdicts so the next lint
+    pass reopens whatever is still wrong. Returns how many were released."""
+    with store._connect(write=True) as db:
+        return db.execute("UPDATE proactive_findings SET verdict=NULL WHERE verdict=?",
+                          (TIDY_OFF_VERDICT,)).rowcount
+
 
 def _entity_sub(store, eid):
     with store._connect() as db:

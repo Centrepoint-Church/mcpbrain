@@ -186,7 +186,7 @@
 "use strict";
 const C = window.mcpConsole;
 // Shared page helpers live in console.js, defined once for every page.
-const {api, el, fill, said, errText, act, reenable, fmt, plural, monthYear, renderChip} = C;
+const {api, el, fill, said, errText, worded, act, reenable, fmt, plural, monthYear, renderChip} = C;
 
 // ---- small helpers -------------------------------------------------------
 
@@ -236,11 +236,16 @@ function renderReading(){
 
 // ---- Needs you -----------------------------------------------------------
 
+/* word-maps:start */
+// Server codes in words; a code the page doesn't know yet gets a worded default.
+function cap(s){ s = String(s || ""); return s.charAt(0).toUpperCase() + s.slice(1); }
 const KIND_LABEL = {
   profiles: "People profile", circles: "Circle name", reference: "Reference file",
   voice: "Voice file", consolidation: "Memory consolidation", tidy: "Graph tidy-up",
   draft_style: "Draft style",
 };
+function kindLabel(k){ return worded(KIND_LABEL, k, "an automatic change"); }
+/* word-maps:end */
 
 /* One row that needs a decision: title, a plain sub-line, its buttons, and a
    status line where the result or the server's reason appears. */
@@ -291,7 +296,7 @@ async function dismissFinding(btn, out, li, f){
 }
 
 function pendingItem(p, primary){
-  const kind = KIND_LABEL[p.kind] || "Automatic change";
+  const kind = cap(kindLabel(p.kind));
   const sub = kind + ", proposed " + C.relTime(p.created_at)
     + (p.kind === "consolidation" ? ". Memory consolidation waits until you decide this one." : "");
   return decisionRow(p.summary || kind, sub, (out, li) => ["apply", "decline"].map((verb, i) =>
@@ -437,6 +442,7 @@ $("backup-now").addEventListener("click", (ev) => {
 
 // ---- What changed ----------------------------------------------------------
 
+/* word-maps:start */
 const TYPE_LABEL = {
   profile_updated: ["people profile rewritten", "people profiles rewritten"],
   community_titled: ["circle named", "circles named"],
@@ -463,6 +469,8 @@ const TYPE_LABEL = {
   chunks_reincluded: ["inclusion in the graph", "inclusions in the graph"],
   chunks_prioritised: ["queue reorder", "queue reorders"],
 };
+function typeLabel(t){ return worded(TYPE_LABEL, t, ["an automatic change", "automatic changes"]); }
+/* word-maps:end */
 // Changes whose ref_id is an entity id: they open in the graph by it.
 // (tidy_owner's ref_id is an action id and tidy_org_rewrite's an org name.)
 const ENTITY_TYPES = new Set(["profile_updated", "tidy_suppress", "tidy_org",
@@ -473,6 +481,7 @@ function circleTitle(c){
   const m = /^Title set for community \d+: ([\s\S]*)$/.exec(c.summary || "");
   return m ? m[1] : "";
 }
+/* word-maps:start */
 // ingest_skip summaries read "<kind>: <detail>"; say it in words.
 const SKIP_WHY = {unsupported_mime: "a file type mcpbrain can't read",
   drive_unsupported_mime: "file types mcpbrain can't read", drive_extraction_empty: "no text could be read",
@@ -482,12 +491,17 @@ const SKIP_WHY = {unsupported_mime: "a file type mcpbrain can't read",
   extraction_empty: "no text could be read from it", gmail_excluded: "excluded by your keep-out rules"};
 // The feed folds skips of one kind in one hour into a row with a count.
 function skipText(summary, count){
-  const m = /^([a-z_]+)(?::\s*([\s\S]*))?$/.exec(summary);
-  if (!m) return count > 1 ? "Skipped " + plural(count, "item") : summary;
-  const why = SKIP_WHY[m[1]] || "it couldn't be indexed";
+  const m = /^([a-z_]+)(?::\s*([\s\S]*))?$/.exec(summary || "");
+  const why = m ? worded(SKIP_WHY, m[1], "") : "";
+  if (!why) {
+    // A kind the page doesn't know yet, or no kind: say so in words.
+    const what = count > 1 ? plural(count, "item") : (m && m[2]) ? m[2] : "An item";
+    return what + " skipped for another reason";
+  }
   if (count > 1) return "Skipped " + plural(count, "item") + ", " + why;
   return m[2] ? "Skipped " + m[2] + ", " + why : "Skipped, " + why;
 }
+/* word-maps:end */
 function rowText(c){
   if (c.change_type === "community_titled") {
     const t = circleTitle(c);
@@ -495,7 +509,7 @@ function rowText(c){
   }
   if (c.change_type === "profile_updated") return "Profile rewritten";
   if (c.change_type === "ingest_skip") return skipText(c.summary || "", c.count || 1);
-  return c.summary || (TYPE_LABEL[c.change_type] || [c.change_type])[0];
+  return c.summary || cap(typeLabel(c.change_type)[0]);
 }
 
 /* Undo one change. The feed can mark a row undoable that the server then
@@ -607,7 +621,7 @@ function groupLi(rows){
     return el("li", {class: c.undone ? "is-undone" : null}, time, name,
       acts.length || form ? el("div", {class: "acts"}, acts, form) : null, out);
   }
-  const [one, many] = TYPE_LABEL[c.change_type] || ["change", "changes"];
+  const [one, many] = typeLabel(c.change_type);
   const undoable = rows.filter(r => r.undoable).length;
   const list = el("ul", {class: "items"}, rows.map(itemLi));
   const det = el("details", {class: "more"}, el("summary", {text: "Review " + fmt(rows.length)}), list);
@@ -704,12 +718,22 @@ const CHUNKS = {
     done: () => "Queued for the next re-chunking pass. It isn't done yet."},
 };
 const PAGE_SIZE = 50;
-// The list endpoints give short reason codes; most are already words.
+/* word-maps:start */
+// The list endpoints give short reason codes (source_controls); each in words.
 const REASON = {bulk: "bulk mail", other: "kept out by an earlier rule", queued: "in the queue",
   prioritised: "queued first", "re-included": "included by you", "reflow gave up": "re-chunking gave up",
   promotions: "Gmail promotions", social: "Gmail social", forums: "Gmail forums",
-  table: "a table", transcript: "a transcript", summary: "a summary", draft: "a draft"};
-function reasonText(r){ return REASON[r] || r || ""; }
+  table: "a table", transcript: "a transcript", summary: "a summary", draft: "a draft",
+  "superseded draft": "a draft replaced by a later version", "consolidated note": "a consolidated note",
+  "session note": "a session note", "own automated document": "a document your own automation made",
+  "Drive folder": "in a Drive folder you keep out", "own automated mail": "mail your own automation sent",
+  spreadsheet: "a spreadsheet", "short document": "a short document"};
+function reasonText(r){ return r ? worded(REASON, r, "skipped for another reason") : ""; }
+// The Source column: where an item came from.
+const SOURCE_WORDS = {gmail: "Gmail", drive: "Drive", calendar: "Calendar", anarlog: "Meetings",
+  note: "Note", other: "another source"};
+function sourceText(s){ return worded(SOURCE_WORDS, s, "another source"); }
+/* word-maps:end */
 let chunkKind = null, chunkPage = 1;
 // The cold list offers Include only on items that can be added and are not
 // in the graph yet; the others say why in the reason column.
@@ -754,7 +778,7 @@ async function openChunks(kind, page){
         ? el("input", {type: "checkbox", value: i.doc_id, "aria-label": "Select " + (i.title || i.doc_id), onchange: syncChunkAct})
         : null),
       el("td", {}, el("strong", {text: i.title || i.doc_id})),
-      el("td", {text: i.source || ""}),
+      el("td", {text: cap(sourceText(i.source))}),
       el("td", {class: "measured", text: String(i.date || "").slice(0, 10)}),
       el("td", {}, reasonText(i.reason),
         offered(kind, i) ? null : el("span", {class: "muted small", text: ", " + notOffered(i)})))) : el("tr", {}, el("td", {colspan: 5, class: "muted", text: "Nothing here."})));

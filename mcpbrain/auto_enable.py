@@ -143,7 +143,12 @@ def auto_enable_pass(store, home: str) -> dict:
             log.debug("auto_enable: %s not ready (%s)", flag, reason)
             continue
         try:
-            config.write_config(home, {flag: True})
+            # Re-check under the config lock: a setting saved since the read
+            # above is the user's choice and is never overridden.
+            with config.config_lock(home):
+                if flag in config.read_config(home):
+                    continue
+                config.write_config(home, {flag: True})
         except Exception as exc:  # noqa: BLE001
             log.warning("auto_enable: failed to persist %s: %s", flag, exc)
             continue

@@ -154,25 +154,73 @@ def _decide_claimed(store, home: str, row: dict, approve: bool) -> dict:
         _close_finding(store, row["id"], "declined")
         _on_decline(store, row["kind"], payload)
         return {"ok": True, "reason": ""}
+    # While APPLY runs, every change it records also marks this row applied in
+    # the change's own transaction (store.SETTLING_PENDING), so a failure after
+    # the change lands never returns the row to the queue.
+    from mcpbrain.store import SETTLING_PENDING
+    token = SETTLING_PENDING.set(row["id"])
     try:
         change_id = APPLY[row["kind"]](store, home, payload)
     except NotApplied as exc:
         reason = str(exc) or "Nothing to change"
+        if _landed(store, row["id"]):
+            return _finish_applied(store, row["id"], None, f"Applied in part: {reason}")
         _release(store, row["id"], reason)
         return {"ok": False, "reason": reason}
     except Exception as exc:  # noqa: BLE001 -- surface it, keep the review
         log.exception("auto_changes: applying pending change %s failed", row["id"])
+        if _landed(store, row["id"]):
+            return _finish_applied(store, row["id"], None, f"Applied, then failed: {exc}")
         _release(store, row["id"], f"Apply failed: {exc}")
         return {"ok": False, "reason": f"Apply failed: {exc}"}
-    _settle(store, row["id"], _APPLIED, change_id or None)
-    _close_finding(store, row["id"], "applied")
+    finally:
+        SETTLING_PENDING.reset(token)
+    return _finish_applied(store, row["id"], change_id, "")
+
+
+def _landed(store, pid: int) -> bool:
+    """Did a change APPLY recorded already mark this row applied?"""
+    try:
+        with store._connect() as db:
+            r = db.execute("SELECT status FROM pending_changes WHERE id=?", (pid,)).fetchone()
+        return r is not None and r["status"] == _APPLIED
+    except Exception:  # noqa: BLE001
+        return False
+
+
+def _finish_applied(store, pid: int, change_id, error: str) -> dict:
+    """The change is made: settle the row applied and close its finding. If
+    that bookkeeping fails, the row is still settled applied with the error
+    noted; it is never returned to pending, so it can't be applied twice."""
+    try:
+        _settle(store, pid, _APPLIED, change_id or None, error)
+    except Exception as exc:  # noqa: BLE001
+        log.exception("auto_changes: recording applied change %s failed", pid)
+        _mark_applied(store, pid, f"Applied, but recording it failed: {exc}")
+    try:
+        _close_finding(store, pid, "applied")
+    except Exception:  # noqa: BLE001 -- the change stands; the finding can be closed by hand
+        log.exception("auto_changes: closing the finding for change %s failed", pid)
     return {"ok": True, "reason": ""}
 
 
-def _settle(store, pid: int, status: str, change_id) -> None:
+def _settle(store, pid: int, status: str, change_id, error: str = "") -> None:
     with store._connect(write=True) as db:
-        db.execute("UPDATE pending_changes SET status=?, decided_at=?, change_log_id=?, "
-                   "error='' WHERE id=?", (status, _now(), change_id, pid))
+        db.execute("UPDATE pending_changes SET status=?, decided_at=?, "
+                   "change_log_id=COALESCE(?, change_log_id), error=? WHERE id=?",
+                   (status, _now(), change_id, error[:500], pid))
+
+
+def _mark_applied(store, pid: int, error: str) -> None:
+    """Last resort after a failed _settle: status and error only. If even this
+    write fails and no recorded change marked the row, it stays 'deciding' and
+    recover_stale() returns it at the next start (logged above)."""
+    try:
+        with store._connect(write=True) as db:
+            db.execute("UPDATE pending_changes SET status=?, decided_at=?, error=? WHERE id=?",
+                       (_APPLIED, _now(), error[:500], pid))
+    except Exception:  # noqa: BLE001
+        log.exception("auto_changes: could not mark pending change %s applied", pid)
 
 
 def _release(store, pid: int, error: str) -> None:

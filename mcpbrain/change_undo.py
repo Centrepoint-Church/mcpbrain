@@ -110,7 +110,7 @@ def _undo_consolidation(store, home, row):
     # content can't prove that, so it refuses too.
     # Under the records lock (shared with the daemon's records writers), so
     # the check and the removal see the same files and git never races.
-    with records_write.repo_lock():
+    with records_write.repo_lock(repo):
         for rel in grads:
             fp = Path(repo) / rel
             if not isinstance(recorded, dict) or rel not in recorded:
@@ -141,7 +141,7 @@ def _undo_records_file(message: str, relpath_of: Callable[[dict], str]):
             raise Refused(NOT_UNDOABLE)
         fp = Path(repo) / rel
         # Check and restore under the records lock the daemon's writers share.
-        with records_write.repo_lock():
+        with records_write.repo_lock(repo):
             current = fp.read_text() if fp.exists() else None
             if current != after.get("content"):
                 raise Refused(CHANGED_SINCE)
@@ -153,9 +153,11 @@ def _undo_bandit(store, home, row):
     from mcpbrain import config
     p = _need_payload(row)
     want = p["after"]["recall_max_distance"]
-    if abs(config.recall_max_distance(home) - float(want)) >= 1e-9:
-        raise Refused(CHANGED_SINCE)
-    config.write_config(home, {"recall_max_distance": p["before"]["recall_max_distance"]})
+    # Check and write under the config lock the other config writers share.
+    with config.config_lock(home):
+        if abs(config.recall_max_distance(home) - float(want)) >= 1e-9:
+            raise Refused(CHANGED_SINCE)
+        config.write_config(home, {"recall_max_distance": p["before"]["recall_max_distance"]})
 
 
 # Every change that hides or restores an entity: an undo of any one of them is

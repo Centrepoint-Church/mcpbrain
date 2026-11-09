@@ -7,6 +7,8 @@ import sys
 import tempfile
 from pathlib import Path
 
+from mcpbrain.file_lock import CrossProcessLock
+
 log = logging.getLogger(__name__)
 
 
@@ -1389,6 +1391,29 @@ def sheet_char_budget(home) -> int:
     return value if value > 0 else 2_000_000
 
 
+# config.json is written by the daemon, the console, the CLI and the MCP
+# server, each its own process. Every read-merge-write holds this lock: an
+# in-process RLock plus an OS lock on <home>/config.lock (never deleted, so a
+# writer that dies leaves nothing stale). Reentrant, so a caller holding it
+# (settings_api.apply_settings, daemon.apply_config) can call write_config.
+_CONFIG_LOCK = CrossProcessLock()
+CONFIG_LOCK_TIMEOUT_S = 30.0
+
+
+class ConfigBusy(RuntimeError):
+    def __init__(self) -> None:
+        super().__init__("The settings file is busy saving another change. Try again in a moment.")
+
+
+def config_lock(home):
+    """Context manager: hold the config lock for `home`, or raise ConfigBusy
+    after CONFIG_LOCK_TIMEOUT_S. Wrap any read-check-then-write of config."""
+    home = Path(home)
+    home.mkdir(parents=True, exist_ok=True)
+    return _CONFIG_LOCK.hold(str(home / "config.lock"), timeout=CONFIG_LOCK_TIMEOUT_S,
+                             busy=ConfigBusy)
+
+
 def write_config(home, updates) -> dict:
     """Merge `updates` into the existing config and persist it at mode 0600.
 
@@ -1397,9 +1422,14 @@ def write_config(home, updates) -> dict:
     file holds an API key, so it is written atomically (temp file + os.replace)
     and is never world-readable: the temp is created 0600 and replaces the target
     in one rename, so no reader ever sees it at a wider mode or half-written.
+    The read-merge-write runs under config_lock, so two processes writing
+    different keys at once both keep their change.
     """
-    home = Path(home)
-    home.mkdir(parents=True, exist_ok=True)
+    with config_lock(home):
+        return _write_config_locked(Path(home), updates)
+
+
+def _write_config_locked(home: Path, updates) -> dict:
     cur = read_config(str(home))
     cur.update(updates)
     p = _path(home)

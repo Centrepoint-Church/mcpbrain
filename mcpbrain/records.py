@@ -316,7 +316,7 @@ def ensure_records_repo(repo_dir: str, *, git_name: str = "mcpbrain",
                 p.write_text(_render_template(tmpl, profile), encoding="utf-8")
                 newly_written.append(rel)
     from mcpbrain.records_write import repo_lock  # the one records git lock
-    with repo_lock():
+    with repo_lock(repo_dir):
         if fresh:
             _git(repo_dir, "add", "-A")
             staged = _git(repo_dir, "diff", "--cached", "--quiet", check=False).returncode != 0

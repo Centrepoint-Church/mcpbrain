@@ -249,6 +249,11 @@
         <h2 id="adv-h">Advanced</h2>
         <p>Set up for <span id="fleet-tenant-name">your organisation</span>. Change these only if an administrator gives you new folders.</p>
       </header>
+      <div class="stack-md">
+        <div class="rows" id="maint" aria-labelledby="maint-h" aria-busy="true">
+          <div id="maint-head"><h3 id="maint-h">Maintenance history</h3><p>Passes mcpbrain runs once by itself after an update, and how they went.</p></div>
+          <div id="maint-body"><span class="skel skel--line"></span></div>
+        </div>
       <details class="adv">
         <summary>Show fleet folders</summary>
         <div class="fields">
@@ -268,6 +273,7 @@
           </div>
         </div>
       </details>
+      </div>
     </section>
   </div>
 
@@ -278,7 +284,7 @@
 "use strict";
 const C = window.mcpConsole;
 // Shared page helpers live in console.js, defined once for every page.
-const {api, el, fill, said, errText, words, act, fmt, plural, monthYear, renderChip} = C;
+const {api, el, fill, said, errText, words, worded, act, fmt, plural, monthYear, renderChip} = C;
 const AGAIN = {again: true};   // a button that can be used again after it worked
 const root = document.documentElement;
 
@@ -730,7 +736,10 @@ const CONN_WORDS = {
   google: {ok: "Connected"}, claude: {ok: "Connected"}, backup: {ok: "On"},
   records: {ok: "Ready"}, enrichment: {ok: "Running"},
 };
+/* word-maps:start */
 const CONN_LABELS = {google: "Google", claude: "Claude Desktop", backup: "Encrypted backup", records: "Records", enrichment: "Enrichment"};
+function connLabel(c){ return worded(CONN_LABELS, c.name, "Another connection"); }
+/* word-maps:end */
 function connChip(c){
   if (c.state === "ok") return el("span", {class: "chip chip--ok", text: (CONN_WORDS[c.name] || {}).ok || "OK"});
   if (c.state === "needs_action") return el("span", {class: "chip chip--person", text: "Needs you"});
@@ -772,7 +781,7 @@ function connRow(c, account){
     p.append(c.name === "records" ? "Notes, decisions and memories you capture are written here." : "");
     if (c.detail && c.state !== "ok") p.append(" " + words(c.detail) + ".");
   }
-  return el("div", {}, el("div", {class: "rowhead"}, el("h3", {text: CONN_LABELS[c.name] || c.label || "Connection"}), connChip(c)), p,
+  return el("div", {}, el("div", {class: "rowhead"}, el("h3", {text: connLabel(c)}), connChip(c)), p,
     acts.childNodes.length ? acts : null, out);
 }
 async function renderConnections(){
@@ -792,8 +801,11 @@ async function renderConnections(){
 
 // ---- hidden entities -------------------------------------------------------
 
+/* word-maps:start */
 const TYPE_WORDS = {person: "Person", org: "Organisation", project: "Project", topic: "Topic", meeting: "Meeting",
   event: "Event", document: "Document", thread: "Thread"};
+function typeWord(t){ return worded(TYPE_WORDS, t, "Entity"); }
+/* word-maps:end */
 /* reason-words:start */
 // Why an entity is hidden, in words. The two codes mcpbrain writes itself are
 // named; other short codes get a worded fallback; prose (the daily tidy-up
@@ -828,18 +840,18 @@ async function loadHidden(){
   fill(body, el("p", {class: "muted small", text: plural(items.length, "entity", "entities") + " hidden."}),
     el("ul", {class: "hidden-list"}, items.map(it => {
       const out = el("p", {class: "said", role: "status", hidden: true});
-      const meta = [TYPE_WORDS[it.type] || "Entity"];
+      const meta = [typeWord(it.type)];
       if (it.suppressed_at) meta.push("hidden " + C.relTime(it.suppressed_at));
       const why = reasonWords(it.reason);
       if (why) meta.push(why);
       return el("li", {}, el("div", {}, el("strong", {text: it.name || "Unnamed entity"}), el("p", {class: "muted small", text: meta.join(", ")})),
         el("button", {class: "btn btn--sm", type: "button", text: "Restore", "aria-label": "Restore " + (it.name || "this entity"),
-          onclick: (ev) => act(ev.currentTarget, out, async () => {
+          onclick: (ev) => { said($("hidden-said"), ""); return act(ev.currentTarget, out, async () => {
             await api(`/api/graph/entity/${encodeURIComponent(it.id)}/restore`, {method: "POST"});
             // Redraw the list and its count; the result is said above it.
             await loadHidden();
             said($("hidden-said"), "Restored " + (it.name || "the entity") + ". You can undo it under What changed on the Overview.", "ok");
-          })}), out);
+          }); }}), out);
     })));
   busy("hidden", false);
 }
@@ -1035,6 +1047,66 @@ async function loadSystem(){
   catch (e) { /* the intro stays */ }
 }
 
+// ---- advanced: maintenance history ------------------------------------------
+
+/* maint-words:start */
+// The one-off maintenance passes in words: when each finished, how many items
+// it handled and how many it gave up on. `day` formats a stored time as a date.
+function maintCount(c){
+  let n = 0;
+  for (const step of Object.values(c || {}))
+    for (const v of Object.values(step || {})) if (typeof v === "number") n += v;
+  return n;
+}
+function givenUp(n){ return n ? fmt(n) + " given up on" : "none given up on"; }
+function reflowText(r, day){
+  r = r || {};
+  const done = r.owners_done || 0, gave = (r.by_outcome || {}).gave_up || 0;
+  const left = (r.queued || 0) + (r.remaining || 0);
+  if (r.halted) return "Stopped before it finished. Run Diagnostics under System for what to do.";
+  if (!done && !left) return "It hasn’t run yet. It starts by itself when an update needs it.";
+  if (left) return "Running. " + plural(done, "item") + " handled so far, " + givenUp(gave) + ", " + fmt(left) + " left.";
+  const when = day((r.last_seed || {}).at);
+  return (when ? "Finished " + when + ". " : "Finished. ") + plural(done, "item") + " handled, " + givenUp(gave) + ".";
+}
+function cleanupText(c, day){
+  c = c || {};
+  const when = day(c.at);
+  if (c.state === "done") {
+    const steps = c.added_error ? (c.pending_steps || []).length : 0;
+    return (when ? "Finished " + when + ". " : "Finished. ") + plural(maintCount(c.counts), "item") + " handled, "
+      + (steps ? plural(steps, "later step") + " given up on." : "none given up on.");
+  }
+  if (c.state === "failed") return "Stopped with a problem" + (when ? " on " + when : "") + ". Nothing retries it by itself; run Diagnostics under System for what to do.";
+  if (c.state === "running") return "Running now.";
+  if (c.state === "deferred_no_backup") return "Waiting for a recent backup before it runs.";
+  if (c.state === "disabled") return "Switched off for this install.";
+  return "It hasn’t run yet. It starts by itself after an update that needs it.";
+}
+function maintLines(m, day){
+  return [{title: "Re-chunking", text: reflowText(m.reflow, day)},
+          {title: "Ingestion clean-up", text: cleanupText(m.ingestion_cleanup, day)}];
+}
+/* maint-words:end */
+function maintDay(iso){
+  const d = C.parse(iso);
+  if (!d) return "";
+  try { return d.toLocaleDateString("en-AU", {day: "numeric", month: "short", year: "numeric", timeZone: C.tz || undefined}); }
+  catch (e) { return d.toLocaleDateString("en-AU", {day: "numeric", month: "short", year: "numeric"}); }
+}
+async function loadMaintenance(){
+  let rows;
+  try {
+    const m = await api("/api/maintenance");
+    rows = maintLines(m, maintDay).map(l => el("div", {}, el("h3", {text: l.title}), el("p", {text: l.text})));
+  } catch (e) {
+    rows = [el("div", {id: "maint-body"}, el("p", {class: "said said--bad",
+      text: "Couldn’t load the maintenance history. " + errText(e)}))];
+  }
+  fill($("maint"), $("maint-head"), rows);
+  busy("maint", false);
+}
+
 // ---- advanced: fleet folders -------------------------------------------------
 
 let fleetLoaded = false;
@@ -1114,7 +1186,7 @@ async function loadAll(){
   await Promise.all([loadSettingsBlock(), loadStats()]);
   renderSources();
   busy("sources", false);
-  await Promise.all([renderConnections(), loadHidden(), loadSystem(), loadPending()]);
+  await Promise.all([renderConnections(), loadHidden(), loadSystem(), loadPending(), loadMaintenance()]);
   if (location.hash) {
     const target = document.getElementById(location.hash.slice(1));
     if (target) target.scrollIntoView();

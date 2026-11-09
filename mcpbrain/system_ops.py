@@ -38,6 +38,29 @@ def _version() -> str:
 
 # -- restart -------------------------------------------------------------------
 
+# One restart at a time: the route claims it before replying, and the restart
+# thread releases it when it has finished (or could not start), so a second
+# click while one runs is answered without restarting again.
+_restart_guard = threading.Lock()
+_restart_inflight = False
+
+
+def claim_restart() -> bool:
+    """True if this caller may restart now; False while one is in flight."""
+    global _restart_inflight
+    with _restart_guard:
+        if _restart_inflight:
+            return False
+        _restart_inflight = True
+        return True
+
+
+def release_restart() -> None:
+    global _restart_inflight
+    with _restart_guard:
+        _restart_inflight = False
+
+
 def request_restart(daemon, *, platform: str | None = None, restart=None, spawn=None,
                     home=None) -> threading.Thread:
     """Restart the daemon through its login agent, after the caller has replied.
@@ -68,6 +91,7 @@ def request_restart(daemon, *, platform: str | None = None, restart=None, spawn=
             (spawn or _spawn_detached)(argv)
         except Exception:  # noqa: BLE001 — without a helper, stopping would leave nothing running
             log.exception("restart: could not spawn the start helper; not stopping")
+            release_restart()
             t = threading.Thread(target=lambda: None)
             t.start()
             return t
@@ -78,15 +102,18 @@ def request_restart(daemon, *, platform: str | None = None, restart=None, spawn=
 
     def _work():
         try:
-            daemon.stop()
-        except Exception:  # noqa: BLE001 — still restart; the agent replaces us
-            log.exception("restart: daemon.stop() failed; restarting anyway")
-        if restart is None:
-            return
-        try:
-            restart(platform)
-        except Exception:  # noqa: BLE001
-            log.exception("restart: restart_agent(%s) failed", platform)
+            try:
+                daemon.stop()
+            except Exception:  # noqa: BLE001 — still restart; the agent replaces us
+                log.exception("restart: daemon.stop() failed; restarting anyway")
+            if restart is None:
+                return
+            try:
+                restart(platform)
+            except Exception:  # noqa: BLE001
+                log.exception("restart: restart_agent(%s) failed", platform)
+        finally:
+            release_restart()
 
     t = threading.Thread(target=_work, name="mcpbrain-restart", daemon=False)
     t.start()

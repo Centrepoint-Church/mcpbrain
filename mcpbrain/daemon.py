@@ -2510,16 +2510,20 @@ class Daemon:
         takes effect without a restart. Never logs the key.
         """
         home = str(app_dir())
-        config.write_config(home, body)
-        # Zero-touch enrichment: the first time an install becomes configured
-        # (identity + >=1 org saved), turn enrichment on so the daemon starts
-        # spooling the un-enriched backlog. Only auto-flip when the caller didn't
-        # set enrich_mode itself (an explicit "off" is honored) and it's still the
-        # "off" default — so a later save won't re-flip a deliberate choice.
-        if ("enrich_mode" not in body
-                and config.is_configured(home)
-                and config.enrich_mode(home) == "off"):
-            config.write_config(home, {"enrich_mode": "spool"})
+        # The save and the check-then-flip below are one read-merge-write under
+        # the cross-process config lock, so no other writer lands in between.
+        with config.config_lock(home):
+            config.write_config(home, body)
+            # Zero-touch enrichment: the first time an install becomes configured
+            # (identity + >=1 org saved), turn enrichment on so the daemon starts
+            # spooling the un-enriched backlog. Only auto-flip when the caller
+            # didn't set enrich_mode itself (an explicit "off" is honored) and
+            # it's still the "off" default, so a later save won't re-flip a
+            # deliberate choice.
+            if ("enrich_mode" not in body
+                    and config.is_configured(home)
+                    and config.enrich_mode(home) == "off"):
+                config.write_config(home, {"enrich_mode": "spool"})
         # Build both off-lock (network/IO work), then set all daemon-config
         # mutation under _config_lock so the loop thread never reads a new
         # _backup paired with a stale interval. Keep the lock hold time to
@@ -4513,9 +4517,12 @@ class Daemon:
             mode = _config.auto_change_mode(home, "tidy")
             if mode == "off":
                 # Graph tidy-up is off: don't ask the AI about findings nobody
-                # will act on.
+                # will act on, and close them rather than leave them open.
+                closed = review.close_for_tidy_off(self._store)
                 self._last_review = now
-                return {"skipped": "off"}
+                return {"skipped": "off", "resolved": closed}
+            # On again: let the lint pass record what tidy-up-off closed.
+            review.release_tidy_off(self._store)
             cap = _config.review_max_apply_per_run(home)
             kind_to_block_key = review.TIDY_BLOCK_KEYS
             units = review.build_review_units(

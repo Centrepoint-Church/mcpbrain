@@ -126,7 +126,7 @@
 <script>
 "use strict";
 const C = window.mcpConsole;
-const {api, el, fill, said, errText, words, fmt, plural, act, renderChip} = C;
+const {api, el, fill, said, errText, worded, fmt, plural, act, renderChip} = C;
 const $ = (id) => document.getElementById(id);
 const reduce = window.matchMedia("(prefers-reduced-motion: reduce)").matches;
 
@@ -137,12 +137,18 @@ const CIRCLE_SLOTS = 6;  // circles that get their own colour in "Colour by circ
 
 // Kinds: the list itself comes from /api/graph/types. These are only the
 // words for the kinds mcpbrain classifies, plus the two bookkeeping kinds.
+/* word-maps:start */
 const KIND_WORDS = {
   person: ["Person", "People"], org: ["Organisation", "Organisations"],
   project: ["Project", "Projects"], topic: ["Topic", "Topics"],
   meeting: ["Meeting", "Meetings"], event: ["Event", "Events"],
   document: ["Document", "Documents"], thread: ["Email thread", "Email threads"]
 };
+// A kind the page has no words for yet is said as such, never by its code.
+function kindKey(t){ return worded(KIND_WORDS, t, null) ? t : "unknown"; }
+function kindWord(t){ return worded(KIND_WORDS, t, ["Unclassified"])[0]; }
+function kindPlural(t){ return worded(KIND_WORDS, t, [null, "Other kinds"])[1]; }
+/* word-maps:end */
 // Documents and threads are sources kept as bookkeeping: they crowd out
 // people and projects, so they start off. So does anything unclassified.
 const OFF_BY_DEFAULT = new Set(["document", "thread"]);
@@ -217,8 +223,6 @@ function readPalette(){
 }
 let palette = readPalette();
 
-function kindKey(t){ return KIND_WORDS[t] ? t : "unknown"; }
-function kindWord(t){ return KIND_WORDS[t] ? KIND_WORDS[t][0] : "Unclassified"; }
 // A link with no relation name travels as EMPTY_REL (the server's marker);
 // on the page it reads "unnamed".
 const EMPTY_REL = "_none";
@@ -505,7 +509,7 @@ function onFromUrl(){
 }
 function kindsOnWords(){
   return kindRows().filter(r => rawTypesOf(r.key).length && rawTypesOf(r.key).every(t => ON.has(t)))
-    .map(r => r.key === UNCLASSIFIED ? "unclassified" : (KIND_WORDS[r.key] ? KIND_WORDS[r.key][1].toLowerCase() : words(r.key)))
+    .map(r => r.key === UNCLASSIFIED ? "unclassified" : kindPlural(r.key).toLowerCase())
     .join(", ");
 }
 // The types to ask the canvas for: an empty list means every kind.
@@ -522,8 +526,7 @@ function renderTypeChips(){
       url.entity = ""; url.rel = "";
       pushUrl(); load();
     });
-    const name = r.key === UNCLASSIFIED ? "Unclassified"
-      : (KIND_WORDS[r.key] ? KIND_WORDS[r.key][1] : words(r.key));
+    const name = r.key === UNCLASSIFIED ? "Unclassified" : kindPlural(r.key);
     return el("label", {class: "type"}, input,
       el("span", {class: "sw sw--" + (r.key === UNCLASSIFIED ? "unknown" : kindKey(r.key)), "aria-hidden": "true"}),
       el("span", {text: name}), el("span", {class: "measured", text: fmt(r.count)}));

@@ -12,7 +12,6 @@ at the point of use.
 """
 from __future__ import annotations
 
-import threading
 from typing import Callable
 
 from mcpbrain import config
@@ -21,11 +20,6 @@ _SOURCES = ("gmail", "drive", "calendar")
 _INGEST_LISTS = ("generated_gmail_subject_prefixes", "generated_drive_folders",
                  "exclude_senders", "exclude_labels")
 _REVIEW_MIN, _REVIEW_MAX = 1, 500
-
-# One writer at a time: read, merge and write must not interleave with another
-# settings save.
-_lock = threading.Lock()
-
 
 class SettingsError(ValueError):
     """A body the allowlist refuses; the message is the client-facing error."""
@@ -127,7 +121,9 @@ def apply_settings(home, body: dict) -> dict:
     except SettingsError as exc:
         return {"ok": False, "error": str(exc)}
     if body:
-        with _lock:
+        # One writer at a time, in any process: read, merge and write must not
+        # interleave with another settings save or config write.
+        with config.config_lock(home):
             cur = config.read_config(home)
             updates = {}
             for key, val in body.items():

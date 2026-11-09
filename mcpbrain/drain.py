@@ -798,6 +798,21 @@ def _older_than_stored(store, base_doc_id: str, captured_at: str) -> bool:
     return bool(stored) and stored > captured_at
 
 
+# How an action-update capture reads in the change feed: the action's own
+# words and the status in words, never the id (ref_id keeps the id).
+_ACTION_STATUS_WORDS = {"done": "done", "open": "open"}
+
+
+def _action_update_summary(store, action_id, status) -> str:
+    try:
+        row = store.get_unified_action(int(action_id)) or {}
+    except Exception:  # noqa: BLE001 -- the summary is words, never a failure
+        row = {}
+    text = str(row.get("text") or "").strip()[:60]
+    marked = _ACTION_STATUS_WORDS.get(status, "updated")
+    return f'Action "{text}" marked {marked}' if text else f"Action marked {marked}"
+
+
 def drain_captures(store, *, home=None, budget=None, bulk_section=None) -> int:
     """Apply every capture_inbox envelope. Returns the number applied.
 
@@ -987,7 +1002,8 @@ def drain_captures(store, *, home=None, budget=None, bulk_section=None) -> int:
                         resolved_by=f"capture:{env.get('source', 'mcp')}",
                         only_if_open=(env["status"] == "done"),
                         change={"change_type": "capture_action_update",
-                                "summary": f"Action {env['action_id']} -> {env['status']}"})
+                                "summary": _action_update_summary(
+                                    store, env["action_id"], env["status"])})
                     if changed:
                         applied += 1
                     else:

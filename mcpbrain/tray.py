@@ -19,6 +19,7 @@ from __future__ import annotations
 
 import sys
 import threading
+import time
 import webbrowser
 from typing import TYPE_CHECKING
 
@@ -36,10 +37,17 @@ class TrayController:
     drives both. No pystray import here.
     """
 
-    def __init__(self, client: "ControlClient", *, start_daemon=None) -> None:
+    # How long "Start mcpbrain" stays disabled after a click when the daemon
+    # never answers: then it can be tried again.
+    START_WAIT_S = 60.0
+
+    def __init__(self, client: "ControlClient", *, start_daemon=None, clock=None) -> None:
         self._client = client
         # Injectable for tests; the default goes through the login agent.
         self._start_daemon = start_daemon or _start_daemon_via_agent
+        self._clock = clock or time.monotonic
+        # When the last "Start mcpbrain" was clicked, until the daemon answers.
+        self._starting_since: float | None = None
         self._last: dict | None = None
         self._available = False
         self._quit = False
@@ -51,6 +59,7 @@ class TrayController:
         try:
             self._last = self._client.status()
             self._available = True
+            self._starting_since = None
         except DaemonUnavailable:
             self._last = None
             self._available = False
@@ -140,10 +149,20 @@ class TrayController:
         """Start the daemon through its login agent (shown only while it is down).
 
         For when the daemon is not running, e.g. "Start when I log in" is off.
-        Runs off the menu thread: the agent call can take a few seconds.
+        Runs off the menu thread: the agent call can take a few seconds. A
+        click while a start is in flight (until the daemon answers or
+        START_WAIT_S pass) is ignored.
         """
+        if self.starting():
+            return
+        self._starting_since = self._clock()
         threading.Thread(target=self._start_daemon, name="mcpbrain-start",
                          daemon=True).start()
+
+    def starting(self) -> bool:
+        """A start was requested and the daemon hasn't answered yet."""
+        return (self._starting_since is not None
+                and self._clock() - self._starting_since < self.START_WAIT_S)
 
     def on_quit(self) -> None:
         """Close the tray icon. Does NOT stop the daemon (login agent owns it)."""
@@ -168,7 +187,7 @@ class TrayController:
         items: list[tuple[str, object, bool]] = []
         if not self._available or self._last is None:
             items.append(("Daemon not running", None, False))
-            items.append(("Start mcpbrain", self.on_start_daemon, True))
+            items.append(("Start mcpbrain", self.on_start_daemon, not self.starting()))
         else:
             items.append((f"Indexed: {self.indexed_count():,}", None, False))
             items.append((f"Enriched: {self.enriched_count():,}", None, False))

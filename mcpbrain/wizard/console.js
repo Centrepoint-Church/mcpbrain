@@ -3,7 +3,7 @@
  * Loaded with a plain <script src> in <head>, before the stylesheet paints, so
  * the saved mode and main colour apply with no flash. Exposes
  * window.mcpConsole = {api, applyTheme, relTime, time, dayKey, tz, ...} plus the
- * page helpers every console page shares (el, fill, said, act, renderChip,
+ * page helpers every console page shares (el, fill, said, worded, act, renderChip,
  * wireOffline, orgRow, collectOrgs, populateTimezones, ...), defined here once.
  *
  * Storage keys (localStorage, per browser):
@@ -211,6 +211,17 @@
   }
   // Server detail strings are written for a terminal: dashes become commas.
   function words(s) { return String(s || "").replace(/\s+—\s+/g, ", ").replace(/—/g, ", "); }
+  /* worded:start */
+  // A code from the server in words: the map's entry, or `fallback` for a code
+  // the page doesn't know yet. A raw code never reaches the page.
+  function worded(map, code, fallback) {
+    if (map && code != null && code !== "" && Object.prototype.hasOwnProperty.call(map, code)) {
+      var v = map[code];
+      if (v != null && v !== "") return v;
+    }
+    return fallback;
+  }
+  /* worded:end */
   function fmtNum(n) { return (typeof n === "number" ? n : 0).toLocaleString("en-AU"); }
   function plural(n, one, many) { return fmtNum(n) + " " + (n === 1 ? one : (many || one + "s")); }
   function monthYear(v) {
@@ -326,7 +337,7 @@
   var exported = {
     api: api, applyTheme: applyTheme, relTime: relTime, time: time, dayKey: dayKey,
     parse: parse, currentMode: currentMode, isOffline: function () { return offline; },
-    el: el, fill: fill, said: said, errText: errText, words: words, fmt: fmtNum, plural: plural,
+    el: el, fill: fill, said: said, errText: errText, words: words, worded: worded, fmt: fmtNum, plural: plural,
     monthYear: monthYear, act: act, reenable: reenable, renderChip: renderChip,
     wireOffline: wireOffline, orgRow: orgRow, collectOrgs: collectOrgs,
     populateTimezones: populateTimezones

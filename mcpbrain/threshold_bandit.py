@@ -191,8 +191,9 @@ def apply_threshold(store, home: str, recommended: float) -> int:
     Returns the change_log id (0 if only the bookkeeping failed). The one
     apply path for draft style tuning (auto_changes.APPLY["draft_style"])."""
     from mcpbrain import config
-    current = config.recall_max_distance(home)
-    config.write_config(home, {"recall_max_distance": recommended})
+    with config.config_lock(home):
+        current = config.recall_max_distance(home)
+        config.write_config(home, {"recall_max_distance": recommended})
     return _record_applied(store, current, recommended)
 
 

@@ -249,6 +249,19 @@ class ControlServer:
                     except Exception as exc:
                         log.exception("%s failed", self.path)
                         return h_json(self, 500, {"error": str(exc)})
+                if self.path == "/api/maintenance":
+                    # Settings > Advanced > Maintenance history: the two
+                    # one-off passes, as status and doctor see them.
+                    if server.store is None:
+                        return h_json(self, 503, {"error": "dashboard not available"})
+                    try:
+                        from mcpbrain import ingestion_cleanup
+                        return h_json(self, 200, {
+                            "reflow": server.store.reflow_status(),
+                            "ingestion_cleanup": ingestion_cleanup.status(server.store)})
+                    except Exception as exc:
+                        log.exception("%s failed", self.path)
+                        return h_json(self, 500, {"error": str(exc)})
                 if self.path in ("/api/pending", "/api/findings"):
                     if server.store is None:
                         return h_json(self, 503, {"error": "dashboard not available"})
@@ -612,6 +625,9 @@ class ControlServer:
                 # Reply first: the restart stops this server along with the
                 # daemon, and the new one listens on a new port and token.
                 from mcpbrain import system_ops
+                # A second click while one restart runs is answered, not repeated.
+                if not system_ops.claim_restart():
+                    return h_json(h, 202, {"restarting": True, "already": True})
                 h_json(h, 202, {"restarting": True})
                 system_ops.request_restart(d, home=self.home)
                 return None

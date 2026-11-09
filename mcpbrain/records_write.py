@@ -9,20 +9,25 @@ import functools
 import logging
 import os
 import subprocess
-import threading
 from contextlib import contextmanager
 from datetime import datetime, timezone
 from pathlib import Path
 
+from mcpbrain.file_lock import CrossProcessLock
+
 log = logging.getLogger(__name__)
 
-# One lock for every records-repo git write in this process: the daemon's
-# writers (drain captures, consolidation, voice, cadences) and the console's
-# undo paths (change_undo, on the HTTP thread). Two `git add`/`commit` runs at
-# once fight over .git/index.lock; serialised, they never do. Reentrant, so a
-# writer that holds it can call another locked writer.
-_REPO_LOCK = threading.RLock()
+# One lock for every records-repo git write: the daemon's writers (drain
+# captures, consolidation, voice, cadences), the console's undo paths
+# (change_undo, on the HTTP thread), the records scaffold, and the MCP server's
+# brain_gardener_apply, which runs in a separate process. Two `git add`/`commit`
+# runs at once fight over .git/index.lock; serialised, they never do.
+# Reentrant, so a writer that holds it can call another locked writer. Across
+# processes it is an OS lock on <repo>/.git/mcpbrain-records.lock, never
+# deleted, so a holder that dies leaves nothing stale (file_lock).
+_REPO_LOCK = CrossProcessLock()
 LOCK_TIMEOUT_S = 30.0
+LOCK_FILE = "mcpbrain-records.lock"
 BUSY = "The records folder is busy saving another change. Try again in a minute."
 
 
@@ -33,23 +38,30 @@ class RecordsBusy(RuntimeError):
         super().__init__(BUSY)
 
 
+def _lock_path(repo) -> str | None:
+    git_dir = Path(repo) / ".git"
+    return str(git_dir / LOCK_FILE) if git_dir.is_dir() else None
+
+
 @contextmanager
-def repo_lock():
+def repo_lock(repo=None):
     """Hold the records-repo write lock, or raise RecordsBusy after
-    LOCK_TIMEOUT_S. Wrap any read-check-then-write of a records file in it."""
-    if not _REPO_LOCK.acquire(timeout=LOCK_TIMEOUT_S):
-        raise RecordsBusy()
-    try:
+    LOCK_TIMEOUT_S. Wrap any read-check-then-write of a records file in it.
+
+    With `repo` (the records repo path) the lock also holds across processes.
+    Without it, or before the repo has a .git folder, only this process's
+    threads are serialised."""
+    path = _lock_path(repo) if repo else None
+    with _REPO_LOCK.hold(path, timeout=LOCK_TIMEOUT_S, busy=RecordsBusy):
         yield
-    finally:
-        _REPO_LOCK.release()
 
 
 def _locked(fn):
+    """Run a writer whose first argument is the records repo under its lock."""
     @functools.wraps(fn)
-    def wrapper(*args, **kwargs):
-        with repo_lock():
-            return fn(*args, **kwargs)
+    def wrapper(repo, *args, **kwargs):
+        with repo_lock(repo):
+            return fn(repo, *args, **kwargs)
     return wrapper
 
 def _git(repo: str, *args: str) -> subprocess.CompletedProcess:

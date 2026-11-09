@@ -362,10 +362,12 @@ def stats(store, home, status: dict, *, now: datetime | None = None) -> dict:
     open_findings = int(status.get("open_findings") or 0)
     # Each Needs-you item shows once: a pending change or proposed correction
     # also carries a finding, but it is counted (and listed) as a review. The
-    # lint findings graph tidy-up consumes are its input, never counted.
+    # lint findings graph tidy-up consumes are its input, never counted. Repeats
+    # of one finding (same type and summary) are one row in Needs you, so they
+    # count once here too: the same grouping /api/findings lists.
     try:
-        from mcpbrain.dashboard import NOT_NEEDS_YOU_TYPES  # noqa: PLC0415
-        open_findings = int(store.open_findings_count(exclude_types=NOT_NEEDS_YOU_TYPES))
+        from mcpbrain.dashboard import findings_view  # noqa: PLC0415
+        open_findings = len(findings_view(store))
     except Exception:  # noqa: BLE001 — fall back to the status snapshot's total
         pass
     paused = bool(status.get("paused"))
