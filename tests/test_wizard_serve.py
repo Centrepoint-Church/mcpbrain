@@ -248,16 +248,14 @@ def test_root_serves_wizard_with_token(tmp_path):
     try:
         html = urllib.request.urlopen(f"http://127.0.0.1:{srv.port}/").read().decode()
         assert "<html" in html.lower() and srv.token in html
-        for a in ("step-google","step-projects","step-status"): assert a in html
+        for a in ("step-google", "step-profile", "step-connect", "step-done"): assert a in html
     finally: srv.stop()
 
-def test_home_has_status_center_elements(tmp_path):
+def test_setup_keeps_the_backup_status_line(tmp_path):
     srv = ControlServer(FakeDaemon(), home=str(tmp_path)); srv.start()
     try:
         html = urllib.request.urlopen(f"http://127.0.0.1:{srv.port}/").read().decode()
-        for el in ("home-status", "conn-cards", "backfill-progress",
-                   "backup-status", "self-heal-banners", "privacy-note"):
-            assert f'id="{el}"' in html, f"missing #{el}"
+        assert 'id="backup-status"' in html
     finally: srv.stop()
 
 
@@ -306,17 +304,8 @@ def test_prefill_and_dropdown_bootstrap_present():
     assert "/api/timezones" in WIZ       # dropdown population
 
 
-def test_home_status_renders_before_main():
-    # status-first: the home-status section must appear before the wizard <main>
-    assert WIZ.index('id="home-status"') < WIZ.index("<main")
-
-
-def test_connection_order_includes_new_cards():
-    assert '"enrichment"' in WIZ
-
-
 def test_guided_elements_present():
-    assert 'id="step-projects"' in WIZ
+    assert 'id="step-done"' in WIZ
     assert "/api/records/scaffold" in WIZ
     assert "clickup" not in WIZ.lower()             # ClickUp fully removed from setup
 
@@ -342,19 +331,6 @@ def test_backup_is_automatic_no_button():
     assert "autoBackup" in WIZ
     assert "enable-backup-btn" not in WIZ        # the manual button is gone
     assert "scaffold" in WIZ                     # records still scaffold (now automatic)
-
-
-def test_generic_hidden_css_rule_exists():
-    # Without a generic `.hidden{display:none}` the home-status + step toggling
-    # silently no-ops (only .badge.hidden was defined). This regressed once.
-    assert ".hidden{display:none}" in WIZ.replace(" ", "")
-
-
-def test_configured_view_keeps_actionable_steps_reachable():
-    # renderHome must only hide the redundant google/status steps when configured,
-    # so Register / Prepare-workspace buttons stay reachable.
-    assert 'HIDE_WHEN_CONFIGURED' in WIZ
-    assert '"step-google"' in WIZ and '"step-status"' in WIZ
 
 
 def test_step_badges_reflect_server_state_on_load():

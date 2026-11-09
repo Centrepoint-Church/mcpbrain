@@ -7311,10 +7311,21 @@ class Store:
                     {"suppressed": {"reason": reason, "suppressed_at": now}})
             return True
 
-    def unsuppress_entity(self, entity_id: str) -> bool:
-        """Remove a suppression. True if a row was deleted."""
+    def unsuppress_entity(self, entity_id: str, *, change: dict | None = None) -> bool:
+        """Remove a suppression. True if a row was deleted.
+
+        change: when given and a row was deleted, an undoable change_log row is
+        written on the same connection, recording the suppression it removed
+        (reason and time) so the undo can hide the entity again exactly.
+        """
         with self._connect(write=True) as db:
+            prior = db.execute(
+                "SELECT reason, suppressed_at FROM entity_suppressions WHERE entity_id=?",
+                (entity_id,)).fetchone() if change is not None else None
             cur = db.execute("DELETE FROM entity_suppressions WHERE entity_id=?", (entity_id,))
+            if cur.rowcount > 0 and change is not None and prior is not None:
+                _log_recorded_change(db, change, entity_id,
+                                     {"suppressed": dict(prior)}, {"suppressed": None})
             return cur.rowcount > 0
 
     # --- Graph corrections (read side) ----------------------------------------

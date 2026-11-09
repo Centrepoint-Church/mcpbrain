@@ -244,3 +244,87 @@ def test_graph_routes_503_without_store(tmp_path):
             except urllib.error.HTTPError as e:
                 assert e.code == 503, f"{m} {url} -> {e.code}"
     finally: srv.stop()
+
+
+# --- hidden entities: list and restore (Settings > Hidden entities) -------------
+
+def _real_store(tmp_path):
+    from mcpbrain.store import Store
+    s = Store(tmp_path / "brain.sqlite3", dim=4)
+    s.init()
+    return s
+
+
+def _post(url, token, body=None):
+    req = urllib.request.Request(url, data=json.dumps(body or {}).encode(), method="POST",
+                                 headers={"Authorization": f"Bearer {token}",
+                                          "Content-Type": "application/json"})
+    try:
+        with urllib.request.urlopen(req, timeout=5) as r:
+            return r.status, json.loads(r.read())
+    except urllib.error.HTTPError as e:
+        return e.code, json.loads(e.read() or b"{}")
+
+
+def test_list_suppressed_names_each_hidden_entity(tmp_path):
+    from mcpbrain import graph_view
+    s = _real_store(tmp_path)
+    s.upsert_entity("p-dana", "Dana Okafor", "person")
+    s.upsert_entity("o-harbour", "Harbour Trust", "org")
+    s.upsert_entity("p-sam", "Sam Ito", "person")
+    s.suppress_entity("p-dana", reason="graph-ui")
+    s.suppress_entity("o-harbour", reason="No links to anything")
+    out = graph_view.list_suppressed(s)
+    assert {r["id"] for r in out} == {"p-dana", "o-harbour"}
+    row = next(r for r in out if r["id"] == "p-dana")
+    assert row["name"] == "Dana Okafor" and row["type"] == "person"
+    assert row["reason"] == "graph-ui" and row["suppressed_at"]
+    assert set(row) == {"id", "name", "type", "suppressed_at", "reason"}
+    # Newest first.
+    assert [r["suppressed_at"] for r in out] == sorted((r["suppressed_at"] for r in out),
+                                                       reverse=True)
+
+
+def test_suppressed_and_restore_routes(tmp_path):
+    from mcpbrain import change_undo
+    s = _real_store(tmp_path)
+    s.upsert_entity("p-dana", "Dana Okafor", "person")
+    s.suppress_entity("p-dana", reason="graph-ui")
+    srv = ControlServer(_Daemon(), str(tmp_path), store=s); srv.start()
+    base = f"http://127.0.0.1:{srv.port}"
+    try:
+        code, body = _get(base + "/api/graph/suppressed", srv.token)
+        assert code == 200 and [i["id"] for i in body["items"]] == ["p-dana"]
+
+        code, body = _post(base + "/api/graph/entity/p-dana/restore", srv.token)
+        assert code == 200 and body["ok"] is True and body["change_id"]
+        code, body2 = _get(base + "/api/graph/suppressed", srv.token)
+        assert body2["items"] == []
+        with s._connect() as db:
+            row = dict(db.execute("SELECT * FROM change_log WHERE id=?",
+                                  (body["change_id"],)).fetchone())
+        assert row["change_type"] == "entity_unsuppressed" and row["ref_id"] == "p-dana"
+        assert "Dana Okafor" in row["summary"]
+        assert change_undo.undo(s, str(tmp_path), row["id"])["ok"] is True
+        code, body3 = _get(base + "/api/graph/suppressed", srv.token)
+        assert [i["id"] for i in body3["items"]] == ["p-dana"]
+
+        # Not hidden any more / never existed.
+        code, _ = _post(base + "/api/graph/entity/p-dana/restore", srv.token)
+        assert code == 200
+        code, body = _post(base + "/api/graph/entity/p-dana/restore", srv.token)
+        assert code == 409 and body["ok"] is False and body["reason"]
+        code, _ = _post(base + "/api/graph/entity/nobody/restore", srv.token)
+        assert code == 404
+    finally:
+        srv.stop()
+
+
+def test_suppressed_route_without_store(tmp_path):
+    srv = ControlServer(_Daemon(), str(tmp_path)); srv.start()
+    try:
+        with __import__("pytest").raises(urllib.error.HTTPError) as e:
+            _get(f"http://127.0.0.1:{srv.port}/api/graph/suppressed", srv.token)
+        assert e.value.code == 503
+    finally:
+        srv.stop()

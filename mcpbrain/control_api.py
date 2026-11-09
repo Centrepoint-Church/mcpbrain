@@ -120,6 +120,7 @@ class ControlServer:
                 # must load the wizard page, which then injects the token into the HTML.
                 if self.path == "/": return server._serve_wizard(self)   # Task 2.3
                 if self.path == "/dashboard": return server._serve_dashboard(self)
+                if self.path == "/settings": return server._serve_settings(self)
                 # Served before the auth gate: a browser <img> tag carries no
                 # token, so any /img/ request must be answered here. The whole
                 # /img/ prefix is claimed (not just a matching name) so an
@@ -285,6 +286,15 @@ class ControlServer:
                     except Exception as exc:
                         log.exception("graph canvas failed")
                         return h_json(self, 500, {"error": str(exc)})
+                if self.path.split("?")[0] == "/api/graph/suppressed":
+                    if server.store is None:
+                        return h_json(self, 503, {"error": "dashboard not available"})
+                    from mcpbrain import graph_view
+                    try:
+                        return h_json(self, 200, {"items": graph_view.list_suppressed(server.store)})
+                    except Exception as exc:
+                        log.exception("hidden entities list failed")
+                        return h_json(self, 500, {"error": str(exc)})
                 m = re.match(r"^/api/graph/entity/([^/?]+)$", self.path.split("?")[0])
                 if m:
                     if server.store is None: return h_json(self, 503, {"error": "dashboard not available"})
@@ -421,10 +431,11 @@ class ControlServer:
     def stop(self):
         if self._httpd: self._httpd.shutdown()
 
-    def _serve_wizard(self, h):
-        p = Path(__file__).parent / "wizard" / "index.html"
+    def _serve_page(self, h, name):
+        """Serve wizard/<name> with the control token injected."""
+        p = Path(__file__).parent / "wizard" / name
         if not p.exists():
-            b = b"wizard/index.html not found (packaging error)"
+            b = f"wizard/{name} not found (packaging error)".encode()
             h.send_response(500); h.send_header("Content-Type","text/plain")
             h.send_header("Content-Length", str(len(b))); h.end_headers(); h.wfile.write(b)
             return
@@ -432,16 +443,26 @@ class ControlServer:
         h.send_response(200); h.send_header("Content-Type","text/html")
         h.send_header("Content-Length", str(len(html))); h.end_headers(); h.wfile.write(html)
 
-    def _serve_dashboard(self, h):
-        p = Path(__file__).parent / "wizard" / "dashboard.html"
-        if not p.exists():
-            b = b"wizard/dashboard.html not found (packaging error)"
-            h.send_response(500); h.send_header("Content-Type","text/plain")
-            h.send_header("Content-Length", str(len(b))); h.end_headers(); h.wfile.write(b)
+    def _serve_wizard(self, h):
+        # Setup until the install is configured; after that `/` is the Overview.
+        # The redirect carries no token (the Overview injects its own).
+        from mcpbrain import config as _config
+        try:
+            configured = _config.is_configured(str(self.home))
+        except Exception:  # noqa: BLE001 — an unreadable config still gets setup
+            log.exception("is_configured failed; serving setup")
+            configured = False
+        if configured:
+            h.send_response(302); h.send_header("Location", "/dashboard")
+            h.send_header("Content-Length", "0"); h.end_headers()
             return
-        html = p.read_text(encoding="utf-8").replace("__MCPBRAIN_TOKEN__", self.token).encode()
-        h.send_response(200); h.send_header("Content-Type","text/html")
-        h.send_header("Content-Length", str(len(html))); h.end_headers(); h.wfile.write(html)
+        self._serve_page(h, "index.html")
+
+    def _serve_dashboard(self, h):
+        self._serve_page(h, "dashboard.html")
+
+    def _serve_settings(self, h):
+        self._serve_page(h, "settings.html")
 
     def _serve_image(self, h, name):
         root = (Path(__file__).parent / "wizard" / "img").resolve()
@@ -1000,6 +1021,16 @@ class ControlServer:
                     log.exception("backup/auto failed")
                     return h_json(h, 500, {"error": str(exc)})
 
+            m = re.match(r"^/api/graph/entity/([^/?]+)/restore$", h.path)
+            if m:
+                if self.store is None: return h_json(h, 503, {"error": "dashboard not available"})
+                from mcpbrain import graph_view
+                out = graph_view.restore_entity(self.store, urllib.parse.unquote(m.group(1)))
+                if out.get("ok"):
+                    return h_json(h, 200, out)
+                if out.get("error") == "not_found":
+                    return h_json(h, 404, {"ok": False, "reason": "No such entity"})
+                return h_json(h, 409, {"ok": False, "reason": "It isn't hidden any more"})
             m = re.match(r"^/api/graph/entity/([^/?]+)$", h.path)
             if m:
                 if self.store is None: return h_json(h, 503, {"error": "dashboard not available"})

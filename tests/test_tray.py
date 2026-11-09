@@ -247,3 +247,13 @@ def test_tray_start_on_win32_issues_no_taskkill(monkeypatch, tmp_path):
     tray._start_daemon_via_agent()
     assert ["schtasks", "/run", "/tn", "mcpbrain"] in calls
     assert not any(c[0] == "taskkill" for c in calls)
+
+
+def test_tray_keeps_open_dashboard_and_settings_is_in_the_console():
+    """Settings is a tab in the console's top bar, so the tray carries no
+    separate setup or settings item: Open Dashboard is the way in."""
+    labels = [i[0] for i in _ctrl().menu_items()]
+    assert "Open Dashboard" in labels
+    assert not any("setup" in lbl.lower() or "settings" in lbl.lower() for lbl in labels)
+    page = (pathlib.Path(__file__).parent.parent / "mcpbrain" / "wizard" / "dashboard.html").read_text()
+    assert '<a class="tab" href="/settings">Settings</a>' in page

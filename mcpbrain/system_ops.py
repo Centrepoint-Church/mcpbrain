@@ -183,6 +183,9 @@ def system_info(daemon, home) -> dict:
     except Exception:  # noqa: BLE001 — a status read never fails the page
         exits = 0
     return {"start_at_login": config.start_at_login(str(home)),
+            # Only macOS (launch agent) and Windows (scheduled task) have a
+            # login agent to change; elsewhere the console hides the switch.
+            "login_supported": sys.platform in ("darwin", "win32"),
             "model": daemon.model_status(),
             "version": _version(),
             "watchdog_exits": exits}

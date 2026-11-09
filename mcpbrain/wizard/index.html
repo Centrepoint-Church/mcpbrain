@@ -1,536 +1,381 @@
 <!doctype html>
-<html lang="en">
+<html lang="en-AU">
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Set up mcpbrain</title>
+<meta name="description" content="Three steps to set up mcpbrain on this Mac: connect Google, tell it about you, connect Claude Desktop.">
+<meta name="mcpbrain-token" content="__MCPBRAIN_TOKEN__">
 <link rel="icon" href="data:,">
-<title>mcpbrain setup</title>
-<style>
-  :root{
-    --accent:#0066ff; --accent-d:#0052cc;
-    --ink:#15181d; --muted:#6b7280; --line:#e6e8ec;
-    --bg:#f4f6f9; --card:#ffffff;
-    --ok:#157f3b; --ok-bg:#e7f6ed;
-    --wait:#9a6700; --wait-bg:#fbf3d8;
-    --idle:#5b6470; --idle-bg:#eef1f5;
-  }
-  *{box-sizing:border-box}
-  body{
-    margin:0; background:var(--bg); color:var(--ink);
-    font:15px/1.55 -apple-system,BlinkMacSystemFont,"Segoe UI",system-ui,sans-serif;
-    -webkit-font-smoothing:antialiased;
-  }
-  .wrap{max-width:660px;margin:0 auto;padding:48px 20px 64px}
-  header{margin:0 0 28px}
-  .brand{display:flex;align-items:center;gap:12px}
-  .dot{width:30px;height:30px;border-radius:9px;
-    background:linear-gradient(135deg,var(--accent),#3d8bff);flex:0 0 auto}
-  h1{font-size:24px;font-weight:680;letter-spacing:-.02em;margin:0}
-  .tagline{color:var(--muted);margin:6px 0 0;font-size:14.5px}
-  .card{
-    background:var(--card);border:1px solid var(--line);border-radius:16px;
-    padding:22px 24px;margin:16px 0;
-    box-shadow:0 1px 2px rgba(20,24,29,.04),0 6px 20px rgba(20,24,29,.03);
-  }
-  .card h2{display:flex;align-items:center;gap:12px;font-size:16.5px;font-weight:640;margin:0 0 6px}
-  .num{flex:0 0 auto;width:26px;height:26px;border-radius:50%;
-    background:var(--accent);color:#fff;font-size:13px;font-weight:700;
-    display:flex;align-items:center;justify-content:center}
-  .desc{color:var(--muted);margin:0 0 14px;font-size:14.5px}
-  .row{display:flex;align-items:center;gap:10px;flex-wrap:wrap}
-  button{font:inherit;font-weight:600;border-radius:10px;padding:9px 16px;cursor:pointer;
-    border:1px solid transparent;transition:background .12s,border-color .12s,opacity .12s}
-  button:focus-visible{outline:2px solid var(--accent);outline-offset:2px}
-  .primary{background:var(--accent);color:#fff}
-  .primary:hover{background:var(--accent-d)}
-  .ghost{background:#fff;border-color:var(--line);color:var(--ink)}
-  .ghost:hover{background:var(--idle-bg)}
-  input{font:inherit;padding:10px 12px;border:1px solid var(--line);border-radius:10px;
-    min-width:240px;flex:1 1 240px;background:#fff}
-  input:focus{outline:none;border-color:var(--accent);box-shadow:0 0 0 3px rgba(0,102,255,.15)}
-  .badge{display:inline-flex;align-items:center;gap:6px;border-radius:999px;
-    padding:3px 11px;font-size:13px;font-weight:600;background:var(--idle-bg);color:var(--idle)}
-  .badge::before{content:"";width:7px;height:7px;border-radius:50%;background:currentColor;opacity:.9}
-  .badge.ok{background:var(--ok-bg);color:var(--ok)}
-  .badge.wait{background:var(--wait-bg);color:var(--wait)}
-  .badge.hidden{display:none}
-  .hidden{display:none}   /* generic: hides #home-status + any .card toggled by renderHome */
-  .note{color:var(--muted);font-size:13px;margin:12px 0 0}
-  .scopes{color:var(--muted);font-size:13px;margin:8px 0 0}
-  .status-list{margin:4px 0 0;display:grid;gap:1px;background:var(--line);
-    border:1px solid var(--line);border-radius:12px;overflow:hidden}
-  .status-list div{display:flex;justify-content:space-between;align-items:center;
-    gap:12px;background:#fff;padding:11px 14px}
-  .status-list dt{color:var(--muted);font-size:14px}
-  .status-list dd{margin:0;font-weight:600;font-variant-numeric:tabular-nums}
-  footer{color:var(--muted);font-size:13px;text-align:center;margin-top:28px}
-  .field{margin:10px 0 0}
-  .field-head{display:flex;align-items:center;justify-content:space-between;
-    margin:0 0 4px;font-size:13px;font-weight:600;color:var(--ink)}
-  .copy{font-size:12px;font-weight:600;padding:4px 10px;border-radius:8px;
-    background:#fff;border:1px solid var(--line);color:var(--ink);cursor:pointer}
-  .copy:hover{background:var(--idle-bg)}
-  .spec{margin:0;padding:11px 13px;border:1px solid var(--line);border-radius:10px;
-    background:#f9fafb;font:12.5px/1.5 ui-monospace,SFMono-Regular,Menlo,monospace;
-    white-space:pre-wrap;word-break:break-word;max-height:240px;overflow:auto;color:var(--ink)}
-  details.howto{margin:8px 0;border:1px solid #e6e8ec;border-radius:8px;padding:6px 10px}
-  details.howto summary{cursor:pointer;font-weight:600;color:#2563eb}
-  details.howto img{max-width:100%;border:1px solid #e6e8ec;border-radius:6px;margin:8px 0}
-  details.howto ol{margin:6px 0 6px 18px}
-  .copybtn{font-size:12px;margin-left:6px}
-</style>
+<link rel="stylesheet" href="/static/console.css">
+<script src="/static/console.js"></script>
 </head>
 <body>
-<section id="home-status" class="hidden" style="max-width:660px;margin:0 auto;padding:48px 20px 64px">
-  <div id="self-heal-banners"></div>
-  <h2>mcpbrain <span id="hs-version"></span></h2>
-  <div id="hs-health"></div>
-  <div id="conn-cards" style="margin:16px 0"></div>
-  <div id="backfill-progress" style="margin:16px 0;color:#6b7280;font-size:14px"></div>
-  <p id="privacy-note" style="color:#6b7280;font-size:13px">Everything stays on this Mac. An encrypted backup runs automatically so the brain can be recovered.</p>
-</section>
+<a class="skip" href="#main">Skip to setup</a>
 
-<main class="wrap">
+<header class="bar">
+  <div class="bar__in">
+    <span class="wordmark">mcpbrain</span>
+    <div class="bar__end">
+      <button class="btn btn--sm mode" type="button" data-mode-toggle aria-label="Switch between light and dark mode">
+        <svg class="sun" viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="12" r="4"/><path d="M12 2v2M12 20v2M4.93 4.93l1.41 1.41M17.66 17.66l1.41 1.41M2 12h2M20 12h2M4.93 19.07l1.41-1.41M17.66 6.34l1.41-1.41"/></svg>
+        <svg class="moon" viewBox="0 0 24 24" aria-hidden="true"><path d="M20.5 14.5A8.5 8.5 0 0 1 9.5 3.5a8.5 8.5 0 1 0 11 11z"/></svg>
+      </button>
+    </div>
+  </div>
+</header>
+
+<main id="main" class="setup">
   <header>
-    <div class="brand"><span class="dot"></span><h1>mcpbrain setup</h1></div>
-    <p class="tagline">Connect your Google account and link mcpbrain to Claude Desktop. Everything stays on this machine.</p>
+    <h1>Set up mcpbrain</h1>
+    <p>Three steps, in order. Everything stays on this Mac.</p>
   </header>
+  <noscript><p class="banner">Setup needs JavaScript. Turn it on for this page to continue.</p></noscript>
+  <div class="banner banner--bad" id="offline" role="alert" hidden>
+    <span>mcpbrain is not responding. Start it from the menu bar, then open setup again from there.</span>
+  </div>
 
-  <section id="step-google" class="card">
-    <h2><span class="num">1</span>Connect Google</h2>
-    <p class="desc">Grant read-only access to Gmail and Drive (and Calendar if available). A browser tab opens for consent.</p>
-    <div class="row">
-      <button class="primary" onclick="startAuth()">Connect Google</button>
-      <span id="g-state" class="badge idle">Not connected</span>
+  <section class="panel step" id="step-google" aria-labelledby="google-h">
+    <div class="step__head"><span class="num" aria-hidden="true">1</span><h2 id="google-h">Connect Google</h2></div>
+    <p>Grant read-only access to Gmail, Drive and Calendar. A browser tab opens for you to agree.</p>
+    <div class="acts">
+      <button class="btn btn--primary" type="button" id="google-btn" data-step-action>Connect Google</button>
+      <span class="chip chip--quiet" id="g-state" role="status">Not connected</span>
     </div>
-    <p id="g-scopes" class="scopes"></p>
-    <p class="note">Connected means a credential is stored on this machine. If syncs fail later, run this step again.</p>
+    <p class="muted small" id="g-scopes"></p>
+    <p class="small">Backup: <span id="backup-status" role="status">waiting for Google sign-in.</span></p>
+    <p class="muted small">Once Google is connected, mcpbrain restores your brain if a backup exists for your account, or turns on encrypted backup for a fresh start. Only your organisation’s escrowed key can restore it.</p>
   </section>
 
-  <section id="step-profile" class="card">
-    <h2><span class="num">2</span>About you <span style="font-weight:500;color:var(--muted)">(optional)</span></h2>
-    <p class="desc">Your name, email, and role drive action attribution and the extraction prompts. The organisations you work across (work, study, church, personal&hellip;) become the org tags everything is classified against; email domains are optional and help classify senders. Leave blank to keep the defaults.</p>
-    <div class="row">
-      <input id="owner_name" type="text" placeholder="Your full name (e.g. Dana Okafor)" autocomplete="off" spellcheck="false">
-    </div>
-    <div class="row" style="margin-top:8px">
-      <input id="owner_email" type="text" placeholder="Your email address" autocomplete="off" spellcheck="false">
-    </div>
-    <div class="row" style="margin-top:8px">
-      <input id="owner_role" type="text" placeholder="Your role (e.g. Operations Manager)" autocomplete="off" spellcheck="false">
-    </div>
-    <div id="org-rows">
-      <div class="row org-row" style="margin-top:8px">
-        <input class="org-name" name="org-name" type="text" placeholder="Organisation name" autocomplete="off" spellcheck="false" style="flex:1 1 160px;min-width:160px">
-        <input class="org-domains" name="org-domains" type="text" placeholder="Email domains (e.g. acme.com, comma-separated)" autocomplete="off" spellcheck="false" style="flex:2 1 220px;min-width:220px">
+  <section class="panel step" id="step-profile" aria-labelledby="profile-h">
+    <div class="step__head"><span class="num" aria-hidden="true">2</span><h2 id="profile-h">About you</h2></div>
+    <p>Your name and email attribute actions to you. Everything is tagged against the organisations you work across; email domains help classify senders.</p>
+    <form class="fields" id="profile-form" novalidate>
+      <div class="field">
+        <label for="owner_name">Full name</label>
+        <input class="input" id="owner_name" type="text" placeholder="For example Dana Okafor" autocomplete="name" spellcheck="false">
       </div>
-    </div>
-    <div class="row" style="margin-top:8px">
-      <button class="ghost" type="button" onclick="addOrgRow()">+ Add organisation</button>
-    </div>
-    <div class="row" style="margin-top:14px">
-      <label style="display:flex;flex-direction:column;gap:4px;font-size:14px;font-weight:600;color:var(--ink);flex:1">Timezone (used for deadlines &amp; daily digests)
-        <select id="timezone" required></select>
-      </label>
-    </div>
-    <div class="row" style="margin-top:12px">
-      <button class="primary" onclick="saveProfile()">Save</button>
-      <span id="p-state" class="badge idle hidden"></span>
+      <div class="field">
+        <label for="owner_email">Email</label>
+        <input class="input" id="owner_email" type="email" autocomplete="email" spellcheck="false">
+      </div>
+      <div class="field">
+        <label for="owner_role">Role <span class="muted">(optional)</span></label>
+        <input class="input" id="owner_role" type="text" placeholder="For example Operations Manager" autocomplete="organization-title">
+      </div>
+      <div class="field">
+        <label for="timezone">Timezone</label>
+        <select id="timezone" class="input" required><option value="">Loading timezones</option></select>
+        <span class="help">Deadlines and daily digests use this.</span>
+      </div>
+      <div class="orgs" role="group" aria-labelledby="orgs-h">
+        <span class="field"><span class="label" id="orgs-h">Organisations and their email domains</span></span>
+        <div class="orgs" id="org-rows"></div>
+        <div><button class="btn" type="button" id="org-add">Add organisation</button></div>
+      </div>
+      <div class="form-end" style="justify-content: flex-start;">
+        <button class="btn" type="submit" id="profile-save" data-step-action>Save</button>
+        <span class="said" id="p-state" role="status" hidden></span>
+      </div>
+    </form>
+  </section>
+
+  <section class="panel step" id="step-connect" aria-labelledby="connect-h">
+    <div class="step__head"><span class="num" aria-hidden="true">3</span><h2 id="connect-h">Connect Claude Desktop</h2></div>
+    <p>Do this last. It restarts Claude Desktop so it loads your brain, so any open Claude Desktop chat closes and reopens.</p>
+    <div class="acts">
+      <button class="btn" type="button" id="connect-btn" data-step-action>Connect and restart Claude Desktop</button>
+      <span class="chip chip--quiet" id="connect-state" role="status">Ready when you are</span>
     </div>
   </section>
 
-  <section id="step-connect" class="card">
-    <h2><span class="num">3</span>Connect Claude Desktop</h2>
-    <p class="desc">Do this <strong>last</strong>. It restarts Claude Desktop so it loads your brain — any open Claude Desktop chat will close and reopen.</p>
-    <div class="row">
-      <button class="primary" id="connect-btn" onclick="connectDesktop()">Connect &amp; restart Claude Desktop</button>
-      <span id="connect-state" class="badge idle">Ready when you are</span>
-    </div>
+  <section class="panel step" id="step-done" aria-labelledby="done-h" hidden>
+    <h2 id="done-h">You’re set up</h2>
+    <p>The brain is running on this Mac. The recurring background tasks (enrichment, meeting packs and the gardeners) are created by <code>/mcpbrain:install</code> as Local scheduled tasks, so there’s nothing more to set up here. Start asking questions in Claude.</p>
+    <p class="muted small" id="records-state"></p>
+    <div class="acts"><a class="btn" href="/dashboard" id="done-btn" data-step-action>Open the console</a></div>
   </section>
 
-  <section id="step-projects" class="card">
-    <h2>You're set up</h2>
-    <p class="desc">The brain is installed and running on this Mac. The recurring background tasks (enrich, meeting-packs, gardener, reference-gardener) are created for you by <code>/mcpbrain:install</code> as Local scheduled tasks, and the brain is served through its MCP tools — there's nothing to set up or attach here, just start asking questions in Claude or Cowork.</p>
-  </section>
-
-  <section id="step-backup" class="card">
-    <h2>Backup &amp; recovery</h2>
-    <p class="desc">Automatic. Once you connect Google, mcpbrain either <b>restores your brain</b> if a backup already exists for your account, or <b>turns on encrypted backup</b> if it's a fresh start. Your data never leaves in cleartext — only an admin-escrowed key can restore it. No setting to choose.</p>
-    <div class="row">
-      <span id="backup-status" class="badge idle">Waiting for Google sign-in…</span>
-    </div>
-    <details class="sub">
-      <summary>Fleet setup (<span id="fleet-tenant-name">your organisation</span>)</summary>
-      <p class="desc">This is your organisation's <span id="fleet-tenant-name-2">mcpbrain</span> fleet folder, used automatically. Change it only if a different fleet folder was set up for you.</p>
-      <label>Fleet folder ID
-        <input id="fleet_folder_id" type="text" placeholder="Loading…">
-      </label>
-      <label>Escrow folder ID (backup key)
-        <input id="fleet_escrow_folder_id" type="text" placeholder="Loading…">
-      </label>
-      <button id="fleet-save-btn" class="primary" type="button" onclick="saveFleet()" disabled>Save fleet settings</button>
-      <span id="fleet-status" class="badge idle hidden"></span>
-    </details>
-  </section>
-
-  <section id="step-status" class="card">
-    <h2>Status</h2>
-    <p class="desc">Live state of the background daemon.</p>
-    <dl class="status-list">
-      <div><dt>Indexed items</dt><dd id="st-count">…</dd></div>
-      <div><dt>Enriched items</dt><dd id="st-enriched">…</dd></div>
-      <div><dt>Google</dt><dd><span id="st-google" class="badge idle">…</span></dd></div>
-      <div><dt>Daemon</dt><dd><span id="st-daemon" class="badge idle">…</span></dd></div>
-    </dl>
-  </section>
-
-  <footer>mcpbrain runs locally. The only things that leave this machine are an encrypted backup, if you enable it, and the queries you send Claude.</footer>
+  <p class="muted small">mcpbrain runs locally. The only things that leave this Mac are the encrypted backup and the questions you send Claude.</p>
 </main>
 
 <script>
-const T = "__MCPBRAIN_TOKEN__";
-const H = {headers:{Authorization:"Bearer " + T}};
-const P = (p, b) => fetch(p, {method:"POST", headers:H.headers, body:JSON.stringify(b || {})});
+"use strict";
+const C = window.mcpConsole;
+const api = C.api;
 const $ = id => document.getElementById(id);
 
-async function copySpec(elId, btn){
-  // The spec text is rendered to <pre> via HTML (with &lt; and &gt; escapes the
-  // browser already decoded), so reading textContent gives the user clean text
-  // ready to paste into the Cowork form. Falls back to a manual select if
-  // navigator.clipboard is unavailable.
-  const text = $(elId).textContent;
-  try{
-    await navigator.clipboard.writeText(text);
-    const orig = btn.textContent;
-    btn.textContent = "Copied";
-    setTimeout(() => { btn.textContent = orig; }, 1200);
-  }catch(e){
-    const range = document.createRange();
-    range.selectNodeContents($(elId));
-    const sel = window.getSelection();
-    sel.removeAllRanges(); sel.addRange(range);
+function el(tag, attrs, ...kids){
+  const n = document.createElement(tag);
+  for (const [k, v] of Object.entries(attrs || {})) {
+    if (v == null || v === false) continue;
+    if (k === "text") n.textContent = v;
+    else if (k === "class") n.className = v;
+    else if (k.startsWith("on")) n.addEventListener(k.slice(2), v);
+    else n.setAttribute(k, v === true ? "" : String(v));
   }
+  for (const kid of kids.flat()) if (kid != null && kid !== false) n.append(kid instanceof Node ? kid : document.createTextNode(String(kid)));
+  return n;
+}
+function chip(id, text, kind){            // kind: "ok" | "person" | "bad" | "quiet"
+  const c = $(id);
+  c.textContent = text;                   // server-derived text always via textContent
+  c.className = "chip chip--" + (kind || "quiet");
+}
+function said(node, text, kind){
+  node.textContent = text || "";
+  node.classList.remove("said--ok", "said--bad");
+  if (kind) node.classList.add("said--" + kind);
+  node.hidden = !text;
+}
+document.addEventListener("mcpconsole:offline", () => { $("offline").hidden = false; });
+document.addEventListener("mcpconsole:online", () => { $("offline").hidden = true; });
+
+// ---- step state ------------------------------------------------------------
+
+let googleOk = false, configured = false, desktopDone = false;
+
+/* One filled button at a time: the next thing to do. */
+function reflectSteps(){
+  const current = !googleOk ? "step-google" : !configured ? "step-profile"
+    : !desktopDone ? "step-connect" : "step-done";
+  document.querySelectorAll("[data-step-action]").forEach(b =>
+    b.classList.toggle("btn--primary", !!b.closest("#" + current)));
+  $("step-google").classList.toggle("is-done", googleOk);
+  $("step-profile").classList.toggle("is-done", configured);
+  $("step-connect").classList.toggle("is-done", desktopDone);
+  $("step-done").hidden = current !== "step-done";
 }
 
-function addOrgRow(){
-  const rows = $("org-rows");
-  const row = rows.querySelector(".org-row").cloneNode(true);
-  row.querySelectorAll("input").forEach(i => i.value = "");
-  rows.appendChild(row);
-}
-
-function collectOrgs(){
-  // Rows with a name become {name, domains:[...]}; blank rows are skipped.
-  const out = [];
-  document.querySelectorAll("#org-rows .org-row").forEach(row => {
-    const name = row.querySelector(".org-name").value.trim();
-    if(!name) return;
-    const domains = row.querySelector(".org-domains").value
-      .split(",").map(d => d.trim().toLowerCase()).filter(Boolean);
-    out.push({name: name, domains: domains});
+const SCOPE_WORDS = {gmail: "Gmail", drive: "Drive", calendar: "Calendar"};
+function scopeText(scopes){
+  const names = [];
+  (scopes || []).forEach(s => {
+    const key = String(s).split("/").pop().split(".")[0];
+    const w = SCOPE_WORDS[key];
+    if (w && !names.includes(w)) names.push(w);
   });
-  return out;
+  return names.length ? "Access granted: " + names.join(", ") + "." : "";
 }
 
-async function saveProfile(){
-  // Only post fields the user filled in. The daemon's write_config merges
-  // posted keys over saved ones, so sending "" for an untouched field would
-  // wipe a saved value.
-  const body = {};
-  const on = $("owner_name").value.trim();
-  if(on){
-    // Full name drives the owner entity id; first name is what the pipeline
-    // writes to actions.owner and the dashboard filters on.
-    body.owner_full_name = on;
-    body.owner_name = on.split(/\s+/)[0];
-  }
-  const oe = $("owner_email").value.trim();
-  if(oe) body.owner_email = oe;
-  const orole = $("owner_role").value.trim();
-  if(orole) body.owner_role = orole;
-  const orgRows = collectOrgs();
-  if(orgRows.length) body.orgs = orgRows;
-  const tz = $("timezone").value.trim();
-  if(tz) body.timezone = tz;
-  try{
-    await P("/api/config", body);
-    badge("p-state", "Saved", "ok"); $("p-state").classList.remove("hidden");
-  }catch(e){
-    badge("p-state", "Could not save", "wait"); $("p-state").classList.remove("hidden");
-  }
-}
-
-function badge(id, text, kind){            // kind: "ok" | "wait" | "idle"
-  const el = $(id);
-  el.textContent = text;                   // server-derived text always via textContent
-  el.className = "badge " + (kind || "idle");
-}
+// ---- 1 Connect Google ----------------------------------------------------------
 
 async function startAuth(){
-  badge("g-state", "Opening browser…", "wait");
-  try{ await P("/api/auth/start"); }catch(e){}
-  // Keep polling until the daemon reports connected — re-arm only when waiting.
+  chip("g-state", "Opening your browser", "quiet");
+  try { await api("/api/auth/start", {method: "POST"}); } catch (e) { /* the poll reports */ }
   pollAuth(true);
 }
 let _authPollScheduled = false;
 async function pollAuth(armed){
   _authPollScheduled = false;
-  try{
-    const j = await (await fetch("/api/status", H)).json();
-    if(j.google_connected){
-      const who = j.google_account ? (" as " + j.google_account) : "";
-      badge("g-state", "Connected" + who, "ok");
-      const names = (j.granted_scopes || [])
-        .map(s => String(s).split("/").pop().replace(".readonly", ""))
-        .filter(Boolean);
-      $("g-scopes").textContent = names.length ? "Access granted: " + names.join(", ") : "";
-    }else{
-      badge("g-state", armed ? "Waiting for consent…" : "Not connected", armed ? "wait" : "idle");
-      if(armed && !_authPollScheduled){
-        _authPollScheduled = true;
-        setTimeout(() => pollAuth(true), 2000);
-      }
-    }
-  }catch(e){
-    if(armed && !_authPollScheduled){
-      _authPollScheduled = true;
-      setTimeout(() => pollAuth(true), 2000);
-    }
-  }
-}
-
-
-async function connectDesktop(){
-  const btn = $("connect-btn");
-  btn.disabled = true;
-  badge("connect-state", "Restarting…", "wait");
-  try{
-    const r = await (await P("/api/connect-desktop")).json();
-    if(r && r.relaunched){
-      badge("connect-state", "Restarting Claude Desktop — reopen it to use your brain", "ok");
-    }else{
-      badge("connect-state", (r && r.detail) || "Restart Claude Desktop manually", "wait");
-      btn.disabled = false;
-    }
-  }catch(e){
-    badge("connect-state", "Restart Claude Desktop manually", "wait");
-    btn.disabled = false;
-  }
-}
-
-function renderStatus(j){
-  $("st-count").textContent = (j.chunk_count != null) ? j.chunk_count : "—";
-  $("st-enriched").textContent = (j.enriched_count != null) ? j.enriched_count : "—";
-  const who = j.google_connected && j.google_account
-    ? "Connected as " + j.google_account
-    : (j.google_connected ? "Connected" : "Not connected");
-  badge("st-google", who, j.google_connected ? "ok" : "idle");
-  badge("st-daemon", j.paused ? "Paused" : "Running", j.paused ? "wait" : "ok");
-  // Mirror google_connected into Step 1's badge so the wizard reflects reality
-  // on page load, not just after the user clicks "Connect Google".
-  if(j.google_connected){
-    const who1 = j.google_account ? (" as " + j.google_account) : "";
-    badge("g-state", "Connected" + who1, "ok");
-    const names = (j.granted_scopes || [])
-      .map(s => String(s).split("/").pop().replace(".readonly", ""))
-      .filter(Boolean);
-    $("g-scopes").textContent = names.length ? "Access granted: " + names.join(", ") : "";
-    // Google is connected → run the one-shot automatic restore-or-backup.
-    autoBackup();
-  }
-  // (Enrichment status is shown by the connection card; the old spool counters
-  // were removed with the inline extractor step.)
-}
-function esc(s){ const d=document.createElement("div"); d.textContent=s; return d.innerHTML; }
-function renderConnections(conns){
-  const order = ["google","claude","backup","records","enrichment"];
-  const cards = order.filter(k => conns[k]).map(k => {
-    const c = conns[k];
-    const detail = c.detail ? ` — ${esc(c.detail)}` : "";
-    const fix = (k === "google" && c.state === "needs_action")
-      ? ' <button onclick="reconnectGoogle()">Reconnect</button>' : "";
-    const state = esc(c.state);
-    return `<div class="conn ${state}" style="margin:4px 0;padding:6px 10px;border:1px solid #e6e8ec;border-radius:8px"><b>${esc(k)}</b>: ${state}${detail}${fix}</div>`;
-  }).join("");
-  $("conn-cards").innerHTML = cards;
-  const banners = order.filter(k => conns[k] && conns[k].state === "needs_action")
-    .map(k => `<div style="background:#fff3cd;border:1px solid #ffc107;border-radius:8px;padding:8px 12px;margin:4px 0">${esc(conns[k].detail||k)}` +
-              (k==="google"?' <button onclick="reconnectGoogle()">Reconnect</button>':"") + `</div>`).join("");
-  $("self-heal-banners").innerHTML = banners;
-}
-
-function renderBackfill(bf){
-  const parts = Object.keys(bf).map(src => {
-    const s = bf[src];
-    return `${src}: ` + (s.done ? "history complete" : ("indexing… " + (s.reached || "recent")));
-  });
-  $("backfill-progress").textContent = parts.join(" · ");
-}
-
-// When configured, the dashboard (home-status) replaces the google + status steps,
-// but the actionable setup steps stay reachable so their buttons still work.
-const HIDE_WHEN_CONFIGURED = new Set(["step-google", "step-status"]);
-function renderHome(j){
-  const configured = !!j.is_configured;
-  $("home-status").classList.toggle("hidden", !configured);
-  // Hide the wizard's own header when configured (the dashboard carries the title).
-  const mh = document.querySelector("main > header");
-  if(mh) mh.classList.toggle("hidden", configured);
-  document.querySelectorAll("main > section.card").forEach(s => {
-    // Unconfigured: show every step. Configured: hide only the redundant ones.
-    s.classList.toggle("hidden", configured && HIDE_WHEN_CONFIGURED.has(s.id));
-  });
-  if(configured){
-    const h2 = document.querySelector("#step-profile h2");
-    if(h2 && h2.textContent.trim() !== "Your settings") h2.textContent = "Your settings";
-  }
-  if(!configured) return;
-  $("hs-version").textContent = j.version ? ("v" + j.version) : "";
-  $("hs-health").textContent = j.paused ? "Paused" : "Running";
-  renderConnections(j.connections || {});
-  renderBackfill(j.backfill || {});
-}
-
-async function reconnectGoogle(){ try{ await P("/api/auth/start"); }catch(e){} }
-
-// Backup is automatic and runs exactly once per page once Google is connected:
-// restore the brain if a backup exists, otherwise turn on encrypted backup.
-// There is no user choice — the server decides based on what's restorable and
-// whether the local store is already populated.
-let _autoBackupDone = false;
-async function autoBackup(){
-  if(_autoBackupDone) return;
-  _autoBackupDone = true;
-  badge("backup-status", "Checking for a backup…", "wait");
   try {
-    const r = await fetch("/api/backup/auto", {method:"POST", headers:{...H.headers, "Content-Type":"application/json"}, body:"{}"});
-    const j = await r.json();
-    if (j.action === "restored" && j.partial) {
-      // The store came back, but the records repo and settings did not.
-      badge("backup-status", "Brain restored, but your records and settings were not. "
-            + "Quit mcpbrain and run `mcpbrain restore --auto --force` in a terminal to "
-            + "restore them.", "wait");
-    } else if (j.action === "restored") {
-      badge("backup-status", "Brain restored from backup", "ok");
-    } else if (j.action === "backup_enabled") {
-      badge("backup-status", "Encrypted backup on", "ok");
-    } else if (j.action === "pending") {
-      _autoBackupDone = false;   // no account yet — let a later poll retry
-      badge("backup-status", "Waiting for Google sign-in…", "idle");
-    } else {
-      // 503 {retry:true}: detection was inconclusive (e.g. Drive unreachable);
-      // anything else failed. Either way a later status poll tries again.
-      _autoBackupDone = false;
-      badge("backup-status", "Could not set up backup — retrying"
-            + (j.error ? " (" + j.error + ")" : ""), "wait");
-    }
-  } catch(e) {
+    const j = await api("/api/status");
+    if (j.google_connected) { renderStatus(j); return; }
+    chip("g-state", armed ? "Waiting for you to agree in the browser" : "Not connected", armed ? "person" : "quiet");
+  } catch (e) { /* try again below */ }
+  if (armed && !_authPollScheduled) {
+    _authPollScheduled = true;
+    setTimeout(() => pollAuth(true), 2000);
+  }
+}
+$("google-btn").addEventListener("click", startAuth);
+
+// Backup is automatic and runs once per page once Google is connected: restore
+// the brain if a backup exists, otherwise turn on encrypted backup. No choice:
+// the server decides from what's restorable and whether the store has content.
+let _autoBackupDone = false;
+function backupLine(text, kind){ said($("backup-status"), text, kind); $("backup-status").hidden = false; }
+async function autoBackup(){
+  if (_autoBackupDone) return;
+  _autoBackupDone = true;
+  backupLine("checking for a backup.", null);
+  let j;
+  try {
+    j = await api("/api/backup/auto", {method: "POST"});
+  } catch (e) {
+    j = e.data || {};
+    if (e.offline) j = {};
+  }
+  if (j.action === "restored" && j.partial) {
+    // The store came back, but the records repo and settings did not.
+    backupLine("your brain was restored, but your records and settings were not. Quit mcpbrain "
+      + "and run mcpbrain restore --auto --force in a terminal to restore them.", "bad");
+  } else if (j.action === "restored") {
+    backupLine("your brain was restored from backup.", "ok");
+  } else if (j.action === "backup_enabled") {
+    backupLine("encrypted backup is on.", "ok");
+  } else if (j.action === "pending") {
+    _autoBackupDone = false;   // no account yet: a later poll retries
+    backupLine("waiting for Google sign-in.", null);
+  } else {
+    // 503 {retry:true}: detection was inconclusive (Drive unreachable, say);
+    // anything else failed. Either way a later status poll tries again.
     _autoBackupDone = false;
-    badge("backup-status", "Backup error: " + e, "wait");
+    backupLine("couldn’t set up backup yet. Trying again shortly.", "bad");
+    $("backup-status").title = j.error || "";
   }
 }
 
-async function saveFleet(){
-  // The fleet block is shallow-merged server-side, so always post BOTH keys
-  // together — a partial post would wipe the other. Empty strings clear a key.
-  const body = {fleet: {
-    folder_id: $("fleet_folder_id").value.trim(),
-    escrow_folder_id: $("fleet_escrow_folder_id").value.trim(),
-  }};
-  try{
-    await P("/api/config", body);
-    badge("fleet-status", "Saved", "ok"); $("fleet-status").classList.remove("hidden");
-  }catch(e){
-    badge("fleet-status", "Could not save", "wait"); $("fleet-status").classList.remove("hidden");
-  }
-}
-
-// Reflect persistent server state into the backup badge so it survives a reload
-// (a backup that was already enabled on a prior visit shows as on, not "waiting").
+// Reflect saved server state so a reload shows what is already done.
 function reflectStepBadges(conns){
   conns = conns || {};
   const bk = conns.backup || {};
-  if(bk.state === "ok" && !_autoBackupDone){
-    badge("backup-status", bk.detail && /restor/i.test(bk.detail) ? "Brain restored from backup" : "Encrypted backup on", "ok");
+  if (bk.state === "ok" && !_autoBackupDone) {
+    backupLine(bk.detail && /restor/i.test(bk.detail) ? "your brain was restored from backup." : "encrypted backup is on.", "ok");
   }
+  const cl = conns["claude"] || {};
+  if (cl.state === "ok") { desktopDone = true; chip("connect-state", "Connected", "ok"); }
+  const rec = conns["records"] || {};
+  $("records-state").textContent = rec.state === "ok" ? "Your records folder is ready."
+    : "Your records folder is being set up.";
+}
+
+function renderStatus(j){
+  googleOk = !!j.google_connected;
+  configured = !!j.is_configured;
+  if (googleOk) {
+    chip("g-state", j.google_account ? "Connected as " + j.google_account : "Connected", "ok");
+    $("g-scopes").textContent = scopeText(j.granted_scopes);
+    autoBackup();
+  } else if (!_authPollScheduled) {
+    chip("g-state", "Not connected", "quiet");
+  }
+  reflectStepBadges(j.connections);
+  reflectSteps();
 }
 
 async function refresh(){
-  try{
-    const j = await (await fetch("/api/status", H)).json();
-    renderStatus(j);
-    renderHome(j);
-    reflectStepBadges(j.connections);
-  }catch(e){}
+  try { renderStatus(await api("/api/status")); } catch (e) { /* offline banner shows */ }
   setTimeout(refresh, 3000);
 }
-refresh();
 
-// Populate the timezone dropdown, then prefill the whole form from saved config.
+// ---- 2 About you ---------------------------------------------------------------
+
+function orgRow(name, domains){
+  const n = el("input", {class: "input org-name", type: "text", "aria-label": "Organisation", placeholder: "Organisation name", autocomplete: "off", spellcheck: "false"});
+  n.value = name || "";
+  const d = el("input", {class: "input org-domains", type: "text", "aria-label": "Email domains", placeholder: "Email domains, for example example.org", autocomplete: "off", spellcheck: "false"});
+  d.value = (domains || []).join(", ");
+  const row = el("div", {class: "orgs__row org-row"}, n, d);
+  row.append(el("button", {class: "btn", type: "button", text: "Remove", "aria-label": "Remove this organisation", onclick: () => {
+    if (document.querySelectorAll("#org-rows .org-row").length > 1) row.remove(); else { n.value = ""; d.value = ""; }
+  }}));
+  return row;
+}
+$("org-add").addEventListener("click", () => {
+  const row = orgRow("", []);
+  $("org-rows").append(row);
+  row.querySelector("input").focus();
+});
+function collectOrgs(){
+  // Rows with a name become {name, domains:[...]}; blank rows are skipped.
+  const out = [];
+  document.querySelectorAll("#org-rows .org-row").forEach(row => {
+    const name = row.querySelector(".org-name").value.trim();
+    if (!name) return;
+    const domains = row.querySelector(".org-domains").value
+      .split(",").map(x => x.trim().toLowerCase()).filter(Boolean);
+    out.push({name: name, domains: domains});
+  });
+  return out;
+}
+
+async function saveProfile(ev){
+  if (ev) ev.preventDefault();
+  // Only post fields the user filled in. write_config merges posted keys
+  // over saved ones, so sending "" for an untouched field would wipe it.
+  const body = {};
+  const full = $("owner_name").value.trim();
+  if (full) {
+    // Full name drives the owner entity id; the first name is what actions
+    // are attributed to.
+    body.owner_full_name = full;
+    body.owner_name = full.split(/\s+/)[0];
+  }
+  const email = $("owner_email").value.trim();
+  if (email) body.owner_email = email;
+  const role = $("owner_role").value.trim();
+  if (role) body.owner_role = role;
+  const orgs = collectOrgs();
+  if (orgs.length) body.orgs = orgs;
+  const tz = $("timezone").value.trim();
+  if (tz) body.timezone = tz;
+  const btn = $("profile-save");
+  btn.disabled = true;
+  try {
+    await api("/api/config", {method: "POST", body});
+    const missing = [!full && "your name", !email && "your email", !orgs.length && "an organisation"].filter(Boolean);
+    said($("p-state"), missing.length ? "Saved. Add " + missing.join(", ") + " to finish this step." : "Saved.", missing.length ? null : "ok");
+    try { renderStatus(await api("/api/status")); } catch (e) { /* the poll catches up */ }
+  } catch (e) {
+    said($("p-state"), "Not saved. " + (e.offline ? "mcpbrain is not responding." : e.message), "bad");
+  } finally {
+    btn.disabled = false;
+  }
+}
+$("profile-form").addEventListener("submit", saveProfile);
+
 async function populateTimezones(selected){
-  try{
-    const j = await (await fetch("/api/timezones", H)).json();
-    const sel = $("timezone");
-    sel.innerHTML = "";
-    let detected = "";
-    try{ detected = Intl.DateTimeFormat().resolvedOptions().timeZone || ""; }catch(e){}
-    (j.zones||[]).forEach(z => {
-      const o = document.createElement("option");
-      o.value = z.value; o.textContent = z.label;
-      if(z.value === (selected || detected)) o.selected = true;
-      sel.appendChild(o);
-    });
-  }catch(e){}
+  const sel = $("timezone");
+  let detected = "";
+  try { detected = Intl.DateTimeFormat().resolvedOptions().timeZone || ""; } catch (e) { /* none */ }
+  try {
+    const j = await api("/api/timezones");
+    sel.replaceChildren(...(j.zones || []).map(z => {
+      const o = el("option", {value: z.value, text: z.label});
+      if (z.value === (selected || detected)) o.selected = true;
+      return o;
+    }));
+  } catch (e) {
+    sel.replaceChildren(el("option", {value: selected || detected, text: selected || detected || "Couldn’t load timezones"}));
+  }
 }
 
 async function prefillFromConfig(){
   let c = {};
-  let configLoaded = false;
-  try{ c = await (await fetch("/api/config", H)).json(); configLoaded = true; }catch(e){ c = {}; }
-  if(c.owner_full_name) $("owner_name").value = c.owner_full_name;
-  if(c.owner_email) $("owner_email").value = c.owner_email;
-  if(c.owner_role) $("owner_role").value = c.owner_role;
-  // Rebuild one org row per saved org (domains joined by ", ").
-  const orgs = c.orgs || [];
-  if(orgs.length){
-    const rows = $("org-rows");
-    rows.querySelectorAll(".org-row:not(:first-child)").forEach(r => r.remove());
-    const tmpl = rows.querySelector(".org-row");
-    orgs.forEach((o, i) => {
-      const row = i === 0 ? tmpl : tmpl.cloneNode(true);
-      row.querySelector(".org-name").value = o.name || "";
-      row.querySelector(".org-domains").value = (o.domains || []).join(", ");
-      if(i > 0) rows.appendChild(row);
-    });
-  }
-  const t = c.tenant;
-  if(t && t.display_name){
-    $("fleet-tenant-name").textContent = t.display_name;
-    $("fleet-tenant-name-2").textContent = t.display_name + " mcpbrain";
-  }
-  const fleet = c.fleet || {};
-  if(fleet.folder_id) $("fleet_folder_id").value = fleet.folder_id;
-  if(fleet.escrow_folder_id) $("fleet_escrow_folder_id").value = fleet.escrow_folder_id;
-  // Only allow saving once the real saved/default values have loaded —
-  // clicking Save before that (a slow or failed /api/config fetch) would post
-  // whatever the inputs currently hold, and an empty string clears the key
-  // server-side rather than leaving it untouched.
-  if(configLoaded) $("fleet-save-btn").disabled = false;
-  // Prefill name + email from the connected Google account when the user hasn't
-  // saved their own yet (status carries google_name + google_account). Never
-  // overrides a saved value.
-  try{
-    const s = await (await fetch("/api/status", H)).json();
-    if(!$("owner_name").value && s.google_name) $("owner_name").value = s.google_name;
-    if(!$("owner_email").value && s.google_account) $("owner_email").value = s.google_account;
-  }catch(e){}
+  try { c = await api("/api/config"); } catch (e) { c = {}; }
+  if (c.owner_full_name) $("owner_name").value = c.owner_full_name;
+  if (c.owner_email) $("owner_email").value = c.owner_email;
+  if (c.owner_role) $("owner_role").value = c.owner_role;
+  const orgs = c.orgs && c.orgs.length ? c.orgs : [{name: "", domains: []}];
+  $("org-rows").replaceChildren(...orgs.map(o => orgRow(o.name, o.domains)));
+  // Prefill name and email from the connected Google account when none are
+  // saved yet. Never overrides a saved value.
+  try {
+    const s = await api("/api/status");
+    if (!$("owner_name").value && s.google_name) $("owner_name").value = s.google_name;
+    if (!$("owner_email").value && s.google_account) $("owner_email").value = s.google_account;
+  } catch (e) { /* stays blank */ }
   await populateTimezones(c.timezone || "");
 }
-prefillFromConfig();
 
-// Records scaffolding used to be a button; it's idempotent (only creates missing
-// files), so just run it once on load to ensure the brain folder has its structure.
-P("/api/records/scaffold").catch(() => {});
+// ---- 3 Connect Claude Desktop ------------------------------------------------
+
+async function connectDesktop(){
+  const btn = $("connect-btn");
+  btn.disabled = true;
+  chip("connect-state", "Restarting Claude Desktop", "quiet");
+  try {
+    const r = await api("/api/connect-desktop", {method: "POST"});
+    if (r && r.relaunched) {
+      desktopDone = true;
+      chip("connect-state", "Restarting. Reopen Claude Desktop to use your brain", "ok");
+      reflectSteps();
+      return;
+    }
+    chip("connect-state", "Restart Claude Desktop yourself to finish", "person");
+  } catch (e) {
+    chip("connect-state", "Restart Claude Desktop yourself to finish", "person");
+  }
+  btn.disabled = false;
+}
+$("connect-btn").addEventListener("click", connectDesktop);
+
+refresh();
+prefillFromConfig();
+// Records scaffolding is idempotent (only creates missing files), so it runs
+// once on load to make sure the records folder has its structure.
+api("/api/records/scaffold", {method: "POST"}).catch(() => {});
 </script>
 </body>
 </html>

@@ -153,7 +153,9 @@ def _undo_bandit(store, home, row):
     config.write_config(home, {"recall_max_distance": p["before"]["recall_max_distance"]})
 
 
-_SUPPRESS_TYPES = ("tidy_suppress", "entity_suppressed")
+# Every change that hides or restores an entity: an undo of any one of them is
+# refused while a later, not-undone one of these touched the same entity.
+_SUPPRESS_TYPES = ("tidy_suppress", "entity_suppressed", "entity_unsuppressed")
 
 
 def _later_change_of(db, row: dict, types) -> bool:
@@ -375,6 +377,26 @@ def _undo_entity_suppressed(store, home, row):
     _graph_changed()
 
 
+def _undo_entity_unsuppressed(store, home, row):
+    """Hide the entity again with the suppression the restore removed (same
+    reason and time), if it is still visible and nothing has hidden or
+    restored it since."""
+    p = _need_payload(row)
+    prior = p["before"].get("suppressed") or {}
+    with store._connect(write=True) as db:
+        cur = db.execute("SELECT 1 FROM entity_suppressions WHERE entity_id=?",
+                         (row["ref_id"],)).fetchone()
+        exists = db.execute("SELECT 1 FROM entities WHERE id=?",
+                            (row["ref_id"],)).fetchone()
+        if cur is not None or exists is None or _later_change_of(db, row, _SUPPRESS_TYPES):
+            raise Refused(CHANGED_SINCE)
+        db.execute("INSERT INTO entity_suppressions(entity_id, reason, suppressed_at) "
+                   "VALUES(?, ?, ?)",
+                   (row["ref_id"], prior.get("reason") or "",
+                    prior.get("suppressed_at") or _now_iso()))
+    _graph_changed()
+
+
 def _undo_finding_dismissed(store, home, row):
     """Reopen the findings a dismiss closed, if they are still closed by it."""
     p = _need_payload(row)
@@ -414,6 +436,7 @@ UNDO: dict[str, Callable] = {
     "tidy_org_rewrite": _undo_tidy_org_rewrite,
     "capture_action_update": _undo_action_status,
     "finding_dismissed": _undo_finding_dismissed,
+    "entity_unsuppressed": _undo_entity_unsuppressed,
     # legacy revert_ref forms
     "action_snoozed": _undo_snooze,
     "role_corrected": _undo_role,

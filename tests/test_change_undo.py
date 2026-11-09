@@ -752,3 +752,56 @@ def test_consolidation_undo_refused_when_graduated_file_edited(tmp_path, monkeyp
         assert {r[0] for r in db.execute(
             "SELECT memory_tier FROM chunks WHERE doc_id LIKE 'acme-ep-%'")} == {"hot"}
     assert _head_subject(repo) == head
+
+
+# --- entity_unsuppressed (Settings > Hidden entities > Restore) -----------------
+
+def test_entity_unsuppressed_undo_hides_it_again_with_the_prior_reason(tmp_path):
+    from mcpbrain import graph_view
+    s = _store(tmp_path)
+    s.upsert_entity("acme-junk", "Acme Junk", "person")
+    s.suppress_entity("acme-junk", reason="No links to anything")
+    before = _suppression(s, "acme-junk")
+    out = graph_view.restore_entity(s, "acme-junk")
+    assert out["ok"] is True
+    assert _suppression(s, "acme-junk") is None
+    row = _last(s, "entity_unsuppressed")
+    assert row["id"] == out["change_id"] and row["ref_id"] == "acme-junk"
+    p = _payload(row)
+    assert p["before"]["suppressed"] == before and p["after"]["suppressed"] is None
+    assert change_undo.undo(s, str(tmp_path), row["id"]) == {"ok": True, "reason": ""}
+    assert _suppression(s, "acme-junk") == before
+    # A second undo of the same restore is refused.
+    assert change_undo.undo(s, str(tmp_path), row["id"])["reason"] == "Already undone"
+
+
+def test_entity_unsuppressed_undo_refused_when_hidden_again_since(tmp_path):
+    from mcpbrain import graph_view
+    s = _store(tmp_path)
+    s.upsert_entity("acme-junk", "Acme Junk", "person")
+    s.suppress_entity("acme-junk", reason="first")
+    row_id = graph_view.restore_entity(s, "acme-junk")["change_id"]
+    s.suppress_entity("acme-junk", reason="user hid it")
+    held = _suppression(s, "acme-junk")
+    assert change_undo.undo(s, str(tmp_path), row_id) == {"ok": False, "reason": CHANGED_SINCE}
+    assert _suppression(s, "acme-junk") == held
+
+
+def test_restore_after_graph_hide_refuses_the_older_hide_undo(tmp_path):
+    from mcpbrain import graph_view
+    s = _store(tmp_path)
+    s.upsert_entity("acme-junk", "Acme Junk", "person")
+    graph_view.suppress_entity(s, "acme-junk")
+    hide = _last(s, "entity_suppressed")
+    graph_view.restore_entity(s, "acme-junk")
+    # Already visible: undoing the hide has nothing to take back.
+    assert change_undo.undo(s, str(tmp_path), hide["id"]) == {"ok": False,
+                                                              "reason": CHANGED_SINCE}
+
+
+def test_restore_entity_not_hidden(tmp_path):
+    from mcpbrain import graph_view
+    s = _store(tmp_path)
+    s.upsert_entity("acme-junk", "Acme Junk", "person")
+    assert graph_view.restore_entity(s, "acme-junk") == {"ok": False, "error": "not_hidden"}
+    assert graph_view.restore_entity(s, "nobody") == {"ok": False, "error": "not_found"}

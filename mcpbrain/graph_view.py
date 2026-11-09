@@ -528,3 +528,41 @@ def suppress_entity(store, entity_id: str) -> dict:
     if ok:
         store.record_change("entity_suppressed", ref_id=entity_id, summary="suppressed via graph")
     return {"ok": bool(ok)}
+
+
+def list_suppressed(store) -> list[dict]:
+    """Every hidden entity, newest first: {id, name, type, suppressed_at, reason}.
+
+    A suppression whose entity row has gone (merged away) is still listed, by
+    id, so it can be restored or seen; its name falls back to the id."""
+    with store._connect() as db:
+        rows = db.execute(
+            "SELECT s.entity_id AS id, COALESCE(e.name, s.entity_id) AS name, "
+            "COALESCE(e.type, '') AS type, COALESCE(s.suppressed_at, '') AS suppressed_at, "
+            "COALESCE(s.reason, '') AS reason "
+            "FROM entity_suppressions s LEFT JOIN entities e ON e.id = s.entity_id "
+            "ORDER BY s.suppressed_at DESC, s.entity_id").fetchall()
+    return [dict(r) for r in rows]
+
+
+def restore_entity(store, entity_id: str) -> dict:
+    """Bring a hidden entity back into the graph, as an undoable change.
+
+    {"ok": True, "change_id": N} on success; {"ok": False, "error": "not_found"}
+    for an unknown entity, {"ok": False, "error": "not_hidden"} when it is not
+    hidden. The change_log row (entity_unsuppressed) records the suppression it
+    removed, so undo hides the entity again with the same reason."""
+    ent = store.get_entity(entity_id)
+    if ent is None:
+        return {"ok": False, "error": "not_found"}
+    name = ent.get("name") or entity_id
+    change = {"change_type": "entity_unsuppressed", "source": "dashboard",
+              "summary": f"Restored {name} to the graph"}
+    if not store.unsuppress_entity(entity_id, change=change):
+        return {"ok": False, "error": "not_hidden"}
+    try:
+        from mcpbrain import entity_resource
+        entity_resource.invalidate_cache()
+    except Exception:  # noqa: BLE001 -- the restore itself already committed
+        pass
+    return {"ok": True, "change_id": change.get("change_log_id")}

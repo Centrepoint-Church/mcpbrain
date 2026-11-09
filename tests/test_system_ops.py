@@ -583,3 +583,13 @@ def test_support_report_route(server):
     assert r.headers["Content-Type"].startswith("text/plain")
     text = r.read().decode()
     assert "dana" not in text.lower() and "/Users/" not in text
+
+
+def test_system_route_says_whether_login_start_is_supported(server, monkeypatch):
+    srv, d, base = server
+    monkeypatch.setattr(system_ops.sys, "platform", "linux")
+    assert json.loads(_req("GET", base + "/api/system", srv.token).read())[
+        "login_supported"] is False
+    monkeypatch.setattr(system_ops.sys, "platform", "darwin")
+    assert json.loads(_req("GET", base + "/api/system", srv.token).read())[
+        "login_supported"] is True

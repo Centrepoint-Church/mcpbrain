@@ -1,0 +1,1182 @@
+<!doctype html>
+<html lang="en-AU">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Settings, mcpbrain</title>
+<meta name="description" content="Your profile, how the console looks, what goes into the brain, what it may change by itself, its connections, hidden entities and system tools.">
+<meta name="mcpbrain-token" content="__MCPBRAIN_TOKEN__">
+<link rel="icon" href="data:,">
+<link rel="stylesheet" href="/static/console.css">
+<script src="/static/console.js"></script>
+</head>
+<body>
+<a class="skip" href="#main">Skip to settings</a>
+
+<header class="bar">
+  <div class="bar__in">
+    <a class="wordmark" href="/dashboard" aria-label="mcpbrain overview">mcpbrain</a>
+    <nav class="tabs" aria-label="Console">
+      <a class="tab" href="/dashboard">Overview</a>
+      <a class="tab" href="/graph">Graph</a>
+      <a class="tab" href="/settings" aria-current="page">Settings</a>
+    </nav>
+    <div class="bar__end">
+      <span class="chip chip--quiet" id="health-chip" role="status">Checking</span>
+      <span class="asof">Updated <span id="asof">not yet</span></span>
+      <button class="btn btn--sm mode" type="button" data-mode-toggle aria-label="Switch between light and dark mode">
+        <svg class="sun" viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="12" r="4"/><path d="M12 2v2M12 20v2M4.93 4.93l1.41 1.41M17.66 17.66l1.41 1.41M2 12h2M20 12h2M4.93 19.07l1.41-1.41M17.66 6.34l1.41-1.41"/></svg>
+        <svg class="moon" viewBox="0 0 24 24" aria-hidden="true"><path d="M20.5 14.5A8.5 8.5 0 0 1 9.5 3.5a8.5 8.5 0 1 0 11 11z"/></svg>
+      </button>
+    </div>
+  </div>
+</header>
+
+<main id="main" class="page">
+  <h1>Settings</h1>
+  <nav class="jump" aria-label="Settings sections"><a href="#profile">Profile</a><a href="#appearance">Appearance</a><a href="#sources">Sources</a><a href="#automatic">Automatic changes</a><a href="#connections">Connections</a><a href="#hidden">Hidden entities</a><a href="#system">System</a><a href="#advanced">Advanced</a></nav>
+  <noscript><p class="banner">Settings load with JavaScript. Turn it on for this page to change them.</p></noscript>
+  <div class="banner banner--bad" id="offline" role="alert" hidden>
+    <span>mcpbrain is not responding. If it stopped or restarted, start it from the menu bar and open the console from there. Nothing on this page saves until it’s back.</span>
+    <button class="btn btn--sm" type="button" id="offline-retry">Try again</button>
+  </div>
+
+  <div>
+    <section class="section" id="profile" aria-labelledby="profile-h" aria-busy="true">
+      <header>
+        <h2 id="profile-h">Profile</h2>
+        <p>Actions are attributed to you by name, and everything is tagged against these organisations.</p>
+      </header>
+      <form class="fields" id="profile-form" novalidate>
+        <div class="field">
+          <label for="owner_name">Full name</label>
+          <input class="input" id="owner_name" type="text" autocomplete="name" spellcheck="false">
+          <span class="help" id="owner_name-help"></span>
+        </div>
+        <div class="field">
+          <label for="owner_email">Email</label>
+          <input class="input" id="owner_email" type="email" autocomplete="email" spellcheck="false">
+          <span class="help" id="owner_email-help"></span>
+        </div>
+        <div class="field">
+          <label for="owner_role">Role</label>
+          <input class="input" id="owner_role" type="text" autocomplete="organization-title">
+          <span class="help">Optional. Used when drafting in your voice.</span>
+        </div>
+        <div class="field">
+          <label for="timezone">Timezone</label>
+          <select class="input" id="timezone"><option value="">Loading timezones</option></select>
+          <span class="help">Deadlines, daily digests and every time in the console use this.</span>
+        </div>
+        <div class="orgs" role="group" aria-labelledby="alias-h">
+          <span class="field"><span class="label" id="alias-h">Names you go by</span></span>
+          <p class="muted small">Mail and notes that call you any of these count as you, so actions are attributed to you. Added names save straight away.</p>
+          <div class="tags" id="alias-list"><span class="skel skel--line skel--short"></span></div>
+          <div class="orgs__row orgs__row--add">
+            <input class="input" id="alias-new" type="text" aria-label="A name you go by" placeholder="Add a name, for example how people sign off to you" autocomplete="off" spellcheck="false">
+            <button class="btn" type="button" id="alias-add">Add name</button>
+          </div>
+          <span class="said" id="alias-said" role="status" hidden></span>
+        </div>
+        <div class="orgs" role="group" aria-labelledby="orgs-h">
+          <span class="field"><span class="label" id="orgs-h">Organisations and their email domains</span></span>
+          <div id="org-rows" class="orgs"><span class="skel skel--line"></span></div>
+          <div><button class="btn" type="button" id="org-add">Add organisation</button></div>
+        </div>
+        <div class="form-end" style="justify-content: flex-start;">
+          <button class="btn btn--primary" type="submit" id="profile-save" disabled>Save profile</button>
+          <span class="said" id="profile-said" role="status" hidden></span>
+        </div>
+      </form>
+    </section>
+
+    <section class="section" id="appearance" aria-labelledby="look-h">
+      <header>
+        <h2 id="look-h">Appearance</h2>
+        <p>Pick a mode and one main colour. Every shade of it, in light and dark, comes from that one choice. This browser remembers it.</p>
+      </header>
+      <div class="stack-md">
+        <fieldset class="field">
+          <legend>Mode</legend>
+          <div class="seg seg--3 seg--mode">
+            <label class="segopt"><input type="radio" name="mode" value="system"><span>Match my Mac</span></label>
+            <label class="segopt"><input type="radio" name="mode" value="light"><span>Light</span></label>
+            <label class="segopt"><input type="radio" name="mode" value="dark"><span>Dark</span></label>
+          </div>
+        </fieldset>
+        <fieldset class="field">
+          <legend>Main colour</legend>
+          <div class="swatches" id="swatches">
+            <label class="swatch"><input type="radio" name="accent" value="raspberry" data-preset="raspberry"><span class="sw sw--raspberry"></span><span>Raspberry</span></label>
+            <label class="swatch"><input type="radio" name="accent" value="crimson" data-preset="crimson"><span class="sw sw--crimson"></span><span>Crimson</span></label>
+            <label class="swatch"><input type="radio" name="accent" value="magenta" data-preset="magenta"><span class="sw sw--magenta"></span><span>Magenta</span></label>
+            <label class="swatch"><input type="radio" name="accent" value="cobalt" data-preset="cobalt"><span class="sw sw--cobalt"></span><span>Cobalt</span></label>
+            <label class="swatch"><input type="radio" name="accent" value="teal" data-preset="teal"><span class="sw sw--teal"></span><span>Teal</span></label>
+            <label class="swatch"><input type="radio" name="accent" value="slate" data-preset="slate"><span class="sw sw--slate"></span><span>Slate</span></label>
+            <label class="swatch" id="accent-custom"><input type="color" id="accent-pick" aria-label="Choose any colour"><span>Any colour</span></label>
+          </div>
+          <span class="help" id="accent-note" role="status"></span>
+        </fieldset>
+        <div class="panel">
+          <div class="panel__body preview" aria-label="Preview">
+            <span class="chip chip--person">Needs you</span>
+            <span class="fill">Main colour</span>
+            <a class="link small" href="#appearance">A link</a>
+            <span class="small">Email synced <span class="measured measured--cool" id="preview-time">now</span></span>
+            <span class="chip chip--bad">Stalled</span>
+          </div>
+        </div>
+      </div>
+    </section>
+
+    <section class="section" id="sources" aria-labelledby="src-h" aria-busy="true">
+      <header>
+        <h2 id="src-h">Sources</h2>
+        <p>What goes into the brain, and what stays out. Switches and lists save as you change them.</p>
+      </header>
+      <div class="stack-md">
+        <div class="rows" id="src-rows">
+          <div><span class="skel skel--line"></span></div>
+          <div><span class="skel skel--line"></span></div>
+          <div><span class="skel skel--line"></span></div>
+          <div><span class="skel skel--line"></span></div>
+        </div>
+        <p class="muted small">Turning a source off stops new items coming in. What’s already in the brain stays searchable.</p>
+        <div class="group">
+          <h3>Searchable, kept out of the graph</h3>
+          <p>Still indexed and searchable, but enrichment skips them, so the brain doesn’t learn from its own output.</p>
+          <div class="fields" id="keep-graph"></div>
+        </div>
+        <div class="group">
+          <h3>Not indexed</h3>
+          <p>Skipped entirely, so they never reach search or the graph. Each skip is recorded under What changed.</p>
+          <div class="fields" id="keep-index"></div>
+        </div>
+      </div>
+    </section>
+
+    <section class="section" id="automatic" aria-labelledby="auto-h" aria-busy="true">
+      <header>
+        <h2 id="auto-h">Automatic changes</h2>
+        <p>What the brain may change by itself. Apply shows each change under What changed, where you can undo it. Ask me first puts it in Needs you instead.</p>
+      </header>
+      <div class="stack-md">
+        <div class="ctls" id="auto-rows"></div>
+        <p class="small" id="pending-line" hidden></p>
+        <p class="muted small">Changes here save as you make them.</p>
+      </div>
+    </section>
+
+    <section class="section" id="connections" aria-labelledby="conn-h" aria-busy="true">
+      <header>
+        <h2 id="conn-h">Connections</h2>
+        <p>What mcpbrain reads from and where it sends its work.</p>
+      </header>
+      <div class="rows" id="conn-rows">
+        <div><span class="skel skel--line"></span></div>
+        <div><span class="skel skel--line"></span></div>
+        <div><span class="skel skel--line"></span></div>
+      </div>
+    </section>
+
+    <section class="section" id="hidden" aria-labelledby="hidden-h" aria-busy="true">
+      <header>
+        <h2 id="hidden-h">Hidden entities</h2>
+        <p>People, organisations and other entities hidden from the graph, by you or by the daily tidy-up. Restoring one brings it and its links back.</p>
+      </header>
+      <div class="panel">
+        <div class="panel__body" id="hidden-body"><span class="skel skel--line"></span><span class="skel skel--line skel--short"></span></div>
+      </div>
+    </section>
+
+    <section class="section" id="system" aria-labelledby="sys-h" aria-busy="true">
+      <header>
+        <h2 id="sys-h">System</h2>
+        <p>Check and fix mcpbrain without a terminal.</p>
+      </header>
+      <div class="stack-md">
+        <div class="rows">
+          <div>
+            <div class="rowhead"><h3>mcpbrain</h3><span class="chip chip--quiet" id="sys-chip">Checking</span></div>
+            <p id="sys-line">Version <span class="skel">0.0.0</span></p>
+            <div class="act">
+              <button class="btn" type="button" id="update-check">Check for update</button>
+              <button class="btn" type="button" id="update-apply" hidden>Update now</button>
+              <button class="btn" type="button" id="restart">Restart</button>
+            </div>
+            <p class="said" id="update-said" role="status" hidden></p>
+            <div class="said" id="restart-confirm" hidden>
+              <p>Restart mcpbrain? It comes back on a new address, so this page loses its connection. Once it’s back, open the console again from the menu bar.</p>
+              <div class="acts"><button class="btn" type="button" id="restart-go">Restart now</button><button class="btn" type="button" id="restart-cancel">Keep running</button></div>
+            </div>
+          </div>
+          <div id="login-row" hidden>
+            <div class="rowhead"><h3 id="login-h">Start when I log in</h3></div>
+            <p>Takes effect next time you log in. While it’s off, mcpbrain won’t restart itself if it stops; start it from the menu bar.</p>
+            <div class="act"><label class="switch"><input type="checkbox" id="login-switch" aria-labelledby="login-h"><span></span></label></div>
+            <p class="said" id="login-said" role="status" hidden></p>
+          </div>
+          <div>
+            <div class="rowhead"><h3>Search model</h3><span class="chip chip--quiet" id="model-chip">Checking</span></div>
+            <p id="model-line">The local model that makes search work offline.</p>
+            <div class="act"><button class="btn" type="button" id="model-ensure">Download again</button></div>
+            <p class="said" id="model-said" role="status" hidden></p>
+          </div>
+        </div>
+        <div class="panel" id="diag">
+          <div class="panel__head"><h3>Diagnostics</h3><div class="end"><button class="btn" type="button" id="diag-run">Run diagnostics</button></div></div>
+          <div class="panel__body" id="diag-body">
+            <p class="muted">Checks Google, Claude, backup, the database, re-chunking and the clean-up passes, and says what to do about anything wrong.</p>
+          </div>
+          <div class="note">
+            <span>Logs:</span>
+            <button class="linkbtn" type="button" data-log="daemon">mcpbrain log</button>
+            <button class="linkbtn" type="button" data-log="tray">Menu bar log</button>
+            <button class="linkbtn" type="button" id="report-copy">Copy a report for support</button>
+            <span class="said" id="logs-said" role="status" hidden></span>
+          </div>
+          <div class="panel__body" id="log-box" hidden>
+            <h3 class="small" id="log-title"></h3>
+            <pre class="log" id="log-text" tabindex="0"></pre>
+          </div>
+        </div>
+      </div>
+    </section>
+
+    <section class="section" id="advanced" aria-labelledby="adv-h">
+      <header>
+        <h2 id="adv-h">Advanced</h2>
+        <p>Set up for <span id="fleet-tenant-name">your organisation</span>. Change these only if an administrator gives you new folders.</p>
+      </header>
+      <details class="adv">
+        <summary>Show fleet folders</summary>
+        <div class="fields">
+          <div class="field">
+            <label for="fleet_folder_id">Fleet folder ID</label>
+            <input class="input input--measured" id="fleet_folder_id" type="text" readonly spellcheck="false" autocomplete="off">
+          </div>
+          <div class="field">
+            <label for="fleet_escrow_folder_id">Escrow folder ID (backup key)</label>
+            <input class="input input--measured" id="fleet_escrow_folder_id" type="text" readonly spellcheck="false" autocomplete="off">
+          </div>
+          <div class="form-end" style="justify-content: flex-start;">
+            <button class="btn" type="button" id="fleet-edit" disabled>Edit folder IDs</button>
+            <button class="btn" type="button" id="fleet-save-btn" disabled hidden>Save folder IDs</button>
+            <button class="btn" type="button" id="fleet-cancel" hidden>Cancel</button>
+            <span class="said" id="fleet-said" role="status" hidden></span>
+          </div>
+        </div>
+      </details>
+    </section>
+  </div>
+
+  <p class="muted small">Everything stays on this Mac. Encrypted backups run automatically, and nothing else leaves except what you ask Claude.</p>
+</main>
+
+<script>
+"use strict";
+const C = window.mcpConsole;
+const api = C.api;
+const root = document.documentElement;
+
+// ---- small helpers -------------------------------------------------------
+
+function $(id){ return document.getElementById(id); }
+function fmt(n){ return (typeof n === "number" ? n : 0).toLocaleString("en-AU"); }
+function plural(n, one, many){ return fmt(n) + " " + (n === 1 ? one : (many || one + "s")); }
+
+/* Build an element. Every string goes in through textContent: names, folders
+   and reasons come from config, mail and the model. */
+function el(tag, attrs, ...kids){
+  const n = document.createElement(tag);
+  for (const [k, v] of Object.entries(attrs || {})) {
+    if (v == null || v === false) continue;
+    if (k === "text") n.textContent = v;
+    else if (k === "class") n.className = v;
+    else if (k.startsWith("on")) n.addEventListener(k.slice(2), v);
+    else n.setAttribute(k, v === true ? "" : String(v));
+  }
+  for (const kid of kids.flat()) {
+    if (kid == null || kid === false) continue;
+    n.append(kid instanceof Node ? kid : document.createTextNode(String(kid)));
+  }
+  return n;
+}
+function fill(node, ...kids){ node.replaceChildren(...kids.flat().filter(k => k != null && k !== false)); }
+function measured(text, cool){ return el("span", {class: cool ? "measured measured--cool" : "measured", text}); }
+function said(node, text, kind){
+  node.textContent = text || "";
+  node.classList.remove("said--ok", "said--bad");
+  if (kind) node.classList.add("said--" + kind);
+  node.hidden = !text;
+}
+function errText(e){ return e && e.offline ? "mcpbrain is not responding." : (e && e.message) || "Something went wrong."; }
+// Server detail strings are written for a terminal: drop dashes for commas.
+function words(s){ return String(s || "").replace(/\s+\u2014\s+/g, ", ").replace(/\u2014/g, ", "); }
+function busy(id, on){ $(id).setAttribute("aria-busy", on ? "true" : "false"); }
+
+/* Run an action from a button: disable it while the request runs, report the
+   result (or the server's reason) next to it, never assume success. */
+async function act(btn, out, run){
+  btn.disabled = true; btn.setAttribute("aria-busy", "true");
+  try {
+    const msg = await run();
+    if (out && msg) said(out, msg, "ok");
+    return true;
+  } catch (e) {
+    if (out) said(out, errText(e), "bad");
+    return false;
+  } finally {
+    btn.disabled = false;
+    btn.removeAttribute("aria-busy");
+  }
+}
+
+/* Logs and the support report are plain text, not JSON. */
+async function apiText(path){
+  const m = document.querySelector('meta[name="mcpbrain-token"]');
+  let res;
+  try {
+    res = await fetch(path, {headers: {Authorization: "Bearer " + (m ? m.getAttribute("content") : "")}});
+  } catch (e) {
+    const err = new Error("mcpbrain is not responding"); err.offline = true; throw err;
+  }
+  if (!res.ok) throw new Error("Couldn’t load it (" + res.status + ")");
+  return res.text();
+}
+
+function monthYear(v){
+  const d = C.parse(/^\d{4}-\d{2}$/.test(String(v)) ? v + "-01T00:00:00" : v);
+  return d ? d.toLocaleDateString("en-AU", {month: "short", year: "numeric"}) : String(v || "");
+}
+
+// ---- state ---------------------------------------------------------------
+
+let cfg = null;        // /api/config
+let settings = null;   // /api/settings
+let stats = null;      // /api/dashboard/stats
+let sys = null;        // /api/system
+
+/* Write allowlisted settings. Resolves with the settings now in effect;
+   says "Saved." (or the server's reason) in `out`. */
+async function saveSettings(body, out, okText){
+  try {
+    const r = await api("/api/settings", {method: "POST", body});
+    if (r && r.settings) settings = r.settings;
+    said(out, okText || "Saved.", "ok");
+    return true;
+  } catch (e) {
+    said(out, "Not saved. " + errText(e), "bad");
+    return false;
+  }
+}
+
+// ---- health chip and offline ---------------------------------------------
+
+const CHIP = {
+  healthy: ["chip--ok", "Healthy"], needs_you: ["chip--person", "Needs you"],
+  behind: ["chip--person", "Behind"], stalled: ["chip--bad", "Stalled"],
+  paused: ["chip--quiet", "Paused"], offline: ["chip--bad", "Offline"],
+};
+function renderChip(state, reasons){
+  const chip = $("health-chip");
+  const [cls, text] = CHIP[state] || ["chip--quiet", "Unknown"];
+  chip.className = "chip " + cls;
+  chip.textContent = text;
+  chip.title = (reasons || []).join(". ");
+}
+document.addEventListener("mcpconsole:offline", () => { $("offline").hidden = false; renderChip("offline", ["mcpbrain is not responding"]); });
+document.addEventListener("mcpconsole:online", () => { $("offline").hidden = true; });
+$("offline-retry").addEventListener("click", () => loadAll());
+
+// ---- profile ---------------------------------------------------------------
+
+function orgRow(name, domains){
+  const n = el("input", {class: "input", type: "text", "aria-label": "Organisation", placeholder: "Organisation name", autocomplete: "off", spellcheck: "false"});
+  n.value = name || "";
+  const d = el("input", {class: "input", type: "text", "aria-label": "Email domains for " + (name || "this organisation"), placeholder: "Email domains, comma-separated", autocomplete: "off", spellcheck: "false"});
+  d.value = (domains || []).join(", ");
+  n.addEventListener("input", () => d.setAttribute("aria-label", "Email domains for " + (n.value.trim() || "this organisation")));
+  const row = el("div", {class: "orgs__row org-row"}, n, d);
+  row.append(el("button", {class: "btn", type: "button", text: "Remove", "aria-label": "Remove " + (name || "this organisation"),
+    onclick: () => { row.remove(); said($("profile-said"), "Removed. Save profile to keep the change.", null); }}));
+  return row;
+}
+function collectOrgs(){
+  const out = [];
+  document.querySelectorAll("#org-rows .org-row").forEach(row => {
+    const [n, d] = row.querySelectorAll("input");
+    const name = n.value.trim();
+    if (!name) return;
+    out.push({name, domains: d.value.split(",").map(x => x.trim().toLowerCase()).filter(Boolean)});
+  });
+  return out;
+}
+$("org-add").addEventListener("click", () => {
+  const row = orgRow("", []);
+  $("org-rows").append(row);
+  row.querySelector("input").focus();
+});
+
+function derivedNames(){
+  const full = (cfg && cfg.owner_full_name || "").trim().toLowerCase();
+  const short = (cfg && cfg.owner_name || "").trim().toLowerCase();
+  const out = [];
+  for (const n of [short, full, full.split(/\s+/)[0] || ""]) if (n && !out.includes(n)) out.push(n);
+  return out;
+}
+function renderAliases(){
+  const derived = derivedNames();
+  const extra = (settings && settings.owner_aliases) || [];
+  const tags = derived.map(n => el("span", {class: "tag tag--fixed"}, n + " ", el("span", {class: "muted small", text: "from your name"})));
+  extra.forEach(a => {
+    tags.push(el("span", {class: "tag"}, a + " ", el("button", {class: "tag__x", type: "button", text: "Remove", "aria-label": "Remove " + a,
+      onclick: async (ev) => {
+        ev.currentTarget.disabled = true;
+        const next = extra.filter(x => x !== a);
+        if (await saveSettings({owner_aliases: next}, $("alias-said"), "Removed and saved.")) renderAliases();
+        else ev.currentTarget.disabled = false;
+      }})));
+  });
+  if (!tags.length) tags.push(el("span", {class: "muted small", text: "Save your name to see the names derived from it."}));
+  fill($("alias-list"), tags);
+}
+async function addAlias(){
+  const inp = $("alias-new");
+  const v = inp.value.trim();
+  if (!v) { inp.focus(); return; }
+  const extra = (settings && settings.owner_aliases) || [];
+  const lower = v.toLowerCase();
+  if (derivedNames().includes(lower) || extra.some(x => x.toLowerCase() === lower)) {
+    said($("alias-said"), "That name is already on the list.", null);
+    return;
+  }
+  $("alias-add").disabled = true;
+  if (await saveSettings({owner_aliases: [...extra, v]}, $("alias-said"), "Added and saved.")) { inp.value = ""; renderAliases(); }
+  $("alias-add").disabled = false;
+}
+$("alias-add").addEventListener("click", addAlias);
+$("alias-new").addEventListener("keydown", (ev) => { if (ev.key === "Enter") { ev.preventDefault(); addAlias(); } });
+
+async function populateTimezones(selected){
+  const sel = $("timezone");
+  let detected = "";
+  try { detected = Intl.DateTimeFormat().resolvedOptions().timeZone || ""; } catch (e) { /* none */ }
+  try {
+    const j = await api("/api/timezones");
+    fill(sel, (j.zones || []).map(z => {
+      const o = el("option", {value: z.value, text: z.label});
+      if (z.value === (selected || detected)) o.selected = true;
+      return o;
+    }));
+  } catch (e) {
+    fill(sel, el("option", {value: selected || "", text: selected || "Couldn’t load timezones"}));
+  }
+}
+
+function renderProfile(){
+  $("owner_name").value = cfg.owner_full_name || cfg.owner_name || "";
+  $("owner_email").value = cfg.owner_email || "";
+  $("owner_role").value = cfg.owner_role || "";
+  const orgs = cfg.orgs && cfg.orgs.length ? cfg.orgs : [{name: "", domains: []}];
+  fill($("org-rows"), orgs.map(o => orgRow(o.name, o.domains)));
+  $("profile-save").disabled = false;
+  busy("profile", false);
+}
+
+function invalid(id, msg){
+  const i = $(id);
+  i.setAttribute("aria-invalid", msg ? "true" : "false");
+  const h = $(id + "-help");
+  if (h) h.textContent = msg || "";
+  return !!msg;
+}
+
+$("profile-form").addEventListener("submit", async (ev) => {
+  ev.preventDefault();
+  const out = $("profile-said");
+  const full = $("owner_name").value.trim();
+  const email = $("owner_email").value.trim();
+  const orgs = collectOrgs();
+  let bad = invalid("owner_name", full ? "" : "Your name is needed to attribute actions to you.");
+  bad = invalid("owner_email", /^[^@\s]+@[^@\s]+$/.test(email) ? "" : "Enter the email address you use.") || bad;
+  if (!orgs.length) { said(out, "Keep at least one organisation: everything is tagged against them.", "bad"); return; }
+  if (bad) { said(out, "Not saved. Fix the fields marked above.", "bad"); return; }
+  // The page is filled from the saved config before Save is enabled, so
+  // every field is posted; a cleared role clears it.
+  const body = {owner_full_name: full, owner_name: full.split(/\s+/)[0], owner_email: email,
+                owner_role: $("owner_role").value.trim(), orgs};
+  const tz = $("timezone").value.trim();
+  if (tz) body.timezone = tz;
+  const btn = $("profile-save");
+  await act(btn, out, async () => {
+    await api("/api/config", {method: "POST", body});
+    Object.assign(cfg, body);
+    if (tz) C.tz = tz;
+    renderAliases();
+    return "Saved.";
+  });
+});
+
+async function loadProfile(){
+  try {
+    cfg = await api("/api/config");
+  } catch (e) {
+    busy("profile", false);
+    fill($("org-rows"), el("p", {class: "said said--bad", text: "Couldn’t load your profile. " + errText(e)}));
+    return;
+  }
+  if (cfg.timezone) C.tz = cfg.timezone;
+  renderProfile();
+  renderFleet();
+  await populateTimezones(cfg.timezone || "");
+}
+
+// ---- appearance ------------------------------------------------------------
+
+/* accent-maths:start */
+// Keep the meanings apart: an accent near teal moves measured values to blue,
+// one near the status red moves the red to whichever of 5 or 55 is farther from
+// it. Strictly less than 40 and 35 degrees, so the default raspberry (355)
+// keeps the red at 30. Strength is clamped to 0.06..0.2.
+function hueDist(a, b){ const d = Math.abs(a - b) % 360; return d > 180 ? 360 - d : d; }
+function accentFor(h, c, hex){
+  h = ((Math.round(h) % 360) + 360) % 360;
+  const cc = Math.round(Math.max(0.06, Math.min(0.2, c)) * 1000) / 1000;
+  const coolH = hueDist(h, 205) < 40 ? 255 : 205;
+  const badH = hueDist(h, 30) < 35 ? (hueDist(h, 5) > hueDist(h, 55) ? 5 : 55) : 30;
+  return {hex: hex || "", h: h, c: cc, coolH: coolH, badH: badH};
+}
+function hexToOklch(hex){
+  const n = parseInt(String(hex).replace(/^#/, ""), 16);
+  const lin = (x) => { x /= 255; return x <= 0.04045 ? x / 12.92 : Math.pow((x + 0.055) / 1.055, 2.4); };
+  const r = lin((n >> 16) & 255), g = lin((n >> 8) & 255), b = lin(n & 255);
+  const l = Math.cbrt(0.4122214708 * r + 0.5363325363 * g + 0.0514459929 * b);
+  const m = Math.cbrt(0.2119034982 * r + 0.6806995451 * g + 0.1073969566 * b);
+  const s = Math.cbrt(0.0883024619 * r + 0.2817188376 * g + 0.6299787005 * b);
+  const A = 1.9779984951 * l - 2.4285922050 * m + 0.4505937099 * s;
+  const B = 0.0259040371 * l + 0.7827717662 * m - 0.8086757660 * s;
+  let h = Math.atan2(B, A) * 180 / Math.PI;
+  if (h < 0) h += 360;
+  return {c: Math.sqrt(A * A + B * B), h: h};
+}
+function deriveAccent(hex){
+  const o = hexToOklch(hex);
+  return accentFor(o.h, o.c, String(hex).toLowerCase());
+}
+/* accent-maths:end */
+
+const ACCENT_KEY = "mcpbrain-accent";
+const MODE_KEY = "mcpbrain-mode";
+function presetHex(name){ return getComputedStyle(root).getPropertyValue("--preset-" + name).trim().toLowerCase(); }
+function readAccent(){
+  try { return JSON.parse(localStorage.getItem(ACCENT_KEY) || "null"); } catch (e) { return null; }
+}
+function accentNote(a){
+  const parts = [];
+  if (a && a.coolH !== 205) parts.push("measured values switch to blue so they don’t match it");
+  if (a && a.badH !== 30) parts.push("the status red shifts so it doesn’t match it");
+  return parts.length ? "So the colours keep their meanings, " + parts.join(" and ") + "." : "";
+}
+function showAccent(a, savedText){
+  const hex = a && a.hex ? a.hex : presetHex("raspberry");
+  let preset = "";
+  document.querySelectorAll('input[name="accent"]').forEach(r => {
+    const on = a ? presetHex(r.value) === hex : r.value === "raspberry";
+    r.checked = on;
+    if (on) preset = r.value;
+  });
+  $("accent-custom").classList.toggle("is-on", !preset);
+  if (/^#[0-9a-f]{6}$/i.test(hex)) $("accent-pick").value = hex;
+  const note = accentNote(a);
+  $("accent-note").textContent = [note, savedText].filter(Boolean).join(" ");
+}
+function setAccent(a){
+  // Raspberry is the default: forget the choice rather than store it.
+  try {
+    if (a) localStorage.setItem(ACCENT_KEY, JSON.stringify(a));
+    else localStorage.removeItem(ACCENT_KEY);
+  } catch (e) { /* still applies for this visit */ }
+  if (a) {
+    root.style.setProperty("--accent-h", String(a.h)); root.style.setProperty("--accent-c", String(a.c));
+    root.style.setProperty("--cool-h", String(a.coolH)); root.style.setProperty("--bad-h", String(a.badH));
+  } else {
+    C.applyTheme();
+  }
+  showAccent(a, "Saved for this browser.");
+}
+document.querySelectorAll('input[name="accent"]').forEach(r => r.addEventListener("change", () => {
+  if (!r.checked) return;
+  setAccent(r.value === "raspberry" ? null : deriveAccent(presetHex(r.value)));
+}));
+$("accent-pick").addEventListener("input", (ev) => setAccent(deriveAccent(ev.target.value)));
+
+function modeValue(){ const m = root.dataset.mode; return m === "light" || m === "dark" ? m : "system"; }
+function showMode(){ document.querySelectorAll('input[name="mode"]').forEach(r => { r.checked = r.value === modeValue(); }); }
+document.querySelectorAll('input[name="mode"]').forEach(r => r.addEventListener("change", () => {
+  if (!r.checked) return;
+  try {
+    if (r.value === "system") localStorage.removeItem(MODE_KEY);
+    else localStorage.setItem(MODE_KEY, r.value);
+  } catch (e) { /* still applies for this visit */ }
+  if (r.value === "system") delete root.dataset.mode; else root.dataset.mode = r.value;
+  document.querySelectorAll("[data-mode-toggle]").forEach(b =>
+    b.setAttribute("aria-label", C.currentMode() === "dark" ? "Switch to light mode" : "Switch to dark mode"));
+  document.dispatchEvent(new CustomEvent("mcpconsole:mode", {detail: {mode: C.currentMode()}}));
+  showAccent(readAccent(), "Saved for this browser.");
+}));
+document.addEventListener("mcpconsole:mode", showMode);
+showMode();
+showAccent(readAccent(), "");
+$("preview-time").textContent = C.time(new Date().toISOString());
+
+// ---- sources ---------------------------------------------------------------
+
+const SOURCE_ORDER = [["gmail", "Gmail"], ["drive", "Drive"], ["calendar", "Calendar"], ["anarlog", "Meetings"]];
+function sourceOn(name){
+  if (!settings) return true;
+  if (name === "anarlog") return !!(settings.anarlog && settings.anarlog.enabled);
+  return !settings.sources || settings.sources[name] !== false;
+}
+function historyText(s){
+  if (s.name === "anarlog") return "Transcripts from your meeting recorder, as they arrive.";
+  const h = s.history || {};
+  if (h.done) return h.reached ? "Full history from " + monthYear(h.reached) + "." : "Full history.";
+  return h.reached ? "Backfilling, reached " + monthYear(h.reached) + "." : "Backfilling.";
+}
+function sharedText(s){
+  const sh = s.shared;
+  if (!sh) return null;
+  if (!sh.total) return "No shared drives.";
+  return plural(sh.total, "shared drive") + (sh.stale ? ", " + fmt(sh.stale) + " not syncing." : ", all syncing.");
+}
+function sourceRow(name, label, s){
+  const on = sourceOn(name);
+  const out = el("p", {class: "said", role: "status", hidden: true});
+  const chip = el("span", {class: on ? "chip chip--ok" : "chip chip--quiet", text: on ? "On" : "Off"});
+  const facts = el("p", {});
+  if (s) {
+    facts.append(historyText(s), " Last synced ");
+    if (s.last_synced_at) facts.append(el("span", {class: s.stale ? "measured measured--bad" : "measured measured--cool", text: C.relTime(s.last_synced_at)}), s.stale ? ", behind." : ".");
+    else facts.append("never.");
+    const sh = sharedText(s);
+    if (sh) facts.append(" " + sh);
+  } else {
+    facts.append("Sync times couldn’t be loaded.");
+  }
+  const sync = el("button", {class: "btn btn--sm", type: "button", text: "Sync", disabled: !on, "aria-label": "Sync " + label,
+    title: on ? null : "Switched off",
+    onclick: (ev) => act(ev.currentTarget, out, async () => {
+      try { await api("/api/sync-now", {method: "POST", body: {source: name}}); }
+      catch (e) { if (e.status === 409) throw new Error(label + " is switched off."); throw e; }
+      return "Sync started.";
+    })});
+  const box = el("input", {type: "checkbox", "aria-label": "Index " + label});
+  box.checked = on;
+  box.addEventListener("change", async () => {
+    const want = box.checked;
+    box.disabled = true;
+    const body = name === "anarlog" ? {anarlog: {enabled: want}} : {sources: {[name]: want}};
+    const ok = await saveSettings(body, out, want ? "Saved. " + label + " is on."
+      : "Saved. " + label + " is off; what’s already indexed stays searchable.");
+    box.disabled = false;
+    if (!ok) { box.checked = !want; return; }
+    chip.className = want ? "chip chip--ok" : "chip chip--quiet";
+    chip.textContent = want ? "On" : "Off";
+    sync.disabled = !want;
+    sync.title = want ? "" : "Switched off";
+  });
+  return el("div", {}, el("div", {class: "rowhead"}, el("h3", {text: label}), chip), facts,
+    el("div", {class: "act"}, sync, el("label", {class: "switch"}, box, el("span", {}))), out);
+}
+function renderSources(){
+  const by = {};
+  ((stats && stats.sources) || []).forEach(s => { by[s.name] = s; });
+  fill($("src-rows"), SOURCE_ORDER.map(([n, l]) => sourceRow(n, (by[n] && by[n].label) || l, by[n])));
+}
+
+const KEEP = [
+  ["keep-graph", "generated_gmail_subject_prefixes", "Subject starts of your own automated mail", "Daily briefs and reports you send yourself.", "Subject starts with"],
+  ["keep-graph", "generated_drive_folders", "Drive folders", "Documents in these folders, for example generated reports.", "Folder path, for example My Drive/Reports"],
+  ["keep-index", "exclude_senders", "Senders", "Newsletters and notifications you never want in the brain.", "name@example.org"],
+  ["keep-index", "exclude_labels", "Gmail labels", "Mail with any of these labels.", "Label name"],
+];
+function listField(key, label, help, placeholder){
+  const id = "kl-" + key;
+  const tags = el("div", {class: "tags"});
+  const out = el("span", {class: "said", role: "status", hidden: true});
+  const inp = el("input", {class: "input", type: "text", id: id, placeholder, autocomplete: "off", spellcheck: "false"});
+  const cur = () => ((settings && settings.ingest && settings.ingest[key]) || []);
+  function draw(){
+    const list = cur();
+    fill(tags, list.length ? list.map(v => el("span", {class: "tag"}, v + " ",
+      el("button", {class: "tag__x", type: "button", text: "Remove", "aria-label": "Remove " + v,
+        onclick: async (ev) => {
+          ev.currentTarget.disabled = true;
+          if (await saveSettings({ingest: {[key]: cur().filter(x => x !== v)}}, out, "Removed and saved.")) draw();
+          else ev.currentTarget.disabled = false;
+        }}))) : el("span", {class: "muted small", text: "None yet."}));
+  }
+  async function add(){
+    const v = inp.value.trim();
+    if (!v) { inp.focus(); return; }
+    if (cur().some(x => x.toLowerCase() === v.toLowerCase())) { said(out, "Already on the list.", null); return; }
+    btn.disabled = true;
+    if (await saveSettings({ingest: {[key]: [...cur(), v]}}, out, "Added and saved.")) { inp.value = ""; draw(); }
+    btn.disabled = false;
+  }
+  const btn = el("button", {class: "btn", type: "button", text: "Add", "aria-label": "Add to " + label, onclick: add});
+  inp.addEventListener("keydown", (ev) => { if (ev.key === "Enter") { ev.preventDefault(); add(); } });
+  draw();
+  return el("div", {class: "field", "data-list": key}, el("label", {for: id, text: label}),
+    el("span", {class: "help", text: help}), tags, el("div", {class: "orgs__row orgs__row--add"}, inp, btn), out);
+}
+function renderKeepOut(){
+  fill($("keep-graph"), KEEP.filter(k => k[0] === "keep-graph").map(k => listField(k[1], k[2], k[3], k[4])));
+  fill($("keep-index"), KEEP.filter(k => k[0] === "keep-index").map(k => listField(k[1], k[2], k[3], k[4])));
+}
+
+// ---- automatic changes -----------------------------------------------------
+
+const MODE_WORDS = {apply: "Apply", ask: "Ask me first", off: "Off", advise: "Advise only"};
+const AUTO = [
+  ["profiles", "People profiles", "Rewrites a person’s short profile from recent mail."],
+  ["circles", "Circle names", "Names each circle from who is in it."],
+  ["reference", "Reference and context files", "The gardener updates your project, system and context files. Each change is a small commit you can undo."],
+  ["voice", "Your voice file", "Updates how you write from your sent mail, at most every 3 days."],
+  ["consolidation", "Memory consolidation", "Merges repeated facts and retires stale ones. With Ask me first, the next pass waits until you decide the one waiting."],
+  ["tidy", "Graph tidy-up", "The daily review hides orphan entities, fills in missing organisations, gives actions an owner and merges duplicates."],
+  ["draft_style", "Draft style tuning", "Picks the draft style you edit least. Advise only reports what it would change."],
+];
+function autoRow(kind, title, text){
+  const modes = kind === "draft_style" ? ["apply", "advise", "off"] : ["apply", "ask", "off"];
+  const cur = (settings.auto_changes || {})[kind];
+  const hid = "auto-h-" + kind;
+  const out = el("p", {class: "said", role: "status", hidden: true});
+  let last = cur;
+  const seg = el("div", {class: "seg seg--3", role: "radiogroup", "aria-labelledby": hid},
+    modes.map(m => {
+      const r = el("input", {type: "radio", name: "auto-" + kind, value: m});
+      r.checked = m === cur;
+      r.addEventListener("change", async () => {
+        if (!r.checked) return;
+        seg.querySelectorAll("input").forEach(i => { i.disabled = true; });
+        const ok = await saveSettings({auto_changes: {[kind]: m}}, out, "Saved. " + title + ": " + MODE_WORDS[m] + ".");
+        seg.querySelectorAll("input").forEach(i => { i.disabled = false; i.checked = i.value === (ok ? m : last); });
+        if (ok) last = m;
+      });
+      return el("label", {class: "segopt"}, r, el("span", {text: MODE_WORDS[m]}));
+    }));
+  const left = el("div", {}, el("h3", {id: hid, text: title}), el("p", {text}), out);
+  const row = el("div", {class: "ctl", "data-kind": kind}, left, seg);
+  if (kind !== "tidy") return [row];
+  return [row, capRow()];
+}
+function capRow(){
+  const out = el("span", {class: "said", role: "status", hidden: true});
+  const inp = el("input", {class: "input input--measured", id: "review-max", type: "number", min: "1", max: "500",
+    inputmode: "numeric", "aria-describedby": "review-max-help"});
+  inp.value = String(settings.review_max_apply_per_run);
+  let last = settings.review_max_apply_per_run;
+  inp.addEventListener("change", async () => {
+    const n = Number(inp.value);
+    if (!Number.isInteger(n) || n < 1 || n > 500) {
+      inp.setAttribute("aria-invalid", "true");
+      said(out, "Use a whole number from 1 to 500.", "bad");
+      return;
+    }
+    inp.setAttribute("aria-invalid", "false");
+    if (await saveSettings({review_max_apply_per_run: n}, out, "Saved.")) last = n;
+    else inp.value = String(last);
+  });
+  return el("div", {class: "ctl"},
+    el("div", {}, el("label", {class: "label", for: "review-max", text: "Most tidy-up changes in one pass"}),
+      el("p", {class: "small", id: "review-max-help", text: "The rest wait for the next pass, so one review can’t rewrite a lot at once. Counts both applied changes and ones waiting for you."}), out),
+    el("div", {class: "field cap"}, inp));
+}
+function renderAuto(){
+  fill($("auto-rows"), AUTO.map(a => autoRow(a[0], a[1], a[2])).flat());
+}
+async function loadPending(){
+  const line = $("pending-line");
+  try {
+    const j = await api("/api/pending");
+    const n = (j.items || []).length;
+    if (!n) { line.hidden = true; return; }
+    fill(line, plural(n, "change") + (n === 1 ? " is" : " are") + " waiting for you. ", el("a", {class: "link", href: "/dashboard", text: "Decide in Needs you"}));
+    line.hidden = false;
+  } catch (e) { line.hidden = true; }
+}
+
+// ---- connections -----------------------------------------------------------
+
+const CONN_WORDS = {
+  google: {ok: "Connected"}, claude: {ok: "Connected"}, backup: {ok: "On"},
+  records: {ok: "Ready"}, enrichment: {ok: "Running"},
+};
+const CONN_LABELS = {google: "Google", claude: "Claude Desktop", backup: "Encrypted backup", records: "Records", enrichment: "Enrichment"};
+function connChip(c){
+  if (c.state === "ok") return el("span", {class: "chip chip--ok", text: (CONN_WORDS[c.name] || {}).ok || "OK"});
+  if (c.state === "needs_action") return el("span", {class: "chip chip--person", text: "Needs you"});
+  if (c.state === "not_started") return el("span", {class: "chip chip--quiet", text: "Not set up"});
+  return el("span", {class: "chip chip--quiet", text: "Not known"});
+}
+function connRow(c, account){
+  const out = el("p", {class: "said", role: "status", hidden: true});
+  const p = el("p", {});
+  const acts = el("div", {class: "act"});
+  const btn = (text, run) => el("button", {class: "btn", type: "button", text, onclick: (ev) => act(ev.currentTarget, out, run)});
+  if (c.name === "google") {
+    p.append(account ? "Read-only Gmail, Drive and Calendar as " + account + "." : "Read-only Gmail, Drive and Calendar.");
+    if (c.state !== "ok" && c.detail) p.append(" " + words(c.detail) + ".");
+    acts.append(btn("Reconnect", async () => { await api("/api/auth/start", {method: "POST"}); return "A browser tab opens for you to sign in again."; }));
+  } else if (c.name === "claude") {
+    p.append("Reconnecting restarts Claude Desktop and closes any open chat.");
+    if (c.state !== "ok" && c.detail) p.append(" " + words(c.detail) + ".");
+    acts.append(btn("Reconnect and restart", async () => {
+      const r = await api("/api/connect-desktop", {method: "POST"});
+      if (r && r.relaunched) return "Claude Desktop is restarting. Reopen it to use your brain.";
+      throw new Error((r && r.detail) ? words(r.detail) : "Restart Claude Desktop yourself to finish.");
+    }));
+  } else if (c.name === "backup") {
+    p.append("Automatic. " + (c.detail ? words(c.detail) + ". " : "") + "Only your organisation’s escrowed key can restore it.");
+    acts.append(btn("Back up now", async () => {
+      try { await api("/api/backup/run", {method: "POST"}); }
+      catch (e) { if (e.status === 409) throw new Error("Backup isn’t set up yet."); throw e; }
+      return "Backup started. It runs in the background.";
+    }));
+  } else if (c.name === "enrichment") {
+    const en = (stats && stats.enrich) || {};
+    if (en.last_push_at) {
+      p.append("The hourly Claude task last pushed ", measured(C.relTime(en.last_push_at), true), ", ", plural(en.pushes_24h || 0, "batch", "batches"), " in the last day.");
+    } else {
+      p.append("The hourly Claude task hasn’t pushed anything yet. It runs from Claude Desktop.");
+    }
+  } else {
+    p.append(c.name === "records" ? "Notes, decisions and memories you capture are written here." : "");
+    if (c.detail && c.state !== "ok") p.append(" " + words(c.detail) + ".");
+  }
+  return el("div", {}, el("div", {class: "rowhead"}, el("h3", {text: CONN_LABELS[c.name] || c.label || "Connection"}), connChip(c)), p,
+    acts.childNodes.length ? acts : null, out);
+}
+async function renderConnections(){
+  const box = $("conn-rows");
+  if (!stats) {
+    fill(box, el("div", {}, el("p", {class: "said said--bad", text: "Couldn’t load the connections. Try again in a moment."})));
+    busy("connections", false);
+    return;
+  }
+  let account = "";
+  try { const st = await api("/api/status"); account = st.google_account || ""; } catch (e) { /* no account shown */ }
+  const order = ["google", "claude", "backup", "records", "enrichment"];
+  const list = (stats.connections || []).slice().sort((a, b) => order.indexOf(a.name) - order.indexOf(b.name));
+  fill(box, list.length ? list.map(c => connRow(c, account)) : el("div", {}, el("p", {text: "No connections are set up yet."})));
+  busy("connections", false);
+}
+
+// ---- hidden entities -------------------------------------------------------
+
+const TYPE_WORDS = {person: "Person", org: "Organisation", project: "Project", topic: "Topic", meeting: "Meeting",
+  event: "Event", document: "Document", thread: "Thread"};
+function reasonWords(r){
+  if (!r) return "";
+  if (r === "graph-ui") return "you hid it in the graph";
+  return "reason given: " + r;
+}
+async function loadHidden(){
+  const body = $("hidden-body");
+  let items;
+  try {
+    items = (await api("/api/graph/suppressed")).items || [];
+  } catch (e) {
+    fill(body, el("p", {class: "said said--bad", text: "Couldn’t load hidden entities. " + errText(e)}),
+      el("button", {class: "btn btn--sm", type: "button", text: "Try again", onclick: loadHidden}));
+    busy("hidden", false);
+    return;
+  }
+  if (!items.length) {
+    fill(body, el("p", {text: "Nothing is hidden."}),
+      el("p", {class: "muted", text: "When an entity is hidden from the graph it appears here, so you can bring it and its links back."}),
+      el("p", {}, el("a", {class: "link small", href: "/graph", text: "Go to the graph"})));
+    busy("hidden", false);
+    return;
+  }
+  fill(body, el("p", {class: "muted small", text: plural(items.length, "entity", "entities") + " hidden."}),
+    el("ul", {class: "hidden-list"}, items.map(it => {
+      const out = el("p", {class: "said", role: "status", hidden: true});
+      const meta = [TYPE_WORDS[it.type] || "Entity"];
+      if (it.suppressed_at) meta.push("hidden " + C.relTime(it.suppressed_at));
+      const why = reasonWords(it.reason);
+      if (why) meta.push(why);
+      return el("li", {}, el("div", {}, el("strong", {text: it.name || "Unnamed entity"}), el("p", {class: "muted small", text: meta.join(", ")})),
+        el("button", {class: "btn btn--sm", type: "button", text: "Restore", "aria-label": "Restore " + (it.name || "this entity"),
+          onclick: (ev) => {
+            const b = ev.currentTarget;
+            act(b, out, async () => {
+              await api(`/api/graph/entity/${encodeURIComponent(it.id)}/restore`, {method: "POST"});
+              setTimeout(() => { b.disabled = true; }, 0);
+              return "Restored. You can undo it under What changed on the Overview.";
+            });
+          }}), out);
+    })));
+  busy("hidden", false);
+}
+
+// ---- system ----------------------------------------------------------------
+
+function renderSystem(){
+  const paused = stats && stats.system ? stats.system.paused : false;
+  const chip = $("sys-chip");
+  chip.className = "chip " + (paused ? "chip--quiet" : "chip--ok");
+  chip.textContent = paused ? "Paused" : "Running";
+  fill($("sys-line"), "Version ", measured(sys.version || "unknown"), ". Watchdog restarts ", measured(fmt(sys.watchdog_exits || 0)), ".");
+  const row = $("login-row");
+  row.hidden = !sys.login_supported;
+  $("login-switch").checked = !!sys.start_at_login;
+  renderModel(sys.model || {});
+  busy("system", false);
+}
+function renderModel(m){
+  const chip = $("model-chip");
+  if (m.downloading) { chip.className = "chip chip--quiet"; chip.textContent = "Downloading"; $("model-line").textContent = "Downloading the local search model. Search works again when it finishes."; }
+  else if (m.error) { chip.className = "chip chip--bad"; chip.textContent = "Problem"; $("model-line").textContent = "The last download failed: " + words(m.error) + ". Download again to retry."; }
+  else if (m.cached) { chip.className = "chip chip--ok"; chip.textContent = "Ready"; $("model-line").textContent = "The local model that makes search work offline is downloaded."; }
+  else { chip.className = "chip chip--quiet"; chip.textContent = "Not downloaded"; $("model-line").textContent = "The local search model downloads on the next sync, or now with Download again."; }
+  $("model-ensure").disabled = !!m.downloading;
+}
+let modelTimer = 0;
+async function pollModel(){
+  clearTimeout(modelTimer);
+  try {
+    const m = await api("/api/model/status");
+    renderModel(m);
+    if (m.downloading) modelTimer = setTimeout(pollModel, 3000);
+    else said($("model-said"), m.error ? "" : "The search model is ready.", "ok");
+  } catch (e) { said($("model-said"), errText(e), "bad"); }
+}
+$("model-ensure").addEventListener("click", (ev) => act(ev.currentTarget, $("model-said"), async () => {
+  await api("/api/model/ensure", {method: "POST"});
+  modelTimer = setTimeout(pollModel, 1000);
+  return "Download started.";
+}));
+
+$("login-switch").addEventListener("change", async (ev) => {
+  const box = ev.currentTarget, want = box.checked, out = $("login-said");
+  box.disabled = true;
+  try {
+    await api("/api/system/login", {method: "POST", body: {on: want}});
+    said(out, want ? "Saved. mcpbrain starts when you log in." : "Saved. mcpbrain won’t start when you log in.", "ok");
+  } catch (e) {
+    box.checked = !want;
+    const msg = (e.data && e.data.error) || "";
+    if (/unsupported platform/i.test(msg)) { $("login-row").hidden = true; return; }
+    said(out, "Not saved. " + (e.offline ? errText(e) : "The login setting couldn’t be changed."), "bad");
+  } finally { box.disabled = false; }
+});
+
+$("update-check").addEventListener("click", (ev) => act(ev.currentTarget, $("update-said"), async () => {
+  const r = await api("/api/update/check");
+  const apply = $("update-apply");
+  apply.hidden = !r.newer;
+  if (r.newer) return "Version " + r.latest + " is available. You have " + (r.installed || "an older one") + ".";
+  if (!r.latest) throw new Error("Couldn’t check for updates right now. Try again later.");
+  return "You have the latest version, " + (r.installed || r.latest) + ".";
+}));
+$("update-apply").addEventListener("click", (ev) => act(ev.currentTarget, $("update-said"), async () => {
+  try { await api("/api/update/apply", {method: "POST"}); }
+  catch (e) { if (e.status === 409) { $("update-apply").hidden = true; return "You already have the latest version."; } throw e; }
+  $("update-apply").hidden = true;
+  return "Updating. mcpbrain restarts when it’s done; open the console again from the menu bar.";
+}));
+
+$("restart").addEventListener("click", () => { $("restart-confirm").hidden = false; $("restart-go").focus(); });
+$("restart-cancel").addEventListener("click", () => { $("restart-confirm").hidden = true; $("restart").focus(); });
+$("restart-go").addEventListener("click", (ev) => act(ev.currentTarget, $("update-said"), async () => {
+  await api("/api/restart", {method: "POST"});
+  $("restart-confirm").hidden = true;
+  $("restart").disabled = true;
+  return "Restarting. In a few seconds, open the console again from the menu bar.";
+}));
+
+// Diagnostics: doctor's own lines, its status as a chip, and plain words where
+// it would print a terminal-only repair note.
+const DIAG = {ok: ["chip--ok", "OK"], warn: ["chip--person", "Look at this"], bad: ["chip--bad", "Problem"], info: ["chip--quiet", "Note"]};
+function diagText(t){
+  return words(String(t || "")
+    .replace(/^\s*(?:\u2705|\u26a0\ufe0f?|\u274c|\u2796|\u2139\ufe0f?)\s*/u, "")
+    .replace(/no repair registered for '[^']*'/g, "Fix this from the menu bar or ask for help")
+    .replace(/\s{2,}/g, " ")).trim();
+}
+function renderDiag(r){
+  const body = $("diag-body");
+  if (r.running) { fill(body, el("p", {class: "muted", text: "Running diagnostics. This takes up to a minute."})); return; }
+  if (!r.ran_at) return;
+  const lines = r.lines || [];
+  const problems = lines.filter(l => l.status === "bad" || l.status === "warn").length;
+  fill(body,
+    el("p", {class: "small"}, problems ? plural(problems, "thing") + " to look at. " : "Everything checked out. ", "Ran ", measured(C.relTime(r.ran_at), true), "."),
+    el("ul", {class: "checks"}, lines.map(l => {
+      const [cls, w] = DIAG[l.status] || DIAG.info;
+      return el("li", {}, el("span", {class: "chip " + cls, text: w}), el("span", {text: diagText(l.text)}));
+    })));
+}
+let diagTimer = 0;
+async function pollDiag(left){
+  clearTimeout(diagTimer);
+  try {
+    const r = await api("/api/diagnostics");
+    renderDiag(r);
+    if (r.running && left > 0) { diagTimer = setTimeout(() => pollDiag(left - 1), 1500); return; }
+    $("diag-run").disabled = false;
+    $("diag-run").textContent = r.ran_at ? "Run again" : "Run diagnostics";
+  } catch (e) {
+    $("diag-run").disabled = false;
+    fill($("diag-body"), el("p", {class: "said said--bad", text: "Couldn’t read the result. " + errText(e)}));
+  }
+}
+$("diag-run").addEventListener("click", async (ev) => {
+  const b = ev.currentTarget;
+  b.disabled = true;
+  try {
+    await api("/api/diagnostics/run", {method: "POST"});
+    renderDiag({running: true});
+    diagTimer = setTimeout(() => pollDiag(80), 1500);
+  } catch (e) {
+    b.disabled = false;
+    fill($("diag-body"), el("p", {class: "said said--bad", text: "Couldn’t start diagnostics. " + errText(e)}));
+  }
+});
+
+document.querySelectorAll("[data-log]").forEach(b => b.addEventListener("click", async () => {
+  const which = b.getAttribute("data-log");
+  b.disabled = true;
+  try {
+    const text = await apiText("/api/logs/" + which);
+    $("log-title").textContent = which === "daemon" ? "mcpbrain log, latest lines" : "Menu bar log, latest lines";
+    $("log-text").textContent = text || "The log is empty.";
+    $("log-box").hidden = false;
+    said($("logs-said"), "");
+    $("log-text").focus();
+  } catch (e) { said($("logs-said"), errText(e), "bad"); }
+  finally { b.disabled = false; }
+}));
+$("report-copy").addEventListener("click", async (ev) => {
+  const b = ev.currentTarget;
+  b.disabled = true;
+  try {
+    const text = await apiText("/api/support/report");
+    try {
+      await navigator.clipboard.writeText(text);
+      said($("logs-said"), "Copied. Paste it into your message to whoever is helping you.", "ok");
+    } catch (e) {
+      $("log-title").textContent = "Support report: select it and copy";
+      $("log-text").textContent = text;
+      $("log-box").hidden = false;
+      said($("logs-said"), "Copying isn’t allowed here, so the report is shown below.", null);
+    }
+  } catch (e) { said($("logs-said"), errText(e), "bad"); }
+  finally { b.disabled = false; }
+});
+
+async function loadSystem(){
+  try {
+    sys = await api("/api/system");
+  } catch (e) {
+    fill($("sys-line"), el("span", {class: "said said--bad", text: "Couldn’t load system details. " + errText(e)}));
+    busy("system", false);
+    return;
+  }
+  renderSystem();
+  try { const r = await api("/api/diagnostics"); renderDiag(r); if (r.ran_at) $("diag-run").textContent = "Run again"; }
+  catch (e) { /* the intro stays */ }
+}
+
+// ---- advanced: fleet folders -------------------------------------------------
+
+let fleetLoaded = false;
+function renderFleet(){
+  const t = cfg.tenant;
+  if (t && t.display_name) $("fleet-tenant-name").textContent = t.display_name;
+  const fleet = cfg.fleet || {};
+  $("fleet_folder_id").value = fleet.folder_id || "";
+  $("fleet_escrow_folder_id").value = fleet.escrow_folder_id || "";
+  // Only once the saved values are in the fields: saving earlier would post
+  // empty strings, which clear the keys server-side.
+  fleetLoaded = true;
+  $("fleet-edit").disabled = false;
+}
+function fleetEditing(on){
+  ["fleet_folder_id", "fleet_escrow_folder_id"].forEach(id => { $(id).readOnly = !on; });
+  $("fleet-edit").hidden = on;
+  $("fleet-save-btn").hidden = !on;
+  $("fleet-save-btn").disabled = !(on && fleetLoaded);
+  $("fleet-cancel").hidden = !on;
+}
+$("fleet-edit").addEventListener("click", () => { fleetEditing(true); $("fleet_folder_id").focus(); said($("fleet-said"), ""); });
+$("fleet-cancel").addEventListener("click", () => { renderFleet(); fleetEditing(false); $("fleet-edit").focus(); });
+async function saveFleet(){
+  // The fleet block is shallow-merged server-side, so always post BOTH keys
+  // together; a partial post would wipe the other. Empty strings clear a key.
+  const body = {fleet: {
+    folder_id: $("fleet_folder_id").value.trim(),
+    escrow_folder_id: $("fleet_escrow_folder_id").value.trim(),
+  }};
+  await act($("fleet-save-btn"), $("fleet-said"), async () => {
+    await api("/api/config", {method: "POST", body});
+    cfg.fleet = Object.assign({}, cfg.fleet, body.fleet);
+    fleetEditing(false);
+    return "Saved.";
+  });
+}
+$("fleet-save-btn").addEventListener("click", saveFleet);
+
+// ---- load ------------------------------------------------------------------
+
+async function loadSettingsBlock(){
+  try {
+    settings = await api("/api/settings");
+  } catch (e) {
+    settings = null;
+    const msg = "Couldn’t load these settings. " + errText(e);
+    fill($("auto-rows"), el("p", {class: "said said--bad", text: msg}));
+    fill($("keep-graph"), el("p", {class: "said said--bad", text: msg}));
+    fill($("keep-index"));
+    busy("automatic", false);
+    return false;
+  }
+  renderAliases();
+  renderKeepOut();
+  renderAuto();
+  busy("automatic", false);
+  return true;
+}
+
+async function loadStats(){
+  try {
+    stats = await api("/api/dashboard/stats");
+    renderChip(stats.health && stats.health.state, stats.health && stats.health.reasons);
+    const t = C.time(stats.as_of);
+    const a = $("asof");
+    a.textContent = t || "not yet";
+    a.className = t ? "measured measured--cool" : "";
+  } catch (e) {
+    stats = null;
+    if (!e.offline) renderChip(null, [errText(e)]);
+  }
+}
+
+async function loadAll(){
+  await loadProfile();
+  await Promise.all([loadSettingsBlock(), loadStats()]);
+  renderSources();
+  busy("sources", false);
+  await Promise.all([renderConnections(), loadHidden(), loadSystem(), loadPending()]);
+  if (location.hash) {
+    const target = document.getElementById(location.hash.slice(1));
+    if (target) target.scrollIntoView();
+  }
+}
+loadAll();
+</script>
+</body>
+</html>
