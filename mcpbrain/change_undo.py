@@ -103,9 +103,19 @@ def _undo_consolidation(store, home, row):
     p = _need_payload(row)
     before, after = p["before"], p["after"]
     repo = config.records_dir(home)
-    for rel in before.get("graduated") or []:
-        slug = Path(rel).stem
-        records_write.remove_memory(repo, slug, "undo: consolidation")
+    grads = before.get("graduated") or []
+    recorded = after.get("graduated_content")
+    # Check every graduated file before changing anything: a file edited since
+    # (by hand or by the gardener) must not be deleted. A row without recorded
+    # content can't prove that, so it refuses too.
+    for rel in grads:
+        fp = Path(repo) / rel
+        if not isinstance(recorded, dict) or rel not in recorded:
+            raise Refused(CHANGED_SINCE)
+        if fp.exists() and fp.read_text() != recorded[rel]:
+            raise Refused(CHANGED_SINCE)
+    for rel in grads:
+        records_write.remove_memory(repo, Path(rel).stem, "undo: consolidation")
     after_tiers = after.get("tiers") or {}
     with store._connect(write=True) as db:
         for doc_id, tier in (before.get("tiers") or {}).items():
@@ -143,13 +153,29 @@ def _undo_bandit(store, home, row):
     config.write_config(home, {"recall_max_distance": p["before"]["recall_max_distance"]})
 
 
+_SUPPRESS_TYPES = ("tidy_suppress", "entity_suppressed")
+
+
+def _later_change_of(db, row: dict, types) -> bool:
+    """A later, not-undone change of any of `types` to the same ref_id."""
+    marks = ",".join("?" * len(types))
+    return db.execute(
+        f"SELECT 1 FROM change_log c WHERE c.change_type IN ({marks}) AND c.ref_id=? "
+        "AND c.id>? AND NOT EXISTS (SELECT 1 FROM change_log u WHERE u.change_type=? "
+        "AND u.ref_id=CAST(c.id AS TEXT)) LIMIT 1",
+        (*types, row["ref_id"], row["id"], _UNDONE)).fetchone() is not None
+
+
 def _undo_tidy_suppress(store, home, row):
     p = _need_payload(row)
     prior = p["before"].get("suppressed")
+    wrote = p["after"].get("suppressed") or {}
     with store._connect(write=True) as db:
-        cur = db.execute("SELECT 1 FROM entity_suppressions WHERE entity_id=?",
-                         (row["ref_id"],)).fetchone()
-        if cur is None:
+        cur = db.execute("SELECT reason, suppressed_at FROM entity_suppressions "
+                         "WHERE entity_id=?", (row["ref_id"],)).fetchone()
+        if cur is None or _later_change_of(db, row, _SUPPRESS_TYPES) or (
+                (cur["reason"] or "", cur["suppressed_at"] or "")
+                != (wrote.get("reason") or "", wrote.get("suppressed_at") or "")):
             raise Refused(CHANGED_SINCE)
         if prior:
             db.execute("UPDATE entity_suppressions SET reason=?, suppressed_at=? "
@@ -232,8 +258,10 @@ def _undo_action_status(store, home, row):
     p = _need_payload(row)
     before, after = p["before"], p["after"]
     with store._connect(write=True) as db:
-        cur = db.execute("SELECT status FROM actions WHERE id=?", (row["ref_id"],)).fetchone()
-        if cur is None or (cur["status"] or "") != (after.get("status") or ""):
+        cur = db.execute("SELECT status, resolved_by, resolved_at FROM actions WHERE id=?",
+                         (row["ref_id"],)).fetchone()
+        fields = ("status", "resolved_by", "resolved_at")
+        if cur is None or any((cur[f] or "") != (after.get(f) or "") for f in fields):
             raise Refused(CHANGED_SINCE)
         db.execute("UPDATE actions SET status=?, resolved_by=?, resolved_at=?, updated_at=? "
                    "WHERE id=?",
@@ -267,7 +295,9 @@ def _undo_snooze(store, home, row):
     with store._connect(write=True) as db:
         cur = db.execute("SELECT snoozed_until FROM actions WHERE id=?",
                          (row["ref_id"],)).fetchone()
-        if cur is None or (until and (cur["snoozed_until"] or "") != until.group(1)):
+        # No date in the summary means nothing to check against: refuse rather
+        # than overwrite a snooze set since.
+        if cur is None or until is None or (cur["snoozed_until"] or "") != until.group(1):
             raise Refused(CHANGED_SINCE)
         db.execute("UPDATE actions SET snoozed_until=?, updated_at=? WHERE id=?",
                    (prev or None, _now_iso(), row["ref_id"]))
@@ -327,9 +357,21 @@ def _undo_graph_correction(store, home, row):
         raise Refused(out.get("error") or CHANGED_SINCE)
 
 
+# graph_view.suppress_entity always writes this reason; a legacy
+# entity_suppressed row carries no revert_ref, so the reason is the evidence
+# that the suppression in place is still the one this row recorded.
+_GRAPH_UI_REASON = "graph-ui"
+
+
 def _undo_entity_suppressed(store, home, row):
-    if not store.unsuppress_entity(row["ref_id"]):
-        raise Refused(CHANGED_SINCE)
+    with store._connect(write=True) as db:
+        cur = db.execute("SELECT reason FROM entity_suppressions WHERE entity_id=?",
+                         (row["ref_id"],)).fetchone()
+        if (cur is None or (cur["reason"] or "") != _GRAPH_UI_REASON
+                or _later_change_of(db, row, _SUPPRESS_TYPES)):
+            raise Refused(CHANGED_SINCE)
+        db.execute("DELETE FROM entity_suppressions WHERE entity_id=?",  # admin-delete-ok
+                   (row["ref_id"],))
     _graph_changed()
 
 

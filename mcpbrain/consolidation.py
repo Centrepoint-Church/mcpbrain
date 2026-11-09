@@ -438,6 +438,16 @@ def _cluster(chunks: list[dict], embedder=None) -> list[list[dict]]:
     return _cluster_chunks(chunks)
 
 
+def _file_contents(repo: str, rels: list[str]) -> dict[str, str]:
+    from pathlib import Path
+    out = {}
+    for rel in rels:
+        fp = Path(repo) / rel
+        if fp.exists():
+            out[rel] = fp.read_text()
+    return out
+
+
 def _promote_sources(store, cluster: list[dict], prior_tiers: dict[str, str]) -> None:
     """Set each source chunk's tier to 'hot', reading its prior tier on the
     same connection first (first sighting wins, so a chunk in two clusters
@@ -503,7 +513,10 @@ def consolidate(store, home: str, *, cap: int = _CONSOLIDATION_CAP,
         revert_ref = revert_json(
             {"notes": notes, "tiers": prior_tiers, "graduated": graduated},
             {"notes": notes, "tiers": {d: "hot" for d in prior_tiers},
-             "graduated": graduated})
+             "graduated": graduated,
+             # What each graduated file held when written, so undo can refuse
+             # to delete one edited since.
+             "graduated_content": _file_contents(config.records_dir(home), graduated)})
     store.record_change(
         "consolidation_pass",
         summary=f"Consolidated {written} semantic notes from {len(clusters)} clusters",

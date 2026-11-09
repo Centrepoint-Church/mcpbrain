@@ -630,3 +630,125 @@ def test_routes_undo_feed_added_and_circle_title(tmp_path):
         assert code == 400
     finally:
         srv.stop()
+
+
+# --- fix round 1: changed again by a DIFFERENT change type or by hand -----------
+
+def _suppression(s, eid):
+    with s._connect() as db:
+        r = db.execute("SELECT reason, suppressed_at FROM entity_suppressions WHERE entity_id=?",
+                       (eid,)).fetchone()
+    return dict(r) if r else None
+
+
+def test_tidy_suppress_undo_refused_after_hand_resuppress(tmp_path):
+    from mcpbrain.review_apply import apply_orphan_verdicts
+    s = _store(tmp_path)
+    s.upsert_entity("acme-junk", "Acme Junk", "person")
+    s.record_finding("lint:orphan_entity", "acme-junk", summary="orphan")
+    fid = s.open_findings("lint:orphan_entity")[0]["id"]
+    apply_orphan_verdicts(s, [{"finding_id": fid, "verdict": "suppress"}], cap=5)
+    row = _last(s, "tidy_suppress")
+    s.unsuppress_entity("acme-junk")
+    s.suppress_entity("acme-junk", reason="user hid it")
+    held = _suppression(s, "acme-junk")
+    assert change_undo.undo(s, str(tmp_path), row["id"]) == {"ok": False, "reason": CHANGED_SINCE}
+    assert _suppression(s, "acme-junk") == held
+
+
+def test_capture_action_update_undo_refused_after_reopen_then_close(tmp_path):
+    from mcpbrain import drain
+    s = _store(tmp_path)
+    aid = s.add_unified_action(text="Book the Acme venue")
+    inbox = tmp_path / "capture_inbox"
+    inbox.mkdir()
+    (inbox / "cap-1.json").write_text(json.dumps(
+        {"kind": "action_update", "captured_at": "x", "source": "desktop",
+         "action_id": aid, "status": "done"}))
+    drain.drain_captures(s, home=tmp_path)
+    row = _last(s, "capture_action_update")
+    s.set_action_status(aid, "open", resolved_by="dashboard")
+    s.set_action_status(aid, "done", resolved_by="dashboard")
+    with s._connect() as db:
+        held = dict(db.execute("SELECT status, resolved_by, resolved_at FROM actions WHERE id=?",
+                               (aid,)).fetchone())
+    assert change_undo.undo(s, str(tmp_path), row["id"]) == {"ok": False, "reason": CHANGED_SINCE}
+    with s._connect() as db:
+        assert dict(db.execute("SELECT status, resolved_by, resolved_at FROM actions "
+                               "WHERE id=?", (aid,)).fetchone()) == held
+
+
+def test_legacy_snooze_without_date_is_refused(tmp_path):
+    s = _store(tmp_path)
+    aid = s.add_unified_action(text="Call Acme")
+    with s._connect(write=True) as db:
+        db.execute("UPDATE actions SET snoozed_until='2026-12-24' WHERE id=?", (aid,))
+    cid = s.record_change("action_snoozed", ref_id=str(aid), summary="Snoozed",
+                          revert_ref="snoozed_until:")
+    assert change_undo.undo(s, str(tmp_path), cid) == {"ok": False, "reason": CHANGED_SINCE}
+    with s._connect() as db:
+        assert db.execute("SELECT snoozed_until FROM actions WHERE id=?",
+                          (aid,)).fetchone()[0] == "2026-12-24"
+
+
+def test_entity_suppressed_undo_refused_after_later_tidy_suppress(tmp_path):
+    from mcpbrain import graph_view
+    from mcpbrain.review_apply import apply_orphan_verdicts
+    s = _store(tmp_path)
+    s.upsert_entity("acme-junk", "Acme Junk", "person")
+    graph_view.suppress_entity(s, "acme-junk")
+    row = _last(s, "entity_suppressed")
+    s.unsuppress_entity("acme-junk")
+    s.record_finding("lint:orphan_entity", "acme-junk", summary="orphan")
+    fid = s.open_findings("lint:orphan_entity")[0]["id"]
+    apply_orphan_verdicts(s, [{"finding_id": fid, "verdict": "suppress",
+                               "reason": "orphan"}], cap=5)
+    held = _suppression(s, "acme-junk")
+    assert held is not None
+    assert change_undo.undo(s, str(tmp_path), row["id"]) == {"ok": False, "reason": CHANGED_SINCE}
+    assert _suppression(s, "acme-junk") == held
+
+
+def test_entity_suppressed_undo_refused_when_reason_differs(tmp_path):
+    from mcpbrain import graph_view
+    s = _store(tmp_path)
+    s.upsert_entity("acme-junk", "Acme Junk", "person")
+    graph_view.suppress_entity(s, "acme-junk")
+    row = _last(s, "entity_suppressed")
+    s.suppress_entity("acme-junk", reason="user hid it")
+    assert change_undo.undo(s, str(tmp_path), row["id"]) == {"ok": False, "reason": CHANGED_SINCE}
+    assert _suppression(s, "acme-junk")["reason"] == "user hid it"
+
+
+def test_consolidation_undo_refused_when_graduated_file_edited(tmp_path, monkeypatch):
+    from mcpbrain import consolidation
+    s = _store(tmp_path)
+    repo = _records(tmp_path)
+    home = _home(tmp_path, repo, consolidation=True)
+    cluster = []
+    for i in range(5):
+        doc = f"acme-ep-{i}"
+        s.upsert_chunk(doc, f"Acme budget review item {i}", f"h{i}", {})
+        s.set_chunk_tier(doc, "warm")
+        cluster.append({"doc_id": doc, "text": f"Acme budget review item {i}",
+                        "metadata": {}, "salience": 5.0})
+    monkeypatch.setattr(consolidation, "_unconsolidated_salience", lambda store: 1e9)
+    monkeypatch.setattr(consolidation, "_episodic_chunks_for_consolidation",
+                        lambda store, cap: cluster)
+    monkeypatch.setattr(consolidation, "_cluster", lambda chunks, embedder=None: [cluster])
+    monkeypatch.setattr(consolidation, "_call_claude",
+                        lambda prompt: "Acme budget review settled the Q3 numbers.")
+    consolidation.consolidate(s, home)
+    row = _last(s, "consolidation_pass")
+    p = _payload(row)
+    rel = p["before"]["graduated"][0]
+    assert p["after"]["graduated_content"][rel] == (repo / rel).read_text()
+    (repo / rel).write_text("hand edited\n")
+    head = _head_subject(repo)
+    assert change_undo.undo(s, home, row["id"]) == {"ok": False, "reason": CHANGED_SINCE}
+    assert (repo / rel).read_text() == "hand edited\n"
+    assert all(s.get_chunk(d) for d in p["before"]["notes"])
+    with s._connect() as db:
+        assert {r[0] for r in db.execute(
+            "SELECT memory_tier FROM chunks WHERE doc_id LIKE 'acme-ep-%'")} == {"hot"}
+    assert _head_subject(repo) == head
