@@ -332,6 +332,31 @@ class ControlServer:
                     except Exception as exc:
                         log.exception("hidden entities list failed")
                         return h_json(self, 500, {"error": str(exc)})
+                if self.path.split("?")[0] == "/api/graph/unlinked":
+                    if server.store is None:
+                        return h_json(self, 503, {"error": "dashboard not available"})
+                    from mcpbrain import graph_view
+                    q = urllib.parse.parse_qs(urllib.parse.urlparse(self.path).query)
+                    try:
+                        page = int(q.get("page", ["1"])[0])
+                    except (TypeError, ValueError):
+                        page = 0
+                    if page < 1:
+                        return h_json(self, 400, worded(
+                            "That page isn't in the list. Pages are numbered from 1."))
+                    try:
+                        page_size = int(q.get("page_size", ["50"])[0])
+                    except (TypeError, ValueError):
+                        return h_json(self, 400, worded(
+                            "The number of entities a page shows has to be a whole number."))
+                    try:
+                        return h_json(self, 200, graph_view.list_unlinked(
+                            server.store, page=page, page_size=page_size,
+                            kinds=tuple(t for t in q.get("type", []) if t),
+                            q=q.get("q", [""])[0]))
+                    except Exception as exc:
+                        log.exception("unlinked list failed")
+                        return h_json(self, 500, {"error": str(exc)})
                 m = re.match(r"^/api/graph/entity/([^/?]+)$", self.path.split("?")[0])
                 if m:
                     if server.store is None: return h_json(self, 503, {"error": "dashboard not available"})

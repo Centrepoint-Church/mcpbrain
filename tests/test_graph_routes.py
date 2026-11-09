@@ -658,3 +658,159 @@ def test_unnamed_relations_and_unknown_type_are_reachable(tmp_path):
         assert code == 200 and {n["id"] for n in body["nodes"]} == {"p-lena", "o-north"}
     finally:
         srv.stop()
+
+
+# --- Follow-up Task 2: unlinked entities as a reviewable list --------------------
+
+def _unlinked_store(tmp_path):
+    """_graph_store plus twelve more unlinked people with known last_seen
+    dates, so paging has more than one page at the smallest page size."""
+    s = _graph_store(tmp_path)
+    with s._connect(write=True) as db:
+        db.execute("UPDATE entities SET last_seen='2026-01-01', org='Acme', mentions=2 "
+                   "WHERE id IN ('p-sam','x-stub','f-shed')")
+        for i in range(12):
+            db.execute("INSERT INTO entities(id, name, type, org, last_seen, mentions) "
+                       "VALUES(?,?,?,?,?,?)",
+                       (f"p-u{i:02d}", f"Pat Nguyen {i:02d}", "person", "example.org",
+                        f"2026-02-{i + 1:02d}", i))
+    return s
+
+
+def test_list_unlinked_pages_newest_first(tmp_path):
+    from mcpbrain import graph_view
+    s = _unlinked_store(tmp_path)
+    first = graph_view.list_unlinked(s, page=1, page_size=10)
+    assert first["total"] == 15 and first["page"] == 1 and first["page_size"] == 10
+    ids = [r["id"] for r in first["items"]]
+    assert ids == [f"p-u{i:02d}" for i in range(11, 1, -1)]
+    second = graph_view.list_unlinked(s, page=2, page_size=10)
+    # Ties on last_seen fall back to id, so paging is stable.
+    assert [r["id"] for r in second["items"]] == ["p-u01", "p-u00", "f-shed", "p-sam", "x-stub"]
+    row = first["items"][0]
+    assert set(row) == {"id", "name", "type", "org", "first_seen", "last_seen", "mentions"}
+    assert (row["name"], row["type"], row["org"], row["last_seen"], row["mentions"]) == (
+        "Pat Nguyen 11", "person", "example.org", "2026-02-12", 11)
+    # Past the last page: no rows, the same total.
+    past = graph_view.list_unlinked(s, page=3, page_size=10)
+    assert past["items"] == [] and past["total"] == 15
+
+
+def test_list_unlinked_clamps_page_size(tmp_path):
+    from mcpbrain import graph_view
+    s = _unlinked_store(tmp_path)
+    assert graph_view.list_unlinked(s, page_size=1)["page_size"] == 10
+    assert graph_view.list_unlinked(s, page_size=5000)["page_size"] == 200
+    assert len(graph_view.list_unlinked(s, page_size=5000)["items"]) == 15
+
+
+def test_list_unlinked_leaves_out_linked_and_hidden(tmp_path):
+    from mcpbrain import graph_view
+    s = _unlinked_store(tmp_path)
+    all_ids = {r["id"] for r in graph_view.list_unlinked(s, page_size=200)["items"]}
+    # Dana, Lena, Harbour Trust, Northgate and the quote have live links;
+    # Sam's only link was invalidated, so he counts as unlinked.
+    assert {"p-dana", "p-lena", "o-harbour", "o-north", "d-quote"}.isdisjoint(all_ids)
+    assert "p-sam" in all_ids
+    s.suppress_entity("p-sam", reason="graph-ui")
+    out = graph_view.list_unlinked(s, page_size=200)
+    assert "p-sam" not in {r["id"] for r in out["items"]} and out["total"] == 14
+
+
+def test_list_unlinked_kind_filter_matches_the_canvas(tmp_path):
+    from mcpbrain import graph_view
+    s = _unlinked_store(tmp_path)
+    with s._connect(write=True) as db:
+        db.execute("INSERT INTO entities(id, name, type) VALUES('x-blank', 'Blank kind', '')")
+    people = graph_view.list_unlinked(s, kinds=("person",), page_size=200)
+    assert people["total"] == 13
+    assert {r["type"] for r in people["items"]} == {"person"}
+    # 'unknown' takes in empty and unknown together, as the canvas does.
+    loose = graph_view.list_unlinked(s, kinds=("unknown",), page_size=200)
+    assert {r["id"] for r in loose["items"]} == {"x-stub", "x-blank"}
+    assert {r["type"] for r in loose["items"]} == {"unknown"}
+    canvas = graph_view.graph_canvas(s, unlinked=True, types=["unknown"])
+    assert {n["id"] for n in canvas["nodes"]} == {"x-stub", "x-blank"}
+    both = graph_view.list_unlinked(s, kinds=("facility", "unknown"), page_size=200)
+    assert {r["id"] for r in both["items"]} == {"x-stub", "x-blank", "f-shed"}
+
+
+def test_list_unlinked_name_filter(tmp_path):
+    from mcpbrain import graph_view
+    s = _unlinked_store(tmp_path)
+    with s._connect(write=True) as db:
+        db.execute("INSERT INTO entities(id, name, type) VALUES('t-pct', '100% Acme', 'topic')")
+        db.execute("INSERT INTO entities(id, name, type) VALUES('t-und', 'Acme_ops', 'topic')")
+    out = graph_view.list_unlinked(s, q="pat nguyen 0", page_size=200)
+    assert out["total"] == 10
+    assert graph_view.list_unlinked(s, q="  SAM ", page_size=200)["total"] == 1
+    # LIKE wildcards in what the owner typed are plain characters.
+    assert [r["id"] for r in graph_view.list_unlinked(s, q="%", page_size=200)["items"]] == ["t-pct"]
+    assert [r["id"] for r in graph_view.list_unlinked(s, q="_", page_size=200)["items"]] == ["t-und"]
+    assert graph_view.list_unlinked(s, q="acme", kinds=("topic",), page_size=200)["total"] == 2
+
+
+def test_list_unlinked_twelve_thousand_in_under_a_second(tmp_path):
+    import time
+
+    from mcpbrain import graph_view
+    s = _real_store(tmp_path)
+    with s._connect(write=True) as db:
+        db.executemany(
+            "INSERT INTO entities(id, name, type, org, last_seen) VALUES(?,?,?,?,?)",
+            [(f"p-{i:05d}", f"Dana Okafor {i}", "person", "Acme",
+              f"2026-{1 + i % 12:02d}-{1 + i % 28:02d}") for i in range(12000)])
+        db.execute("INSERT INTO entities(id, name, type) VALUES('o-acme', 'Acme', 'org')")
+        db.execute("INSERT INTO entities(id, name, type) VALUES('o-ex', 'Example', 'org')")
+        db.execute("INSERT INTO entity_relations(entity_a, relation, entity_b, strength) "
+                   "VALUES('o-acme', 'partner_of', 'o-ex', 1)")
+    t0 = time.perf_counter()
+    out = graph_view.list_unlinked(s, page=1, page_size=50)
+    took = time.perf_counter() - t0
+    assert out["total"] == 12000 and len(out["items"]) == 50
+    assert took < 1.0, f"took {took:.3f}s"
+
+
+def test_unlinked_route_pages_and_filters(tmp_path):
+    s = _unlinked_store(tmp_path)
+    srv = ControlServer(_Daemon(), str(tmp_path), store=s); srv.start()
+    try:
+        base = f"http://127.0.0.1:{srv.port}/api/graph/unlinked"
+        code, body = _get(base + "?page=2&page_size=10", srv.token)
+        assert code == 200 and body["total"] == 15 and body["page"] == 2 and len(body["items"]) == 5
+        code, body = _get(base, srv.token)
+        assert code == 200 and body["page"] == 1 and body["page_size"] == 50
+        code, body = _get(base + "?type=facility&type=unknown", srv.token)
+        assert {r["id"] for r in body["items"]} == {"x-stub", "f-shed"}
+        code, body = _get(base + "?q=Nguyen%2010", srv.token)
+        assert [r["id"] for r in body["items"]] == ["p-u10"]
+    finally:
+        srv.stop()
+
+
+def test_unlinked_route_refuses_a_bad_page_in_words(tmp_path):
+    s = _unlinked_store(tmp_path)
+    srv = ControlServer(_Daemon(), str(tmp_path), store=s); srv.start()
+    try:
+        base = f"http://127.0.0.1:{srv.port}/api/graph/unlinked"
+        for q in ("?page=0", "?page=-1", "?page=two", "?page_size=lots", "?page=1.5"):
+            try:
+                _get(base + q, srv.token)
+                assert False, f"expected 400 for {q}"
+            except urllib.error.HTTPError as e:
+                assert e.code == 400, q
+                body = json.loads(e.read())
+                assert body["worded"] is True and body["ok"] is False, q
+                assert body["reason"].endswith("."), q
+    finally:
+        srv.stop()
+
+
+def test_graph_page_serves_the_list_and_map_views(tmp_path):
+    srv = ControlServer(_Daemon(), str(tmp_path), store=None); srv.start()
+    try:
+        for q in ("?show=unlinked&as=map", "?show=unlinked&page=3&q=Dana"):
+            with urllib.request.urlopen(f"http://127.0.0.1:{srv.port}/graph{q}", timeout=5) as r:
+                assert r.status == 200
+    finally:
+        srv.stop()

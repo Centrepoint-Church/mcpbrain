@@ -239,3 +239,113 @@ def test_circles_close_in_hue_differ_in_lightness():
                 dh = min(abs(a[2] - b[2]), 360 - abs(a[2] - b[2]))
                 if dh < 30:
                     assert abs(a[0] - b[0]) >= 12, (mode, a, b)
+
+
+# --- Follow-up Task 2: unlinked entities as a reviewable list --------------------
+
+def _block(name):
+    m = re.search(rf"/\* {name}:start \*/(.*?)/\* {name}:end \*/", GRAPH, re.S)
+    assert m, f"{name} block missing"
+    return m.group(1)
+
+
+@pytest.mark.skipif(shutil.which("node") is None, reason="node not installed")
+def test_unlinked_list_and_map_views_round_trip_in_the_address(tmp_path):
+    js = _url_state_js() + r"""
+const out = {};
+for (const q of ["?show=unlinked", "?show=unlinked&as=map", "?show=unlinked&page=3&q=Dana",
+                 "?show=unlinked&page=0", "?as=map", "?page=4"]) {
+  const s = readUrlState(q);
+  out[q] = {state: s, back: writeUrlState(s), list: unlinkedQuery({...s, types: ["person", "org"]}, 50),
+            canvas: canvasQuery(s, 7), listed: listView(s)};
+}
+console.log(JSON.stringify(out));
+"""
+    p = tmp_path / "u.js"; p.write_text(js)
+    r = subprocess.run(["node", str(p)], capture_output=True, text=True)
+    assert r.returncode == 0, r.stderr
+    o = json.loads(r.stdout)
+    assert o["?show=unlinked"]["listed"] is True
+    assert o["?show=unlinked"]["back"] == "?show=unlinked"
+    assert o["?show=unlinked"]["list"] == "page=1&page_size=50&type=person&type=org"
+    # "Show on the map" keeps the filter and draws the capped canvas.
+    assert o["?show=unlinked&as=map"]["listed"] is False
+    assert o["?show=unlinked&as=map"]["back"] == "?show=unlinked&as=map"
+    assert "unlinked=1" in o["?show=unlinked&as=map"]["canvas"]
+    s = o["?show=unlinked&page=3&q=Dana"]
+    assert s["state"]["page"] == 3 and s["state"]["q"] == "Dana"
+    assert s["back"] == "?show=unlinked&page=3&q=Dana"
+    assert s["list"] == "page=3&page_size=50&q=Dana&type=person&type=org"
+    assert o["?show=unlinked&page=0"]["state"]["page"] == 1
+    # Outside the unlinked view the list's own state means nothing.
+    assert o["?as=map"]["back"] == "" and o["?page=4"]["back"] == ""
+    assert o["?as=map"]["listed"] is False
+
+
+@pytest.mark.skipif(shutil.which("node") is None, reason="node not installed")
+def test_pager_words(tmp_path):
+    js = ("const fmt = (n) => n.toLocaleString(\"en-AU\");\n"
+          "const plural = (n, one, many) => fmt(n) + \" \" + (n === 1 ? one : (many || one + \"s\"));\n"
+          + _block("unlinked-words") + r"""
+console.log(JSON.stringify({
+  mid: pagerWords(2, 9205, 50), one: pagerWords(1, 1, 50), empty: pagerWords(1, 0, 50),
+  pages: pageCount(9205, 50), none: pageCount(0, 50), back: settlePage(4, 0, 151, 50),
+  stay: settlePage(2, 3, 151, 50), first: settlePage(1, 0, 0, 50),
+  plain: emptyWords("", false), named: emptyWords("Dana", false), kinds: emptyWords("", true)
+}));
+""")
+    p = tmp_path / "w.js"; p.write_text(js)
+    r = subprocess.run(["node", str(p)], capture_output=True, text=True)
+    assert r.returncode == 0, r.stderr
+    o = json.loads(r.stdout)
+    assert o["mid"] == "Page 2 of 185, 9,205 entities"
+    assert o["one"] == "Page 1 of 1, 1 entity"
+    assert o["pages"] == 185 and o["none"] == 1
+    # A page emptied by a hide or a merge steps back; page 1 stays put.
+    assert o["back"] == 3 and o["stay"] == 2 and o["first"] == 1
+    assert o["plain"] == "No unlinked entities. Everything has at least one link."
+    assert "Dana" in o["named"] and o["named"] != o["plain"]
+    assert o["kinds"] != o["plain"]
+    for v in o.values():
+        if isinstance(v, str):
+            assert "—" not in v
+
+
+def test_unlinked_list_markup():
+    for marker in ('id="ulist"', 'id="ul-body"', 'id="ul-q"', 'id="ul-prev"', 'id="ul-next"',
+                   'id="ul-page"', 'id="ul-map"', 'id="ul-said"', 'id="view-list"',
+                   "/api/graph/unlinked?"):
+        assert marker in GRAPH, marker
+    # Columns: name, kind, organisation, last seen, actions.
+    head = re.search(r'<table class="table table--action ulist__table".*?</thead>', GRAPH, re.S)
+    assert head, "list table missing"
+    for col in ("Name", "Kind", "Organisation", "Last seen"):
+        assert f">{col}<" in head.group(0), col
+
+
+def test_unlinked_rows_use_the_existing_flows():
+    rows = _block("unlinked-rows")
+    # Open: the entity drawer.
+    assert "openEntity(r.id)" in rows
+    # Merge with: the drawer's merge search, preview and merge.
+    assert "Merge with…" in rows and "renderMerge()" in rows
+    # Hide: the existing suppress route, with Undo in place.
+    assert '"/api/graph/entity/" + encodeURIComponent(r.id), {method: "DELETE"}' in rows
+    assert "offerUndo(" in rows
+    # Kinds in words, last seen measured.
+    assert "kindWord(r.type)" in rows and 'class: "measured"' in rows
+    # No new write endpoints for the list.
+    assert "/api/graph/unlinked/" not in GRAPH
+
+
+def test_merge_and_hide_refresh_the_list_page():
+    js = GRAPH
+    assert "listView(url)" in js
+    # Ticking "Only entities with no links" opens the list, not the map.
+    m = re.search(r'\$\("f-unlinked"\)\.addEventListener\("change", \(e\) => \{(.*?)\}\);', js, re.S)
+    assert m and "url.asMap = false" in m.group(1)
+
+
+def test_dashboard_review_link_opens_the_list():
+    dash = (_WIZ / "dashboard.html").read_text(encoding="utf-8")
+    assert '<a class="link" href="/graph?show=unlinked">Review unlinked entities</a>' in dash

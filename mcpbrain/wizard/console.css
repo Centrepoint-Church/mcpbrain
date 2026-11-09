@@ -472,6 +472,26 @@ details.adv[open] > summary { margin-bottom: var(--space-md); }
 .relgroup { display: grid; gap: var(--space-2xs); }
 .relgroup .linkbtn { justify-self: start; gap: var(--space-2xs); }
 .drawer .inline:empty { display: none; }
+
+/* ---------- graph: unlinked entities as a list ---------- */
+.stage--list { overflow-y: auto; container-type: inline-size; }
+.ulist { display: grid; gap: var(--space-md); align-content: start; padding: var(--space-lg); }
+.ulist__head { display: flex; flex-wrap: wrap; gap: var(--space-md) var(--space-lg); align-items: end; justify-content: space-between; }
+.ulist__head h2 { font-size: var(--text-section); }
+.ulist__tools { display: flex; flex-wrap: wrap; gap: var(--space-sm); align-items: end; }
+.ulist__tools .input { width: 16rem; max-width: 100%; }
+.ulist .scroll-x { background: var(--color-paper); border: var(--rule-hair) solid var(--color-rule); border-radius: var(--radius-card); }
+.ulist__table .acts { justify-content: flex-end; flex-wrap: nowrap; }
+.ulist__empty { padding: var(--space-xl) var(--space-lg); text-align: center; font-size: var(--text-sm); }
+/* The list area narrows when the drawer opens: rows stack before a column clips. */
+@container (max-width: 52rem) {
+  .ulist__table thead { display: none; }
+  .ulist__table tr { display: grid; grid-template-columns: repeat(3, auto) minmax(0, 1fr); gap: var(--space-2xs) var(--space-md); align-items: baseline; padding: var(--space-sm) var(--space-md); border-bottom: var(--rule-hair) solid var(--color-rule); }
+  .ulist__table tr:last-child { border-bottom: 0; }
+  .ulist__table td { display: block; padding: 0; border: 0; text-align: left; }
+  .ulist__table td:first-child, .ulist__table td:last-child { grid-column: 1 / -1; }
+  .ulist__table .acts { justify-content: flex-start; flex-wrap: wrap; }
+}
 .filters__in { display: grid; gap: var(--space-md); }
 .filters > summary { cursor: pointer; list-style: none; display: inline-flex; align-items: center; gap: var(--space-xs); min-height: 40px; padding: 0 var(--space-md); border: var(--rule-hair) solid var(--color-rule-2); border-radius: var(--radius-pill); color: var(--color-ink); font-size: var(--text-sm); font-weight: 500; transition: background-color var(--dur-short) var(--ease-out); }
 .filters > summary::-webkit-details-marker { display: none; }
@@ -512,6 +532,7 @@ details.adv[open] > summary { margin-bottom: var(--space-md); }
   .gshell, .gshell.has-drawer { grid-template-columns: minmax(0, 1fr); height: auto; }
   .rail { border-right: 0; border-bottom: var(--rule-hair) solid var(--color-rule); overflow: visible; }
   .stage { height: 70vh; }
+  .stage--list { height: auto; min-height: 50vh; overflow: visible; }
   .drawer { border-left: 0; border-top: var(--rule-hair) solid var(--color-rule); overflow: visible; }
   .tab { font-size: var(--text-md); }
 }
@@ -538,4 +559,8 @@ details.adv[open] > summary { margin-bottom: var(--space-md); }
   .trail .acts { grid-column: 1; }
   .items li { grid-template-columns: minmax(0, 1fr); }
   .statusline .acts { margin-left: 0; }
+  .ulist { padding: var(--space-md); }
+  .ulist__tools, .ulist__tools .field { flex: 1 1 100%; }
+  .ulist__tools .input { width: 100%; }
+  .ulist__table .acts { justify-content: flex-start; flex-wrap: wrap; }
 }

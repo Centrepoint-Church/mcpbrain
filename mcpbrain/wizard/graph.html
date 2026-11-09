@@ -54,6 +54,7 @@
 
     <div class="banner" id="view-note" hidden>
       <span id="view-text"></span>
+      <button class="linkbtn" type="button" id="view-list" hidden>Show as a list</button>
       <button class="linkbtn" type="button" id="view-clear">Show the whole graph</button>
     </div>
 
@@ -110,6 +111,34 @@
     <section class="legend" id="legend" aria-labelledby="legend-h" hidden></section>
     <div class="tip" id="tip" hidden></div>
     <div class="stage__over" id="overlay" role="status"><div><p>Loading the graph.</p></div></div>
+    <section class="ulist" id="ulist" aria-labelledby="ul-h" hidden>
+      <div class="ulist__head">
+        <div>
+          <h2 id="ul-h">Entities with no links</h2>
+          <p class="small muted" id="ul-count" role="status">Loading the list.</p>
+        </div>
+        <div class="ulist__tools">
+          <div class="field">
+            <label for="ul-q">Filter by name</label>
+            <input class="input" type="search" id="ul-q" placeholder="Part of a name" autocomplete="off" spellcheck="false">
+          </div>
+          <button class="btn btn--sm" type="button" id="ul-map">Show on the map</button>
+        </div>
+      </div>
+      <p class="said" id="ul-said" role="status" hidden></p>
+      <div class="scroll-x">
+        <table class="table table--action ulist__table" aria-labelledby="ul-h">
+          <thead><tr><th scope="col">Name</th><th scope="col">Kind</th><th scope="col">Organisation</th><th scope="col">Last seen</th><th scope="col"><span class="visually-hidden">Actions</span></th></tr></thead>
+          <tbody id="ul-body"></tbody>
+        </table>
+      </div>
+      <p class="ulist__empty muted" id="ul-empty" hidden></p>
+      <div class="pager ulist__pager">
+        <button class="btn btn--sm" type="button" id="ul-prev">Previous</button>
+        <span class="small" id="ul-page"></span>
+        <button class="btn btn--sm" type="button" id="ul-next">Next</button>
+      </div>
+    </section>
   </div>
 
   <aside id="drawer" class="drawer" aria-labelledby="dw-name" hidden>
@@ -157,15 +186,20 @@ const UNCLASSIFIED = "unclassified";
 /* url-state:start */
 // The page's state lives in its address, so Overview links and the Back
 // button land on the same view: ?type= (repeatable), ?entity=, ?rel=,
-// ?show=unlinked, ?view=circles, ?since=24h, ?circle=.
+// ?show=unlinked, ?view=circles, ?since=24h, ?circle=. The unlinked view is a
+// list (?page=, ?q=) unless ?as=map asks for it drawn on the map.
 function readUrlState(search){
   const p = new URLSearchParams(search || "");
   const since = /^(\d{1,3})h$/.exec(p.get("since") || "");
+  const page = /^\d{1,6}$/.test(p.get("page") || "") ? Number(p.get("page")) : 1;
   return {
     types: p.getAll("type").filter(Boolean),
     entity: p.get("entity") || "",
     rel: p.get("rel") || "",
     unlinked: p.get("show") === "unlinked",
+    asMap: p.get("as") === "map",
+    page: Math.max(1, page),
+    q: (p.get("q") || "").trim(),
     view: p.get("view") === "circles" ? "circles" : "kinds",
     sinceHours: since ? Math.min(720, Number(since[1])) : 0,
     circle: /^\d+$/.test(p.get("circle") || "") ? p.get("circle") : ""
@@ -175,6 +209,9 @@ function writeUrlState(s){
   const p = new URLSearchParams();
   for (const t of s.types) p.append("type", t);
   if (s.unlinked) p.set("show", "unlinked");
+  if (s.unlinked && s.asMap) p.set("as", "map");
+  if (listView(s) && s.page > 1) p.set("page", String(s.page));
+  if (listView(s) && s.q) p.set("q", s.q);
   if (s.view === "circles") p.set("view", "circles");
   if (s.sinceHours) p.set("since", s.sinceHours + "h");
   if (s.circle) p.set("circle", s.circle);
@@ -194,6 +231,18 @@ function canvasQuery(s, minConn, org){
   if (s.unlinked) p.set("unlinked", "1");
   if (s.sinceHours) p.set("since_hours", String(s.sinceHours));
   if (s.circle) p.set("community", s.circle);
+  return p.toString();
+}
+// The unlinked view shows as a list, unless it was asked for on the map or a
+// drawer's relation group is open (that draws on the map).
+function listView(s){ return Boolean(s.unlinked && !s.asMap && !(s.entity && s.rel)); }
+// The list request for a state: s.types as the canvas gets them.
+function unlinkedQuery(s, size){
+  const p = new URLSearchParams();
+  p.set("page", String(s.page || 1));
+  p.set("page_size", String(size));
+  if (s.q) p.set("q", s.q);
+  for (const t of s.types) p.append("type", t);
   return p.toString();
 }
 /* url-state:end */
@@ -523,7 +572,7 @@ function renderTypeChips(){
     input.addEventListener("change", () => {
       for (const t of raw) input.checked ? ON.add(t) : ON.delete(t);
       url.types = sameSet(ON, defaultOn()) ? [] : [...ON];
-      url.entity = ""; url.rel = "";
+      url.entity = ""; url.rel = ""; url.page = 1;
       pushUrl(); load();
     });
     const name = r.key === UNCLASSIFIED ? "Unclassified" : kindPlural(r.key);
@@ -594,7 +643,8 @@ function renderViewNote(data){
   const bits = [];
   if (url.entity && url.rel) bits.push("Only the " + relWords(url.rel) + " links of one entity, as listed in its details.");
   if (url.unlinked && data){
-    bits.push(data.truncated
+    if (data.list) bits.push("Entities with no links: " + fmt(data.total) + " in all, a page at a time.");
+    else bits.push(data.truncated
       ? "Entities with no links: the newest " + fmt(data.nodes.length) + " of " + fmt(data.total) + "."
       : "Entities with no links: " + fmt(data.nodes.length) + " in all.");
     bits.push("This counts the kinds switched on under Kinds" + (kindsOnWords() ? " (" + kindsOnWords() + ")" : "") +
@@ -604,6 +654,7 @@ function renderViewNote(data){
   if (url.circle) bits.push("One circle.");
   $("view-note").hidden = bits.length === 0;
   $("view-text").textContent = bits.join(" ");
+  $("view-list").hidden = !(url.unlinked && url.asMap);
   $("f-unlinked").checked = url.unlinked;
   $("f-since").checked = Boolean(url.sinceHours);
   $("f-colour").value = url.view;
@@ -615,10 +666,16 @@ function renderViewNote(data){
 }
 $("view-clear").addEventListener("click", () => {
   url.unlinked = false; url.sinceHours = 0; url.circle = ""; url.entity = ""; url.rel = "";
+  url.asMap = false; url.page = 1; url.q = "";
   closeDrawer(false); pushUrl(); load();
 });
+// Ticking it opens the list; "Show on the map" draws the same entities.
 $("f-unlinked").addEventListener("change", (e) => {
-  url.unlinked = e.target.checked; url.entity = ""; url.rel = ""; pushUrl(); load(); });
+  url.unlinked = e.target.checked; url.asMap = false; url.page = 1; url.q = "";
+  if (url.unlinked) url.sinceHours = 0;
+  url.entity = ""; url.rel = ""; closeDrawer(false); pushUrl(); load(); });
+$("view-list").addEventListener("click", () => {
+  url.asMap = false; url.page = 1; url.entity = ""; url.rel = ""; closeDrawer(false); pushUrl(); load(); });
 $("f-since").addEventListener("change", (e) => {
   url.sinceHours = e.target.checked ? 24 : 0; url.entity = ""; url.rel = ""; pushUrl(); load(); });
 $("f-colour").addEventListener("change", (e) => {
@@ -629,6 +686,11 @@ $("f-colour").addEventListener("change", (e) => {
 function pushUrl(){
   const next = location.pathname + writeUrlState(url);
   if (next !== location.pathname + location.search) history.pushState(null, "", next);
+}
+// Typing a filter, or a page settling after a hide, takes no Back step.
+function replaceUrl(){
+  const next = location.pathname + writeUrlState(url);
+  if (next !== location.pathname + location.search) history.replaceState(null, "", next);
 }
 window.addEventListener("popstate", () => {
   url = readUrlState(location.search);
@@ -652,6 +714,12 @@ function overlay(text, action){
   fill($("overlay").firstElementChild, el("p", {text: text || ""}), action || null);
 }
 function showCount(){
+  if (listView(url) && LIST){
+    $("count").textContent = plural(LIST.total, "entity", "entities") + " with no links" +
+      (url.q ? " match the name filter." : ".");
+    $("count").title = "Hidden entities are not counted.";
+    return;
+  }
   $("count").textContent = TOTAL
     ? fmt(CURRENT.nodes.length) + " shown of " + plural(TOTAL, "entity", "entities") + "."
     : plural(CURRENT.nodes.length, "entity", "entities") + " shown.";
@@ -671,15 +739,19 @@ function draw(data){
 let loadSeq = 0;
 async function load(){
   const mine = ++loadSeq;
-  overlay("Loading the graph.");
+  const list = listView(url);
+  showStage(list);
+  overlay(list ? "" : "Loading the graph.");
   renderViewNote(null);
   try {
     if (url.entity && url.rel){ await loadRelationView(mine); return; }
     if (!ON.size){
       CURRENT = {nodes: [], links: [], communities: {}}; fg.graphData({nodes: [], links: []});
+      LIST = null; $("ulist").hidden = true;
       showCount(); renderLegend();
       overlay("Every kind is switched off. Turn one on under Kinds."); return;
     }
+    if (list){ await loadList(mine); return; }
     const s = {...url, types: typesForQuery()};
     let data;
     try {
@@ -704,7 +776,7 @@ async function load(){
     if (url.entity) await openEntity(url.entity, {fromUrl: true});
   } catch (e) {
     if (mine !== loadSeq) return;
-    overlay("The graph didn't load. " + errText(e),
+    overlay((list ? "The list didn't load. " : "The graph didn't load. ") + errText(e),
       el("button", {class: "btn btn--sm", type: "button", text: "Try again", onclick: () => load()}));
   }
 }
@@ -765,6 +837,12 @@ async function jumpToEntity(id){
 // Open one entity: on the map already, or pulled in with its neighbours.
 async function openEntity(id, opts){
   opts = opts || {};
+  if (listView(url)){
+    // The list has no map to place it on: the drawer alone.
+    if (!opts.fromUrl && url.entity !== id){ url.entity = id; url.rel = ""; pushUrl(); }
+    await openDrawer(id);
+    return;
+  }
   if (!CURRENT.nodes.some((x)=>x.id===id)){
     setSearchStatus("Adding it to the map.");
     if (!(await jumpToEntity(id))) return;
@@ -811,7 +889,7 @@ async function runSearch(raw){
     const loaded = new Set(CURRENT.nodes.map((n)=>n.id));
     hitEls = hits.map((h, i)=> el("li", {id: "hit-" + i, role: "option", "aria-selected": "false",
       onmousedown: (e)=> e.preventDefault(), onclick: ()=> pickSearchHit(h.id)},
-      el("strong", {text: h.name}), el("span", {text: hitLine(h, loaded.has(h.id))})));
+      el("strong", {text: h.name}), el("span", {text: hitLine(h, listView(url) ? undefined : loaded.has(h.id))})));
     fill($("f-hits"), hitEls);
     $("f-hits").hidden = false; hitActive = -1;
     finder.setAttribute("aria-expanded", "true");
@@ -1065,7 +1143,9 @@ function doMerge(btn, out, loserId, winnerId, name){
     // A refusal's words arrive as the error's message (worded reason).
     const r = await api("/api/graph/merge", {method: "POST", body: { loser_id: loserId, winner_id: winnerId, name }});
     closeDrawer(true);
-    setSearchStatus("Merged. Kept " + (r.winner_name || "the more linked one") + ".");
+    const msg = "Merged. Kept " + (r.winner_name || "the more linked one") + ".";
+    if (listView(url)) said($("ul-said"), msg, "ok");
+    else setSearchStatus(msg);
     load();
     return "";
   });
@@ -1097,6 +1177,125 @@ async function loadHidden(){
       n ? el("a", {class: "link", href: "/settings#hidden", text: "Restore them in Settings"}) : null);
   }catch(e){ p.textContent = "Hidden entities not counted. " + errText(e); }
 }
+
+// ---- the unlinked list: a page at a time, worked through row by row ----
+const LIST_SIZE = 50;
+let LIST = null;   // the page on screen: {items, total, page, page_size}
+/* unlinked-words:start */
+function pageCount(total, size){ return Math.max(1, Math.ceil(total / size)); }
+function pagerWords(page, total, size){
+  return "Page " + fmt(page) + " of " + fmt(pageCount(total, size)) + ", " + plural(total, "entity", "entities");
+}
+// A page that a hide or a merge emptied steps back one; page 1 stays.
+function settlePage(page, shown, total, size){
+  if (shown || page <= 1) return page;
+  return Math.max(1, Math.min(page - 1, pageCount(total, size)));
+}
+function emptyWords(q, kindsLimited){
+  if (q) return "No unlinked entity has \u201c" + q + "\u201d in its name.";
+  if (kindsLimited) return "No unlinked entities among the kinds switched on under Kinds.";
+  return "No unlinked entities. Everything has at least one link.";
+}
+/* unlinked-words:end */
+
+// The list takes the map's place; the map's own controls rest meanwhile.
+function showStage(list){
+  $("stage").classList.toggle("stage--list", list);
+  $("ulist").hidden = !list;
+  $("graph").hidden = list;
+  if (list){ $("legend").hidden = true; tip.hidden = true; }
+  for (const id of ["f-org", "f-colour", "f-layout", "f-since"]) $(id).disabled = list;
+}
+
+/* unlinked-rows:start */
+function unlinkedRow(r){
+  const name = r.name || "Unnamed";
+  const seen = dateWords(r.last_seen);
+  const hide = el("button", {class: "btn btn--sm", type: "button", text: "Hide",
+    "aria-label": "Hide " + name + " from the graph"});
+  hide.addEventListener("click", () => hideFromList(hide, r, name));
+  return el("tr", {},
+    el("td", {}, el("strong", {text: name})),
+    el("td", {text: kindWord(r.type)}),
+    el("td", {class: r.org ? null : "muted", text: r.org || "None"}),
+    el("td", {class: "nowrap"}, seen ? el("span", {class: "measured", text: seen})
+      : el("span", {class: "muted", text: "Not recorded"})),
+    el("td", {}, el("div", {class: "acts"},
+      el("button", {class: "btn btn--sm", type: "button", text: "Open",
+        "aria-label": "Open " + name, onclick: () => openEntity(r.id)}),
+      el("button", {class: "btn btn--sm", type: "button", text: "Merge with…",
+        "aria-label": "Merge " + name + " with another entity", onclick: () => mergeFromList(r.id)}),
+      hide)));
+}
+// Merge with: the drawer's own search, preview and merge.
+async function mergeFromList(id){
+  await openEntity(id);
+  if (dwId === id && dwData) renderMerge();
+}
+// Hide: the drawer's reversible hide, with Undo above the list.
+function hideFromList(btn, r, name){
+  act(btn, $("ul-said"), async () => {
+    const out = await api("/api/graph/entity/" + encodeURIComponent(r.id), {method: "DELETE"});
+    if (dwId === r.id) closeDrawer(true);
+    offerUndo($("ul-said"), name + " is hidden from the graph.", out.change_id,
+      async () => { await load(); loadHidden(); });
+    await load(); loadHidden();
+    return "";
+  });
+}
+/* unlinked-rows:end */
+
+async function loadList(mine){
+  const box = $("ulist");
+  box.setAttribute("aria-busy", "true");
+  let data;
+  try {
+    data = await api("/api/graph/unlinked?" + unlinkedQuery({...url, types: typesForQuery()}, LIST_SIZE));
+  } finally {
+    if (mine === loadSeq) box.removeAttribute("aria-busy");
+  }
+  if (mine !== loadSeq) return;
+  const settled = settlePage(url.page, data.items.length, data.total, data.page_size);
+  if (settled !== url.page){ url.page = settled; replaceUrl(); await loadList(mine); return; }
+  LIST = data;
+  if (document.activeElement !== $("ul-q")) $("ul-q").value = url.q;
+  fill($("ul-body"), data.items.map(unlinkedRow));
+  const empty = data.items.length === 0;
+  box.querySelector(".scroll-x").hidden = empty;
+  box.querySelector(".pager").hidden = empty;
+  $("ul-empty").hidden = !empty;
+  $("ul-empty").textContent = empty ? emptyWords(url.q, typesForQuery().length > 0) : "";
+  $("ul-count").textContent = empty ? "" : "Newest first. Open one to see what it is, merge it into the entity it duplicates, or hide it.";
+  $("ul-page").textContent = pagerWords(data.page, data.total, data.page_size);
+  $("ul-prev").disabled = data.page <= 1;
+  $("ul-next").disabled = data.page >= pageCount(data.total, data.page_size);
+  showCount();
+  renderViewNote({list: true, total: data.total});
+  if (url.entity && dwId !== url.entity) await openEntity(url.entity, {fromUrl: true});
+}
+async function turnPage(step){
+  url.page = Math.max(1, url.page + step);
+  said($("ul-said"), "");
+  pushUrl();
+  $("stage").scrollTop = 0;
+  await load();
+  // A button the last page switched off hands focus to the other one.
+  if (document.activeElement === document.body || (document.activeElement && document.activeElement.disabled))
+    (step > 0 ? $("ul-prev") : $("ul-next")).focus();
+}
+$("ul-prev").addEventListener("click", () => turnPage(-1));
+$("ul-next").addEventListener("click", () => turnPage(1));
+let listQT = null;
+$("ul-q").addEventListener("input", (e) => {
+  clearTimeout(listQT);
+  const v = e.target.value.trim();
+  listQT = setTimeout(() => {
+    if (v === url.q) return;
+    url.q = v; url.page = 1; said($("ul-said"), ""); replaceUrl(); load();
+  }, 250);
+});
+$("ul-map").addEventListener("click", () => {
+  url.asMap = true; url.entity = ""; url.rel = ""; closeDrawer(false); pushUrl(); load(); });
 
 // ---- top bar: health and time ----
 async function loadStats(){

@@ -90,13 +90,7 @@ def graph_canvas(store, *, min_conn: int = 7, org: str = "", community: str = ""
                     return dict(_EMPTY)
                 where.append("ec.community_id = :community")
             if types:
-                # graph_types reports an empty or missing type as 'unknown', so
-                # asking for 'unknown' also matches those rows.
-                type_expr = ("COALESCE(NULLIF(e.type, ''), 'unknown')" if "unknown" in types
-                             else "e.type")
-                where.append(f"{type_expr} IN (" + ",".join(f":t{i}" for i in range(len(types))) + ")")
-                for i, t in enumerate(types):
-                    params[f"t{i}"] = t
+                where.append(_kinds_sql(types, params))
             if recency_days and int(recency_days) > 0:
                 cutoff = (datetime.now(timezone.utc) - timedelta(days=int(recency_days))).strftime("%Y-%m-%d")
                 where.append("COALESCE(e.last_seen, '') >= :cutoff")
@@ -209,6 +203,84 @@ def _unlinked_sql(db) -> str:
     live = "AND r.invalidated_at IS NULL" if "invalidated_at" in cols else ""
     return (f"NOT EXISTS (SELECT 1 FROM entity_relations r WHERE r.entity_a = e.id {live}) "
             f"AND NOT EXISTS (SELECT 1 FROM entity_relations r WHERE r.entity_b = e.id {live})")
+
+
+def _kinds_sql(types, params: dict) -> str:
+    """WHERE clause for "one of these kinds", filling params. graph_types
+    reports an empty or missing type as 'unknown', so asking for 'unknown'
+    also matches those rows."""
+    types = list(types)
+    type_expr = ("COALESCE(NULLIF(e.type, ''), 'unknown')" if "unknown" in types
+                 else "e.type")
+    for i, t in enumerate(types):
+        params[f"t{i}"] = t
+    return f"{type_expr} IN (" + ",".join(f":t{i}" for i in range(len(types))) + ")"
+
+
+UNLINKED_PAGE_MIN = 10
+UNLINKED_PAGE_MAX = 200
+
+
+def list_unlinked(store, *, page: int = 1, page_size: int = 50,
+                  kinds: tuple[str, ...] = (), q: str = "") -> dict:
+    """One page of the entities with no live link on either side (the
+    canvas's unlinked view, _unlinked_sql), hidden ones left out, newest
+    first: {items: [{id, name, type, org, first_seen, last_seen, mentions}],
+    total, page, page_size}.
+
+    page_size is clamped to 10..200 and page to at least 1; a page past the
+    end comes back empty with the same total. kinds filters on the canvas's
+    type mapping (empty, NULL and 'unknown' together, reported as 'unknown').
+    q is a case-insensitive substring of the name, matched literally (no
+    LIKE wildcards). total is a COUNT over the same WHERE clause."""
+    page = max(1, int(page))
+    page_size = max(UNLINKED_PAGE_MIN, min(UNLINKED_PAGE_MAX, int(page_size)))
+    empty = {"items": [], "total": 0, "page": page, "page_size": page_size}
+    path = store._path if hasattr(store, "_path") else store.path
+    try:
+        db = _open_ro(Path(path))
+        try:
+            if not _table_exists(db, "entities"):
+                return empty
+            cols = {r["name"] for r in db.execute("PRAGMA table_info(entities)")}
+            where = [_unlinked_sql(db)]
+            params: dict = {}
+            if _table_exists(db, "entity_suppressions"):
+                where.append("NOT EXISTS (SELECT 1 FROM entity_suppressions s "
+                             "WHERE s.entity_id = e.id)")
+            if kinds:
+                where.append(_kinds_sql(kinds, params))
+            needle = " ".join(str(q or "").split()).casefold()
+            if needle:
+                # instr, not LIKE: '%' and '_' the owner types are plain
+                # characters, and casefold covers more than ASCII.
+                db.create_function("mcp_casefold", 1,
+                                   lambda v: str(v).casefold() if v is not None else "",
+                                   deterministic=True)
+                where.append("instr(mcp_casefold(e.name), :needle) > 0")
+                params["needle"] = needle
+            clause = " AND ".join(where)
+            total = int(db.execute(f"SELECT COUNT(*) FROM entities e WHERE {clause}",
+                                   params).fetchone()[0])
+            mentions = "COALESCE(e.mentions, 0)" if "mentions" in cols else "0"
+            first_seen = "COALESCE(e.first_seen, '')" if "first_seen" in cols else "''"
+            rows = db.execute(f"""
+                SELECT e.id, COALESCE(e.name, '') AS name,
+                       COALESCE(NULLIF(e.type, ''), 'unknown') AS type,
+                       COALESCE(e.org, '') AS org, {first_seen} AS first_seen,
+                       COALESCE(e.last_seen, '') AS last_seen, {mentions} AS mentions
+                FROM entities e
+                WHERE {clause}
+                ORDER BY COALESCE(e.last_seen, '') DESC, e.id
+                LIMIT :limit OFFSET :offset
+            """, {**params, "limit": page_size, "offset": (page - 1) * page_size}).fetchall()
+            return {"items": [dict(r) for r in rows], "total": total,
+                    "page": page, "page_size": page_size}
+        finally:
+            db.close()
+    except sqlite3.Error as exc:
+        log.warning("list_unlinked: read failed (%s)", exc)
+        return empty
 
 
 def graph_types(store) -> list[dict]:
