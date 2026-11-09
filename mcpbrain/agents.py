@@ -351,6 +351,19 @@ def restart_agent(platform: str) -> None:
         raise ValueError(f"Unsupported platform: {platform!r}")
 
 
+class LoginAgentError(RuntimeError):
+    """The login agent could not be changed (the reason is the message)."""
+
+
+def _rc(res) -> int:
+    return int(getattr(res, "returncode", 1))
+
+
+def _win_task_exists(run) -> bool:
+    return _rc(run(["schtasks", "/query", "/tn", _TASK_NAME],
+                   check=False, capture_output=True, text=True)) == 0
+
+
 def set_login_start(platform: str, *, home: str, on: bool, run=None,
                     plist_path: Path | None = None) -> bool:
     """Point the daemon's login agent at the owner's "Start when I log in" choice.
@@ -359,11 +372,13 @@ def set_login_start(platform: str, *, home: str, on: bool, run=None,
     - darwin rewrites the installed plist (RunAtLoad/KeepAlive, see
       launchd_plist) without reloading it; launchd reads it again at login.
       The installed binary and MCPBRAIN_HOME are carried over from the plist.
-    - win32 runs `schtasks /change /tn mcpbrain /enable|/disable`.
+    - win32 with a scheduled task runs `schtasks /change /tn mcpbrain
+      /enable|/disable`; with the Startup-folder fallback (shim, no task) it
+      removes the shortcut for off and recreates it for on.
 
-    Returns True when an installed agent definition was changed, False when
-    there is none to change (agent not installed, or the Windows Startup-folder
-    fallback, which has no task to switch). `run` and `plist_path` are
+    Returns True when an installed agent was changed, False when no agent is
+    installed (nothing to change; the caller still records the choice).
+    Raises LoginAgentError when the change failed. `run` and `plist_path` are
     injectable for tests.
     """
     run = run or subprocess.run
@@ -381,15 +396,80 @@ def set_login_start(platform: str, *, home: str, on: bool, run=None,
             log.warning("start-at-login: could not parse %s (%s); rebuilding", path, exc)
             from mcpbrain import setup as _setup
             mcpbrain_bin, agent_home = _setup._mcpbrain_bin(), str(home)
-        path.write_text(launchd_plist(mcpbrain_bin=mcpbrain_bin, home=agent_home,
-                                      start_at_login=on))
+        try:
+            path.write_text(launchd_plist(mcpbrain_bin=mcpbrain_bin, home=agent_home,
+                                          start_at_login=on))
+        except OSError as exc:
+            raise LoginAgentError(f"could not write {path.name}: {exc}") from exc
         log.info("start-at-login %s: rewrote %s (applies at next login)",
                  "on" if on else "off", path)
         return True
     if platform == "win32":
-        res = run(["schtasks", "/change", "/tn", _TASK_NAME, "/enable" if on else "/disable"],
-                  check=False)
-        return getattr(res, "returncode", 1) == 0
+        if _win_task_exists(run):
+            res = run(["schtasks", "/change", "/tn", _TASK_NAME,
+                       "/enable" if on else "/disable"],
+                      check=False, capture_output=True, text=True)
+            if _rc(res) != 0:
+                why = (getattr(res, "stderr", "") or getattr(res, "stdout", "") or "").strip()
+                raise LoginAgentError(f"schtasks /change failed: {why or 'exit ' + str(_rc(res))}")
+            return True
+        shim = _win_shim_path(str(home), _TASK_NAME)
+        if not shim.exists():
+            log.info("start-at-login: no scheduled task or shim; config only")
+            return False
+        lnk = _startup_shortcut_path(_TASK_NAME)
+        if on:
+            _create_startup_shortcut(_TASK_NAME, shim_path=shim, run=run)
+        else:
+            try:
+                lnk.unlink(missing_ok=True)
+            except OSError as exc:
+                raise LoginAgentError(f"could not remove the Startup shortcut: {exc}") from exc
+        return True
+    raise ValueError(f"Unsupported platform: {platform!r}")
+
+
+def start_agent(platform: str, *, home: str | None = None, run=None) -> bool:
+    """Start the daemon through its login agent. Daemon only, and never kills.
+
+    For the tray's "Start mcpbrain" and the Windows restart helper; unlike
+    restart_agent it never touches the tray and never runs taskkill (which on
+    Windows would kill the calling mcpbrain.exe too).
+    - darwin: `launchctl kickstart gui/<uid>/com.mcpbrain` (no -k). If the job
+      is not loaded, load the plist and try once more.
+    - win32: `schtasks /run` the daemon task. If login start is off the task
+      is disabled, so enable it, run it, and disable it again to keep the
+      owner's choice. With the Startup-folder install (no task) run the shim.
+    Returns True when the start was issued successfully.
+    """
+    run = run or subprocess.run
+    from mcpbrain import config
+    home = str(home) if home is not None else str(config.app_dir())
+    if platform == "darwin":
+        uid = getattr(os, "getuid", lambda: 0)()
+        kick = ["launchctl", "kickstart", f"gui/{uid}/{_LABEL}"]
+        if _rc(run(kick, check=False)) == 0:
+            return True
+        if _LAUNCHD_PATH.exists():
+            run(["launchctl", "load", str(_LAUNCHD_PATH)], check=False)
+            return _rc(run(kick, check=False)) == 0
+        return False
+    if platform == "win32":
+        if _win_task_exists(run):
+            disabled = not config.start_at_login(home)
+            if disabled:
+                run(["schtasks", "/change", "/tn", _TASK_NAME, "/enable"], check=False)
+            try:
+                ok = _rc(run(["schtasks", "/run", "/tn", _TASK_NAME], check=False)) == 0
+            finally:
+                if disabled:
+                    run(["schtasks", "/change", "/tn", _TASK_NAME, "/disable"], check=False)
+            return ok
+        shim = _win_shim_path(home, _TASK_NAME)
+        if shim.exists():
+            wscript, _args = startup_shortcut_target(shim_path=shim)
+            return _rc(run([wscript, str(shim)], check=False)) == 0
+        return False
     raise ValueError(f"Unsupported platform: {platform!r}")
 
 
@@ -407,6 +487,10 @@ def _install_launchd(*, mcpbrain_bin: str, home: str) -> None:
     log.info("wrote %s", _LAUNCHD_PATH)
     subprocess.run(["launchctl", "load", "-w", str(_LAUNCHD_PATH)], check=True)
     log.info("launchd agent loaded")
+    if not config.start_at_login(home):
+        # RunAtLoad is false, so loading does not start it; setup and doctor's
+        # agent repair wait for the daemon to come up, so start it now.
+        start_agent("darwin", home=home)
 
 
 def _uninstall_launchd() -> None:  # pragma: no cover
@@ -469,10 +553,6 @@ def _install_schtasks(*, mcpbrain_bin: str, home: str) -> None:  # pragma: no co
                                                    subcommand="daemon", wait=True))
             _register_schtasks_xml(task_name=_TASK_NAME, shim_path=shim_path)
             log.info("Windows scheduled task '%s' created (RestartOnFailure)", _TASK_NAME)
-            # A reinstall or update keeps the owner's "Start when I log in" choice.
-            from mcpbrain import config
-            if not config.start_at_login(home):
-                set_login_start("win32", home=home, on=False)
         except Exception:
             # Malformed/rejected XML must not abort the whole install (the previous
             # behaviour, via check=True) -- fall back to the plain /TR registration
@@ -491,21 +571,52 @@ def _install_schtasks(*, mcpbrain_bin: str, home: str) -> None:  # pragma: no co
                                                    subcommand="daemon", wait=False))
             subprocess.run(schtasks_args(mcpbrain_bin=mcpbrain_bin, home=home), check=True)
             log.info("Windows scheduled task '%s' created via CLI fallback", _TASK_NAME)
-            from mcpbrain import config
-            if not config.start_at_login(home):
-                set_login_start("win32", home=home, on=False)
     else:
         _install_startup_shortcut(_TASK_NAME, shim_path=shim_path)
         log.info("Task Scheduler blocked; installed Startup-folder shortcut for '%s'", _TASK_NAME)
+    _apply_login_choice_after_install(home)
 
 
-def _install_startup_shortcut(task_name, *, shim_path) -> None:  # pragma: no cover
+def _apply_login_choice_after_install(home: str, run=None) -> None:
+    """After a Windows (re)install, keep the owner's "Start when I log in" choice.
+
+    The install registers the agent enabled (and the Startup-folder path starts
+    the daemon itself). With login start off, switch the agent off again and,
+    for the scheduled-task path, start the daemon now (start_agent briefly
+    re-enables the task to run it), since setup and doctor wait for it.
+    """
+    from mcpbrain import config
+    if config.start_at_login(home):
+        return
+    run = run or subprocess.run
+    task = _win_task_exists(run)
+    try:
+        set_login_start("win32", home=home, on=False, run=run)
+    except LoginAgentError:
+        log.exception("could not switch the login agent off after install")
+    if task:
+        start_agent("win32", home=home, run=run)
+
+
+def _create_startup_shortcut(task_name, *, shim_path, run=None) -> None:
+    """Write the Startup-folder .lnk that runs the shim at logon (no start)."""
+    run = run or subprocess.run
     wscript, args = startup_shortcut_target(shim_path=shim_path)
     lnk = _startup_shortcut_path(task_name)
     ps = (f"$s=New-Object -ComObject WScript.Shell;"
           f"$sc=$s.CreateShortcut('{lnk}');$sc.TargetPath='{wscript}';"
           f"$sc.Arguments='{args}';$sc.Save()")
-    subprocess.run(["powershell", "-NoProfile", "-Command", ps], check=True)
+    res = run(["powershell", "-NoProfile", "-Command", ps], check=False)
+    if _rc(res) != 0:
+        raise LoginAgentError(f"could not create the Startup shortcut (exit {_rc(res)})")
+
+
+def _install_startup_shortcut(task_name, *, shim_path) -> None:  # pragma: no cover
+    try:
+        _create_startup_shortcut(task_name, shim_path=shim_path)
+    except LoginAgentError as exc:
+        raise subprocess.CalledProcessError(1, "powershell") from exc
+    wscript, _args = startup_shortcut_target(shim_path=shim_path)
     subprocess.run([wscript, str(shim_path)], check=False)   # start now
 
 

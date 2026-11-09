@@ -181,13 +181,15 @@ class TrayController:
 
 
 def _start_daemon_via_agent() -> None:
-    """Default "Start mcpbrain" action: agents.restart_agent for this platform.
+    """Default "Start mcpbrain" action: agents.start_agent for this platform.
 
-    Never raises: a failure leaves the menu showing "Daemon not running".
+    start_agent starts the daemon only and never kills anything (restart_agent's
+    Windows taskkill would kill this tray). Never raises: a failure leaves the
+    menu showing "Daemon not running".
     """
     from mcpbrain import agents
     try:
-        agents.restart_agent(sys.platform)
+        agents.start_agent(sys.platform)
     except Exception:  # noqa: BLE001
         import logging
         logging.getLogger(__name__).exception("tray: starting the daemon failed")

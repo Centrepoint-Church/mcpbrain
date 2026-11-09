@@ -80,6 +80,45 @@ def test_request_restart_stops_then_restarts_without_watchdog_exit():
     assert order == ["stop", ("restart", "darwin")]
 
 
+def test_request_restart_win32_spawns_helper_and_never_taskkills(monkeypatch, tmp_path):
+    d = FakeDaemon()
+    order = []
+    d.stop = lambda: order.append("stop")
+    monkeypatch.setattr(agents, "restart_agent",
+                        lambda p: pytest.fail("win32 restart must not use restart_agent"))
+    monkeypatch.setattr(agents.subprocess, "run",
+                        lambda *a, **k: pytest.fail(f"no subprocess.run: {a}"))
+    t = system_ops.request_restart(d, platform="win32", home=str(tmp_path),
+                                   spawn=lambda argv: order.append(("spawn", argv)))
+    t.join(5)
+    assert order[0][0] == "spawn" and order[1] == "stop"
+    argv = order[0][1]
+    assert argv[1:4] == ["-m", "mcpbrain.system_ops", "start-after"]
+    assert argv[4].isdigit() and argv[5] == str(tmp_path)
+    assert not any("taskkill" in a for a in argv)
+
+
+def test_request_restart_win32_spawn_failure_does_not_stop():
+    d = FakeDaemon()
+
+    def bad(argv):
+        raise OSError("no python")
+
+    system_ops.request_restart(d, platform="win32", home="h", spawn=bad).join(5)
+    assert d.calls == []
+
+
+def test_start_after_exit_waits_then_starts(tmp_path):
+    seen = []
+    ok = system_ops.start_after_exit(
+        4242, str(tmp_path), platform="win32",
+        wait=lambda pid, t: seen.append(("wait", pid)),
+        sleep=lambda s: seen.append("sleep"),
+        start=lambda p, home: seen.append(("start", p, home)) or True)
+    assert ok is True
+    assert seen == [("wait", 4242), "sleep", ("start", "win32", str(tmp_path))]
+
+
 def test_restart_route_replies_202_before_restart_agent(server, monkeypatch):
     srv, d, base = server
     released = threading.Event()
@@ -160,31 +199,148 @@ def test_login_toggle_without_installed_agent_only_writes_config(tmp_path):
     assert config.start_at_login(str(tmp_path)) is False
 
 
-def test_login_toggle_windows_uses_schtasks_change(tmp_path):
-    calls = []
+class _Res:
+    def __init__(self, rc=0, stderr=""):
+        self.returncode = rc
+        self.stderr = stderr
+        self.stdout = ""
 
-    class R:
-        returncode = 0
+
+def _runner(rcs=None):
+    """A fake subprocess.run: records argv; rc per argv[1] (e.g. '/query')."""
+    calls = []
+    rcs = rcs or {}
 
     def run(cmd, **kw):
-        calls.append(cmd)
-        return R()
+        calls.append(list(cmd))
+        key = cmd[1] if len(cmd) > 1 else cmd[0]
+        rc = rcs.get(key, 0)
+        return _Res(*rc) if isinstance(rc, tuple) else _Res(rc)
 
-    system_ops.set_start_at_login(str(tmp_path), False, platform="win32", run=run)
+    return run, calls
+
+
+def test_login_toggle_windows_uses_schtasks_change(tmp_path):
+    run, calls = _runner()
+    assert system_ops.set_start_at_login(str(tmp_path), False, platform="win32",
+                                         run=run)["ok"] is True
     system_ops.set_start_at_login(str(tmp_path), True, platform="win32", run=run)
-    assert calls == [["schtasks", "/change", "/tn", "mcpbrain", "/disable"],
-                     ["schtasks", "/change", "/tn", "mcpbrain", "/enable"]]
+    changes = [c for c in calls if c[1] == "/change"]
+    assert changes == [["schtasks", "/change", "/tn", "mcpbrain", "/disable"],
+                       ["schtasks", "/change", "/tn", "mcpbrain", "/enable"]]
+
+
+def test_login_toggle_failure_reports_and_keeps_config(tmp_path):
+    run, calls = _runner({"/change": (1, "ERROR: Access is denied.")})
+    out = system_ops.set_start_at_login(str(tmp_path), False, platform="win32", run=run)
+    assert out["ok"] is False and "Access is denied" in out["error"]
+    assert "start_at_login" not in config.read_config(str(tmp_path))
+
+
+def test_login_toggle_startup_folder_fallback(tmp_path, monkeypatch):
+    monkeypatch.setenv("APPDATA", str(tmp_path / "appdata"))
+    shim = agents._win_shim_path(str(tmp_path), "mcpbrain")
+    shim.parent.mkdir(parents=True)
+    shim.write_text("shim")
+    lnk = agents._startup_shortcut_path("mcpbrain")
+    lnk.parent.mkdir(parents=True)
+    lnk.write_text("lnk")
+    run, calls = _runner({"/query": 1})            # no scheduled task
+    out = system_ops.set_start_at_login(str(tmp_path), False, platform="win32", run=run)
+    assert out["ok"] is True and not lnk.exists()
+    assert config.start_at_login(str(tmp_path)) is False
+    out = system_ops.set_start_at_login(str(tmp_path), True, platform="win32", run=run)
+    assert out["ok"] is True
+    ps = [c for c in calls if c[0] == "powershell"]
+    assert len(ps) == 1 and str(lnk) in ps[0][-1]
+    assert not any("taskkill" in c[0] for c in calls)
+    assert config.start_at_login(str(tmp_path)) is True
+
+
+def test_login_toggle_startup_shortcut_failure(tmp_path, monkeypatch):
+    monkeypatch.setenv("APPDATA", str(tmp_path / "appdata"))
+    shim = agents._win_shim_path(str(tmp_path), "mcpbrain")
+    shim.parent.mkdir(parents=True)
+    shim.write_text("shim")
+    run, calls = _runner({"/query": 1, "-NoProfile": 1})
+    out = system_ops.set_start_at_login(str(tmp_path), True, platform="win32", run=run)
+    assert out["ok"] is False
+    assert "start_at_login" not in config.read_config(str(tmp_path))
+
+
+# -- start_agent (daemon only, never kills) -------------------------------------
+
+def test_start_agent_darwin_kickstarts_without_kill(tmp_path):
+    run, calls = _runner()
+    assert agents.start_agent("darwin", home=str(tmp_path), run=run) is True
+    assert len(calls) == 1
+    assert calls[0][:2] == ["launchctl", "kickstart"] and "-k" not in calls[0]
+    assert calls[0][2].endswith("/com.mcpbrain")
+
+
+def test_start_agent_win32_disabled_task_enable_run_disable(tmp_path):
+    config.write_config(str(tmp_path), {"start_at_login": False})
+    run, calls = _runner()
+    assert agents.start_agent("win32", home=str(tmp_path), run=run) is True
+    assert [c[1:] for c in calls] == [["/query", "/tn", "mcpbrain"],
+                                      ["/change", "/tn", "mcpbrain", "/enable"],
+                                      ["/run", "/tn", "mcpbrain"],
+                                      ["/change", "/tn", "mcpbrain", "/disable"]]
+    assert not any(c[0] == "taskkill" for c in calls)
+
+
+def test_start_agent_win32_enabled_task_just_runs(tmp_path):
+    run, calls = _runner()
+    agents.start_agent("win32", home=str(tmp_path), run=run)
+    assert [c[1] for c in calls] == ["/query", "/run"]
+
+
+def test_start_agent_win32_startup_folder_runs_shim(tmp_path):
+    shim = agents._win_shim_path(str(tmp_path), "mcpbrain")
+    shim.parent.mkdir(parents=True)
+    shim.write_text("shim")
+    run, calls = _runner({"/query": 1})
+    assert agents.start_agent("win32", home=str(tmp_path), run=run) is True
+    assert calls[-1][0].lower().endswith("wscript.exe") and calls[-1][1] == str(shim)
+    assert not any(c[0] == "taskkill" for c in calls)
+
+
+def test_windows_install_keeps_login_off_and_starts_daemon(tmp_path):
+    config.write_config(str(tmp_path), {"start_at_login": False})
+    run, calls = _runner()
+    agents._apply_login_choice_after_install(str(tmp_path), run=run)
+    assert ["schtasks", "/change", "/tn", "mcpbrain", "/disable"] in calls
+    assert ["schtasks", "/run", "/tn", "mcpbrain"] in calls
+    assert calls[-1] == ["schtasks", "/change", "/tn", "mcpbrain", "/disable"]
+    assert not any(c[0] == "taskkill" for c in calls)
+
+
+def test_windows_install_with_login_on_changes_nothing(tmp_path):
+    run, calls = _runner()
+    agents._apply_login_choice_after_install(str(tmp_path), run=run)
+    assert calls == []
 
 
 def test_install_launchd_keeps_owner_login_choice(tmp_path, monkeypatch):
     config.write_config(str(tmp_path), {"start_at_login": False})
     plist = tmp_path / "LaunchAgents" / "com.mcpbrain.plist"
     monkeypatch.setattr(agents, "_LAUNCHD_PATH", plist)
-    ran = []
-    monkeypatch.setattr(agents.subprocess, "run", lambda cmd, **kw: ran.append(cmd))
+    run, ran = _runner()
+    monkeypatch.setattr(agents.subprocess, "run", run)
     agents._install_launchd(mcpbrain_bin="/opt/m", home=str(tmp_path))
     assert "<key>RunAtLoad</key>\n    <false/>" in plist.read_text()
-    assert ran and ran[0][:2] == ["launchctl", "load"]
+    # Loaded, then started: RunAtLoad false would leave setup waiting forever.
+    assert ran[0][:2] == ["launchctl", "load"]
+    assert ran[1][:2] == ["launchctl", "kickstart"] and "-k" not in ran[1]
+    assert len(ran) == 2
+
+
+def test_install_launchd_login_on_only_loads(tmp_path, monkeypatch):
+    monkeypatch.setattr(agents, "_LAUNCHD_PATH", tmp_path / "com.mcpbrain.plist")
+    run, ran = _runner()
+    monkeypatch.setattr(agents.subprocess, "run", run)
+    agents._install_launchd(mcpbrain_bin="/opt/m", home=str(tmp_path))
+    assert [c[:2] for c in ran] == [["launchctl", "load"]]
 
 
 def test_login_route_and_system_route(server, monkeypatch):
@@ -198,6 +354,12 @@ def test_login_route_and_system_route(server, monkeypatch):
     with pytest.raises(urllib.error.HTTPError) as e:
         _req("POST", base + "/api/system/login", srv.token, {"on": "no"})
     assert e.value.code == 400
+    monkeypatch.setattr(system_ops, "set_start_at_login",
+                        lambda home, on: {"ok": False, "error": "schtasks /change failed"})
+    with pytest.raises(urllib.error.HTTPError) as e:
+        _req("POST", base + "/api/system/login", srv.token, {"on": True})
+    assert e.value.code == 500
+    assert json.loads(e.value.read())["ok"] is False
     body = json.loads(_req("GET", base + "/api/system", srv.token).read())
     assert body["start_at_login"] is True
     assert body["model"] == {"cached": True, "downloading": False, "error": None}

@@ -217,14 +217,33 @@ def test_menu_hides_start_when_daemon_up():
     assert "Start mcpbrain" not in labels
 
 
-def test_default_start_calls_restart_agent(monkeypatch):
+def test_default_start_uses_start_agent_not_restart(monkeypatch):
     import threading
     from mcpbrain import agents
     done = threading.Event()
     seen = []
     monkeypatch.setattr(agents, "restart_agent",
-                        lambda platform: (seen.append(platform), done.set()))
+                        lambda platform: seen.append(("restart", platform)))
+    monkeypatch.setattr(agents, "start_agent",
+                        lambda platform, **kw: (seen.append(("start", platform)), done.set()))
     c = TrayController(FakeClient(up=False))
     c.on_start_daemon()
     assert done.wait(5)
-    assert seen == [sys.platform]
+    assert seen == [("start", sys.platform)]
+
+
+def test_tray_start_on_win32_issues_no_taskkill(monkeypatch, tmp_path):
+    import types
+    from mcpbrain import agents, tray
+    monkeypatch.setenv("MCPBRAIN_HOME", str(tmp_path))
+    monkeypatch.setattr(tray, "sys", types.SimpleNamespace(platform="win32"))
+    calls = []
+
+    class R:
+        returncode = 0
+
+    monkeypatch.setattr(agents.subprocess, "run",
+                        lambda cmd, **kw: (calls.append(list(cmd)), R())[1])
+    tray._start_daemon_via_agent()
+    assert ["schtasks", "/run", "/tn", "mcpbrain"] in calls
+    assert not any(c[0] == "taskkill" for c in calls)

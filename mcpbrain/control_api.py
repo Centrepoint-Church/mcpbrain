@@ -543,14 +543,15 @@ class ControlServer:
                 # daemon, and the new one listens on a new port and token.
                 from mcpbrain import system_ops
                 h_json(h, 202, {"restarting": True})
-                system_ops.request_restart(d)
+                system_ops.request_restart(d, home=self.home)
                 return None
             if h.path == "/api/system/login":
                 on = body.get("on")
                 if not isinstance(on, bool):
                     return h_json(h, 400, {"error": "on must be true or false"})
                 from mcpbrain import system_ops
-                return h_json(h, 200, system_ops.set_start_at_login(self.home, on))
+                out = system_ops.set_start_at_login(self.home, on)
+                return h_json(h, 200 if out.get("ok") else 500, out)
             if h.path == "/api/update/apply":
                 from mcpbrain import system_ops
                 try:

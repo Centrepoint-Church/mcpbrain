@@ -38,20 +38,41 @@ def _version() -> str:
 
 # -- restart -------------------------------------------------------------------
 
-def request_restart(daemon, *, platform: str | None = None, restart=None) -> threading.Thread:
+def request_restart(daemon, *, platform: str | None = None, restart=None, spawn=None,
+                    home=None) -> threading.Thread:
     """Restart the daemon through its login agent, after the caller has replied.
 
-    Runs on its own thread: daemon.stop() first (stops and joins maintenance and
-    wakes run() so it leaves SingleWriterLock cleanly), then
-    agents.restart_agent(platform). The thread is non-daemon so the interpreter
-    waits for the restart call even once run() has returned and main() is
-    exiting. Never uses Daemon._restart_process: that records a watchdog exit
-    and spends the 3-per-6-hours budget meant for real stalls.
+    darwin (and anything not Windows): a thread calls daemon.stop() (stops and
+    joins maintenance, wakes run() so it leaves SingleWriterLock cleanly), then
+    agents.restart_agent(platform), whose `launchctl kickstart -k` has launchd
+    relaunch us. The thread is non-daemon so the interpreter waits for that
+    call even once run() has returned and main() is exiting.
 
-    Returns the thread (tests join it).
+    win32: restart_agent would `taskkill` this very process before it could
+    `schtasks /run`. Instead, first spawn a detached, windowless helper
+    (`python -m mcpbrain.system_ops start-after <pid> <home>`) that waits for
+    this process to exit and then runs agents.start_agent; then stop.
+
+    Never uses Daemon._restart_process: that records a watchdog exit and spends
+    the 3-per-6-hours budget meant for real stalls. `restart` and `spawn` are
+    injectable for tests. Returns the thread (tests join it).
     """
+    import os
     platform = platform or sys.platform
-    if restart is None:
+    if platform == "win32":
+        from mcpbrain import config
+        home = str(home) if home is not None else str(config.app_dir())
+        argv = [sys.executable, "-m", "mcpbrain.system_ops", "start-after",
+                str(os.getpid()), home]
+        try:
+            (spawn or _spawn_detached)(argv)
+        except Exception:  # noqa: BLE001 — without a helper, stopping would leave nothing running
+            log.exception("restart: could not spawn the start helper; not stopping")
+            t = threading.Thread(target=lambda: None)
+            t.start()
+            return t
+        restart = None
+    elif restart is None:
         from mcpbrain import agents
         restart = agents.restart_agent
 
@@ -60,6 +81,8 @@ def request_restart(daemon, *, platform: str | None = None, restart=None) -> thr
             daemon.stop()
         except Exception:  # noqa: BLE001 — still restart; the agent replaces us
             log.exception("restart: daemon.stop() failed; restarting anyway")
+        if restart is None:
+            return
         try:
             restart(platform)
         except Exception:  # noqa: BLE001
@@ -70,6 +93,63 @@ def request_restart(daemon, *, platform: str | None = None, restart=None) -> thr
     return t
 
 
+def _spawn_detached(argv: list[str]) -> None:  # pragma: no cover — Windows process flags
+    import subprocess
+    flags = (getattr(subprocess, "DETACHED_PROCESS", 0x00000008)
+             | getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0x00000200)
+             | getattr(subprocess, "CREATE_NO_WINDOW", 0x08000000))
+    subprocess.Popen(argv, creationflags=flags, close_fds=True,
+                     stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
+                     stderr=subprocess.DEVNULL)
+
+
+def _wait_for_exit(pid: int, timeout_s: float) -> None:  # pragma: no cover — OS process APIs
+    """Block until process `pid` has exited, or timeout_s passes."""
+    import time
+    if sys.platform == "win32":
+        import ctypes
+        k32 = ctypes.windll.kernel32
+        h = k32.OpenProcess(0x00100000, False, pid)   # SYNCHRONIZE
+        if not h:
+            return   # already gone
+        try:
+            k32.WaitForSingleObject(h, int(timeout_s * 1000))
+        finally:
+            k32.CloseHandle(h)
+        return
+    import os
+    deadline = time.monotonic() + timeout_s
+    while time.monotonic() < deadline:
+        try:
+            os.kill(pid, 0)
+        except OSError:
+            return
+        time.sleep(0.5)
+
+
+def start_after_exit(pid: int, home: str, *, wait=None, start=None, sleep=None,
+                     platform: str | None = None) -> bool:
+    """The Windows restart helper: wait for the old daemon to exit, then start it.
+
+    The short pause lets the scheduled task's shim (wscript) finish too, so
+    `schtasks /run` is not ignored as a second instance.
+    """
+    import time
+    (wait or _wait_for_exit)(pid, 120.0)
+    (sleep or time.sleep)(2.0)
+    if start is None:
+        from mcpbrain import agents
+        start = agents.start_agent
+    return bool(start(platform or sys.platform, home=home))
+
+
+def _main(argv: list[str]) -> int:
+    if len(argv) == 3 and argv[0] == "start-after":
+        return 0 if start_after_exit(int(argv[1]), argv[2]) else 1
+    print("usage: python -m mcpbrain.system_ops start-after <pid> <home>", file=sys.stderr)
+    return 2
+
+
 # -- start at login ------------------------------------------------------------
 
 def set_start_at_login(home, on: bool, *, platform: str | None = None, run=None,
@@ -78,13 +158,20 @@ def set_start_at_login(home, on: bool, *, platform: str | None = None, run=None,
 
     The only writer of the `start_at_login` config key. Rewrites the daemon's
     login agent (agents.set_login_start) without reloading it, so the running
-    daemon is untouched and the change applies at next login.
+    daemon is untouched and the change applies at next login. When the agent
+    change fails, returns {"ok": False, "error": ...} and leaves config alone.
     """
     from mcpbrain import agents, config
     on = bool(on)
+    try:
+        agents.set_login_start(platform or sys.platform, home=str(home), on=on, run=run,
+                               plist_path=plist_path)
+    except Exception as exc:  # noqa: BLE001 — LoginAgentError or an unexpected OS error
+        log.exception("start at login: changing the login agent failed")
+        return {"ok": False, "error": str(exc) or exc.__class__.__name__}
+    # Only after the agent changed (or there is none to change), so the
+    # recorded choice never disagrees with what the agent will do.
     config.write_config(str(home), {"start_at_login": on})
-    agents.set_login_start(platform or sys.platform, home=str(home), on=on, run=run,
-                           plist_path=plist_path)
     return {"ok": True, "applies": "next_login"}
 
 
@@ -335,3 +422,7 @@ def support_report(home, daemon_status, *, diagnostics: Diagnostics | None = Non
     out += ["", f"== Daemon log (last {REPORT_LOG_LINES} lines) =="]
     out += log_lines or ["(empty)"]
     return redact("\n".join(out) + "\n", home, st)
+
+
+if __name__ == "__main__":  # the Windows restart helper (see request_restart)
+    raise SystemExit(_main(sys.argv[1:]))
