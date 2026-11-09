@@ -947,3 +947,80 @@ def test_daemon_status_open_findings_is_the_grouped_count(tmp_path, home):
     s.record_finding("agent_stderr", "b.err", summary="Enrichment task failed")
     s.record_finding("lint:orphan_entity", "e1", summary="orphan")
     assert d.status()["open_findings"] == 1
+
+
+# =========================================================================================
+# Fix round 2: decide and clear answer in words, never with exception text
+# =========================================================================================
+
+_SECRET = "sqlite3.OperationalError: database is locked at 0xdeadbeef"
+
+
+def test_failed_decline_reason_is_worded(tmp_path, home, monkeypatch):
+    from mcpbrain import auto_changes
+    s = _store(tmp_path)
+    pid = auto_changes.propose(s, "circles", "7", "Name circle 7 Acme volunteers", {})
+
+    def boom(*a, **k):
+        raise RuntimeError(_SECRET)
+    monkeypatch.setattr(auto_changes, "_settle", boom)
+    out = auto_changes.decide(s, home, pid, approve=False)
+    assert out == {"ok": False, "reason": auto_changes.DECLINE_FAILED}
+    row = _pending_row(s, pid)
+    assert row["status"] == "pending" and _SECRET in row["error"]
+
+
+def test_unexpected_approve_failure_reason_is_worded(tmp_path, home, monkeypatch):
+    from mcpbrain import auto_changes
+    s = _store(tmp_path)
+    pid = auto_changes.propose(s, "circles", "7", "Name circle 7", {})
+
+    def boom(*a, **k):
+        raise RuntimeError(_SECRET)
+    monkeypatch.setattr(auto_changes, "_decide_claimed", boom)
+    out = auto_changes.decide(s, home, pid, approve=True)
+    assert out == {"ok": False, "reason": auto_changes.APPROVE_FAILED}
+    assert _SECRET in _pending_row(s, pid)["error"]
+
+
+def test_decline_saved_then_later_step_fails_reports_ok(tmp_path, home, monkeypatch):
+    from mcpbrain import auto_changes
+    s = _store(tmp_path)
+    pid = auto_changes.propose(s, "circles", "7", "Name circle 7", {})
+
+    def boom(*a, **k):
+        raise RuntimeError(_SECRET)
+    monkeypatch.setattr(auto_changes, "_close_finding", boom)
+    assert auto_changes.decide(s, home, pid, approve=False) == {"ok": True, "reason": ""}
+    assert _pending_row(s, pid)["status"] == "declined"
+
+
+@pytest.mark.parametrize("approve", [True, False])
+def test_no_decide_or_clear_reason_carries_exception_text(tmp_path, home, monkeypatch, approve):
+    from mcpbrain import auto_changes
+    s = _store(tmp_path)
+
+    def boom(*a, **k):
+        raise RuntimeError(_SECRET)
+    reasons = []
+    for kind in ("circles", "draft_style"):
+        monkeypatch.setitem(auto_changes.APPLY, kind, boom)
+        pid = auto_changes.propose(s, kind, "t-" + kind, "Acme change", {})
+        reasons.append(auto_changes.decide(s, home, pid, approve=approve)["reason"])
+        reasons.append(auto_changes.clear(s, pid)["reason"])
+    monkeypatch.setattr(auto_changes, "_settle", boom)
+    monkeypatch.setattr(auto_changes, "_close_finding", boom)
+    pid = auto_changes.propose(s, "circles", "t-2", "Acme change 2", {})
+    reasons.append(auto_changes.decide(s, home, pid, approve=approve)["reason"])
+    for r in reasons:
+        assert "deadbeef" not in r and "OperationalError" not in r, r
+
+
+def test_reference_not_applied_reasons_are_words(tmp_path, home):
+    from mcpbrain import auto_changes
+    s = _store(tmp_path)
+    for payload in ({"lane": "nowhere", "filename": "acme.md"},
+                    {"lane": "reference", "filename": "a/b.md"}):
+        with pytest.raises(auto_changes.NotApplied) as e:
+            auto_changes._apply_reference(s, home, payload)
+        assert str(e.value) == "That file can't be changed this way"

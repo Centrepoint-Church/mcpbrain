@@ -44,6 +44,10 @@ _INTERRUPTED = "interrupted"
 # An interrupted change the owner checked and marked handled.
 _CLEARED = "cleared"
 INTERRUPTED = "This may have been applied, check it before doing anything else"
+# Fixed words for a failure the owner can only retry; the exception itself
+# goes to the log and the row's error column, never to the page.
+DECLINE_FAILED = "That couldn't be declined. Try again in a moment."
+APPROVE_FAILED = "That couldn't be finished. Try again in a moment."
 NOT_INTERRUPTED = "Only a change that stopped part way can be cleared"
 # Status writes that must not be lost are retried with these pauses (seconds).
 _RETRY_PAUSES = (0.05, 0.2, 0.5)
@@ -208,8 +212,20 @@ def decide(store, home, pending_id: int, *, approve: bool) -> dict:
         return _decide_claimed(store, home, row, approve)
     except Exception as exc:  # noqa: BLE001 -- never leave the row claimed
         log.exception("auto_changes: deciding pending change %s failed", row["id"])
+        if not approve and _status(store, row["id"]) == _DECLINED:
+            # The decline itself was saved; only a later step failed (logged).
+            return {"ok": True, "reason": ""}
         _release(store, row["id"], f"Failed: {exc}")
-        return {"ok": False, "reason": f"Failed: {exc}"}
+        return {"ok": False, "reason": APPROVE_FAILED if approve else DECLINE_FAILED}
+
+
+def _status(store, pid: int) -> str:
+    try:
+        with store._connect() as db:
+            r = db.execute("SELECT status FROM pending_changes WHERE id=?", (pid,)).fetchone()
+        return r["status"] if r is not None else ""
+    except Exception:  # noqa: BLE001
+        return ""
 
 
 def _decide_claimed(store, home: str, row: dict, approve: bool) -> dict:
@@ -245,12 +261,7 @@ def _decide_claimed(store, home: str, row: dict, approve: bool) -> dict:
 
 def _landed(store, pid: int) -> bool:
     """Did a change APPLY recorded already mark this row applied?"""
-    try:
-        with store._connect() as db:
-            r = db.execute("SELECT status FROM pending_changes WHERE id=?", (pid,)).fetchone()
-        return r is not None and r["status"] == _APPLIED
-    except Exception:  # noqa: BLE001
-        return False
+    return _status(store, pid) == _APPLIED
 
 
 def _finish_applied(store, pid: int, change_id, error: str) -> dict:
@@ -430,8 +441,12 @@ def _apply_reference(store, home, payload) -> int:
             raise NotApplied(CHANGED_SINCE)
     try:
         committed, cid = tools.gardener_write(store, home, payload)
-    except (ValueError, FileNotFoundError) as exc:
-        raise NotApplied(str(exc)) from exc
+    except FileNotFoundError as exc:
+        log.info("auto_changes: reference change not applied: %s", exc)
+        raise NotApplied("That file isn't in the records folder any more") from exc
+    except ValueError as exc:
+        log.info("auto_changes: reference change not applied: %s", exc)
+        raise NotApplied("That file can't be changed this way") from exc
     if not committed:
         raise NotApplied("The file already says this")
     return cid
@@ -441,7 +456,14 @@ def _apply_voice(store, home, payload) -> int:
     from mcpbrain.voice_apply import apply_suggestions
     out = apply_suggestions(store, home, suggestion_ids=payload.get("suggestion_ids"))
     if out.get("blocked"):
-        raise NotApplied(str(out["blocked"]))
+        log.info("auto_changes: voice change not applied: %s", out["blocked"])
+        blocked = str(out["blocked"])
+        raise NotApplied("Voice changes are cooling down; try again in a few days"
+                         if blocked.startswith("cooldown") else
+                         "Voice changes are switched off" if "not enabled" in blocked else
+                         "These voice suggestions are no longer waiting"
+                         if "no pending" in blocked else
+                         "The voice file couldn't be updated")
     if not out.get("applied"):
         raise NotApplied("These voice suggestions are no longer waiting")
     return out.get("change_id") or 0

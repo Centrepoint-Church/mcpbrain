@@ -872,7 +872,7 @@ def test_exception_inside_settle_leaves_row_pending_and_listed(server, monkeypat
         raise RuntimeError("settle failed")
     monkeypatch.setattr(auto_changes, "_settle", bad_settle)
     code, out = _req(srv, "POST", f"/api/pending/{pid}/decline")
-    assert code == 409 and "settle failed" in out["reason"]
+    assert code == 409 and out["reason"] == auto_changes.DECLINE_FAILED
     assert _pending(s)[0]["status"] == "pending"
     assert [i["id"] for i in _req(srv, "GET", "/api/pending")[1]["items"]] == [pid]
     monkeypatch.undo()
