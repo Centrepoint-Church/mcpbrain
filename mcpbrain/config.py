@@ -1110,6 +1110,38 @@ def generated_drive_folders(home) -> list[str]:
     return _ingest_list(home, "generated_drive_folders")
 
 
+def excluded_senders(home) -> list[str]:
+    """Senders whose mail is never indexed (`ingest.exclude_senders`). Each
+    entry is a full address or a domain (`example.org` / `@example.org`, which
+    also covers its subdomains). Default []."""
+    return _ingest_list(home, "exclude_senders")
+
+
+def excluded_labels(home) -> list[str]:
+    """Gmail labels whose mail is never indexed (`ingest.exclude_labels`), by
+    name or id. Default []."""
+    return _ingest_list(home, "exclude_labels")
+
+
+_GOOGLE_SOURCES = ("gmail", "drive", "calendar")
+
+
+def source_enabled(home, name: str) -> bool:
+    """Whether a source syncs new items. Gmail, Drive and Calendar read
+    `sources.<name>` (default True); anarlog keeps its own opt-in switch,
+    `anarlog.enabled` (default False, see anarlog_db_path). Turning a source
+    off stops new items and keeps what is already indexed. Unknown names are
+    False."""
+    cfg = read_config(home)
+    if name == "anarlog":
+        block = cfg.get("anarlog")
+        return bool(block.get("enabled", False)) if isinstance(block, dict) else False
+    if name not in _GOOGLE_SOURCES:
+        return False
+    block = cfg.get("sources")
+    return bool(block.get(name, True)) if isinstance(block, dict) else True
+
+
 def prompt_recall_enabled(home) -> bool:
     """Whether the UserPromptSubmit hook injects brain recall (default ON).
 

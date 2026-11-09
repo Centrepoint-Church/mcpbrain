@@ -47,6 +47,13 @@ def _write_private(path, text):
             pass
         raise
 
+# GET route -> source_controls list function.
+_CHUNK_LIST_ROUTES = {"/api/chunks/cold": "list_cold",
+                      "/api/chunks/waiting": "list_waiting",
+                      "/api/chunks/reflow-gave-up": "list_reflow_gave_up"}
+_SYNC_SOURCES = ("gmail", "drive", "calendar", "anarlog")
+
+
 def h_json(h, code, obj):
     b = json.dumps(obj).encode()
     h.send_response(code); h.send_header("Content-Type","application/json")
@@ -172,6 +179,25 @@ class ControlServer:
                 if self.path == "/api/settings":
                     from mcpbrain import settings_api
                     return h_json(self, 200, settings_api.get_settings(server.home))
+                if self.path.split("?")[0] in _CHUNK_LIST_ROUTES:
+                    if server.store is None:
+                        return h_json(self, 503, {"error": "dashboard not available"})
+                    from mcpbrain import source_controls
+                    q = urllib.parse.parse_qs(urllib.parse.urlparse(self.path).query)
+                    try:
+                        page = int(q.get("page", ["1"])[0])
+                        size = int(q.get("page_size", [str(source_controls.PAGE_SIZE)])[0])
+                    except (TypeError, ValueError):
+                        return h_json(self, 400, {"error": "page and page_size must be integers"})
+                    if page < 1 or size < 1:
+                        return h_json(self, 400, {"error": "page and page_size must be at least 1"})
+                    fn = getattr(source_controls, _CHUNK_LIST_ROUTES[self.path.split("?")[0]])
+                    try:
+                        return h_json(self, 200, fn(server.store, server.home,
+                                                    page=page, page_size=size))
+                    except Exception as exc:
+                        log.exception("%s failed", self.path)
+                        return h_json(self, 500, {"error": str(exc)})
                 if self.path in ("/api/pending", "/api/findings"):
                     if server.store is None:
                         return h_json(self, 503, {"error": "dashboard not available"})
@@ -467,8 +493,19 @@ class ControlServer:
             if h.path == "/api/sync-now":
                 # Wake the daemon for an immediate sync->drain->prepare cycle. The
                 # backfill fan-out uses this to advance to the next batch in seconds
-                # instead of waiting out the normal interval.
-                d.sync_now(); return h_json(h, 200, {"woken": True})
+                # instead of waiting out the normal interval. With {"source": X}
+                # the next cycle syncs only that source (console "Sync" per row).
+                source = body.get("source")
+                if source is None:
+                    d.sync_now(); return h_json(h, 200, {"woken": True})
+                if source not in _SYNC_SOURCES:
+                    return h_json(h, 400, {"error": "source must be one of "
+                                                    + ", ".join(_SYNC_SOURCES)})
+                from mcpbrain import config as _config
+                if not _config.source_enabled(str(self.home), source):
+                    return h_json(h, 409, {"error": f"{source} is switched off"})
+                d.sync_now(source)
+                return h_json(h, 200, {"woken": True, "source": source})
             if h.path == "/api/model/ensure":
                 d.ensure_model(); return h_json(h, 202, {"started": True})
             if h.path == "/api/connect-desktop":
@@ -554,11 +591,6 @@ class ControlServer:
             if h.path == "/api/auth/start":
                 threading.Thread(target=d.start_auth, daemon=True).start()
                 return h_json(h, 202, {"started": True})
-            if h.path == "/api/enrich-backfill/start":
-                threading.Thread(target=d.start_enrich_backfill, daemon=True).start()
-                return h_json(h, 202, {"started": True})
-            if h.path == "/api/enrich-backfill/cancel":
-                d.cancel_enrich_backfill(); return h_json(h, 200, {"cancelled": True})
             if h.path == "/api/bootstrap-baseline":
                 # Import the org snapshot + shared-drive ingest caches before the
                 # first sync, or re-run on demand (wizard / doctor / `mcpbrain
@@ -633,6 +665,21 @@ class ControlServer:
                     return h_json(h, 200 if out["status"] == "applied" else 409, out)
                 out = gc.decline(self.store, cid)
                 return h_json(h, 200 if out["status"] == "declined" else 404, out)
+
+            if h.path in ("/api/chunks/reinclude", "/api/chunks/prioritise"):
+                if self.store is None:
+                    return h_json(h, 503, {"error": "dashboard not available"})
+                ids = body.get("doc_ids")
+                if not isinstance(ids, list) or not ids or \
+                        not all(isinstance(i, str) and i for i in ids):
+                    return h_json(h, 400, {"error": "doc_ids must be a non-empty list of strings"})
+                if len(ids) > 1000:
+                    return h_json(h, 400, {"error": "at most 1000 doc_ids per request"})
+                if h.path == "/api/chunks/reinclude":
+                    changed = self.store.reinclude_chunks(ids)
+                else:
+                    changed = self.store.prioritise_chunks(ids)
+                return h_json(h, 200, {"ok": True, "changed": changed})
 
             if h.path == "/api/settings":
                 from mcpbrain import settings_api

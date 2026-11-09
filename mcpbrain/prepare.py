@@ -426,12 +426,22 @@ def _chunk_meta(chunk: dict) -> dict:
     return meta if isinstance(meta, dict) else {}
 
 
+def _forced(meta: dict) -> bool:
+    """The owner re-included this chunk from the console (Store.
+    reinclude_chunks): no automatic gate may cold-mark it again."""
+    return meta.get("force_enrich") is True
+
+
 def _is_derived(chunk: dict, rules) -> bool:
     """True when the chunk's source class is derived (not evidence, not a
     DUPLICATE — a duplicate carries its canonical's evidence and is handled by
-    the dedupe path, not cold-marked here)."""
+    the dedupe path, not cold-marked here). False for a chunk the owner
+    re-included (`metadata.force_enrich`)."""
     from mcpbrain import source_class as sc
-    cls = sc.classify(chunk.get("doc_id") or "", _chunk_meta(chunk),
+    meta = _chunk_meta(chunk)
+    if _forced(meta):
+        return False
+    cls = sc.classify(chunk.get("doc_id") or "", meta,
                       rules if rules is not None else sc.Rules())
     return not (cls is sc.SourceClass.DUPLICATE or sc.is_evidence(cls))
 
@@ -500,11 +510,15 @@ def should_enrich(chunk: dict, rules=None) -> bool:
     The caller marks them 'cold' via store.set_enrich_state; they never enter
     the extraction queue while cold.
 
-    Returns True for any unrecognised source (fail-open, no false negatives).
+    Returns True for any unrecognised source (fail-open, no false negatives),
+    and for any chunk the owner re-included (`metadata.force_enrich`): that
+    choice outranks every rule here.
     """
+    meta = _chunk_meta(chunk)
+    if _forced(meta):
+        return True
     if _is_derived(chunk, rules):
         return False
-    meta = _chunk_meta(chunk)
 
     # The chunk metadata field is `source_type` (not `source`); fall back to the
     # legacy key and to structural hints (thread_id ⇒ email, file_id/mime ⇒ Drive).
@@ -633,7 +647,8 @@ def _apply_salience_gate(store, batches: list, *, require_drive_mention: bool = 
                 except Exception:
                     meta = {}
             keep = should_enrich(chunk)
-            if keep and require_drive_mention and _is_drive_chunk(meta):
+            if keep and require_drive_mention and _is_drive_chunk(meta) \
+                    and not _forced(meta):
                 keep = _drive_mentioned_in_email(store, meta)
             if keep:
                 kept_chunks.append(chunk)
@@ -683,6 +698,9 @@ def _filter_noise(store, batches, *, bulk_section=None, budget=None) -> list:
     for done, batch in enumerate(batches):
         if _budget_spent(budget, "noise filter", done, len(batches)):
             break
+        if any(_forced(_chunk_meta(c)) for c in batch.chunks):
+            kept.append(batch)        # the owner re-included it: not noise
+            continue
         messages = list(_reassemble_thread(batch.chunks))
         if thread_is_noise(messages):
             with bulk_section():

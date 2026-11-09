@@ -162,10 +162,10 @@ def test_unenriched_scan_uses_the_partial_index(tmp_path):
     """The enrichment backlog scan was a full SCAN of chunks.
 
     Asserts the plan shape, not just the index NAME: the index must also carry
-    the ORDER BY rowid DESC, which it only does while rowid is its ONLY key
-    column. A (enrich_state, rowid) key still names the index in the plan but
-    adds USE TEMP B-TREE FOR ORDER BY — so a name-only assertion would pass
-    with the worse shape.
+    the ORDER BY priority DESC, rowid DESC, which it only does while
+    (priority, rowid) are its key columns in that order. A (enrich_state,
+    rowid) key still names an index in the plan but adds USE TEMP B-TREE FOR
+    ORDER BY — so a name-only assertion would pass with the worse shape.
     """
     s = Store(str(tmp_path / "b.sqlite3"), dim=4)
     s.init()
@@ -173,8 +173,9 @@ def test_unenriched_scan_uses_the_partial_index(tmp_path):
     # The real query, verbatim from unenriched_chunks().
     plan = _plan(s, "SELECT rowid,doc_id,text,metadata FROM chunks "
                     "WHERE enriched=0 AND COALESCE(enrich_state,'') != 'cold' "
-                    "AND doc_id NOT LIKE 'enriched-%' ORDER BY rowid DESC LIMIT ?", (50,))
-    assert "idx_chunks_unenriched" in plan, plan
+                    "AND doc_id NOT LIKE 'enriched-%' ORDER BY priority DESC, rowid DESC "
+                    "LIMIT ?", (50,))
+    assert "idx_chunks_unenriched_prio" in plan, plan
     assert "TEMP B-TREE" not in plan.upper(), plan
 
 

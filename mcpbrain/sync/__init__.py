@@ -19,6 +19,44 @@ from mcpbrain.sync.gmail import discover_gmail, generated_label_ids, handle_gmai
 
 log = logging.getLogger(__name__)
 
+# How long a switched-off source's queued row waits before it is looked at
+# again (deferred again if the source is still off). Short, because switching
+# the source back on should resume its backlog within minutes; the same delay
+# reflow uses for a missing service (reflow_handler.DEFER_DELAY_S).
+_DISABLED_DEFER_S = 600
+
+
+def _defer_disabled(store):
+    from mcpbrain.sync.queue import DEFER
+
+    def handler(item):
+        until = (datetime.now(timezone.utc).replace(tzinfo=None)
+                 + timedelta(seconds=_DISABLED_DEFER_S)).isoformat()
+        store.defer_sync_item(item["source"], item["ref_id"], until)
+        return DEFER
+    return handler
+
+
+def _gmail_exclusions(store, gmail_service, home):
+    """This cycle's GmailExclusions from config, label names resolved to ids.
+    Best-effort on the label lookup: a failure still applies every rule typed
+    as an id and every sender rule."""
+    from mcpbrain import config
+    from mcpbrain.sync.gmail import GmailExclusions, resolve_label_ids
+    if home is None:
+        return None
+    senders = config.excluded_senders(home)
+    labels = config.excluded_labels(home)
+    if not senders and not labels:
+        return None
+    ids = {}
+    if labels:
+        try:
+            ids = resolve_label_ids(store, gmail_service, labels)
+        except Exception as exc:  # noqa: BLE001 — a lookup failure must not stop sync
+            log.warning("sync: Gmail label lookup for exclusions failed: %s", exc)
+    return GmailExclusions.build(senders=senders, labels=labels, label_ids=ids)
+
 
 # Progressive-backfill defaults. Tuned so backfill drains without blocking the
 # live delta-sync that shares the same loop iteration:
@@ -38,7 +76,7 @@ _STOP_AFTER_EMPTY_WINDOWS = 4   # 4 × 90d = ~1 year of empty before declaring d
 def run_sync_cycle(store, embedder, *, gmail_service=None,
                    calendar_service=None, drive_service=None, home=None,
                    budget=None, embed_max_items: int = 2000,
-                   bulk_section=None) -> dict:
+                   bulk_section=None, only: str | None = None) -> dict:
     """Run a sync+embed cycle over whichever services are provided.
 
     Discovery/work split (Task 8): for each provided service, `discover_*`
@@ -130,6 +168,18 @@ def run_sync_cycle(store, embedder, *, gmail_service=None,
     maintenance thread's 5s acquire almost every time on a sustained backlog;
     per-item sections give it a real chance throughout the cycle instead of
     once.
+
+    Source controls (console Settings, spec 9): a source switched off in
+    config (`config.source_enabled`) has its service treated as absent for
+    the whole cycle, and its already-queued rows are DEFERRED with a delay,
+    never failed -- failing them would spend their attempts and back them off,
+    so switching the source back on would find them stale. `only` (one of
+    gmail/drive/calendar/anarlog, from a per-source "Sync now") runs that one
+    source this cycle: every other source is skipped and the work queue
+    selects only that source's rows (not reflow rows), so every other row is
+    left exactly as it was. Gmail mail from an excluded
+    sender or label (`ingest.exclude_senders` / `ingest.exclude_labels`) is
+    skipped before indexing, each skip recorded.
     """
     from mcpbrain import config
     from mcpbrain.budget import Budget
@@ -138,6 +188,24 @@ def run_sync_cycle(store, embedder, *, gmail_service=None,
     from mcpbrain.sync.queue import DEFER, work_queue
 
     result = {"embedded": 0}
+
+    # Source switches first: a disabled source (or, under `only`, every other
+    # source) is absent for the rest of the cycle -- discovery, work, shared
+    # drives and backfill alike all key off these service arguments.
+    disabled: set[str] = set()
+    if home is not None:
+        disabled = {name for name in ("gmail", "drive", "calendar", "anarlog")
+                    if not config.source_enabled(home, name)}
+    if only is not None:
+        skip = {"gmail", "drive", "calendar", "anarlog"} - {only}
+    else:
+        skip = set()
+    if "gmail" in disabled | skip:
+        gmail_service = None
+    if "drive" in disabled | skip:
+        drive_service = None
+    if "calendar" in disabled | skip:
+        calendar_service = None
 
     def _embed() -> None:
         """One bounded embed pass, accumulating count AND the cap signal.
@@ -190,7 +258,8 @@ def run_sync_cycle(store, embedder, *, gmail_service=None,
     # None from anarlog_db_path (the common case -- opt-in only, see that
     # function's docstring for why) disables the source silently, same as an
     # absent service arg for every other source here.
-    anarlog_db = config.anarlog_db_path(home) if home is not None else None
+    anarlog_db = (config.anarlog_db_path(home)
+                  if home is not None and "anarlog" not in skip else None)
     if anarlog_db:
         # Wrapped exactly as Drive discovery is, and for a STRONGER reason.
         # discover_anarlog raises DETERMINISTICALLY by design — on schema
@@ -432,10 +501,12 @@ def run_sync_cycle(store, embedder, *, gmail_service=None,
                 bulk_section=bulk_section,
                 report=skip_reports.setdefault(src, {}))
         handlers["drive"] = _drive_handler
+    gmail_exclusions = None
     if gmail_service is not None:
+        gmail_exclusions = _gmail_exclusions(store, gmail_service, home)
         handlers["gmail"] = lambda it: handle_gmail_item(
             gmail_service, store, it, fetch_attachments=fetch_attachments,
-            bulk_section=bulk_section)
+            bulk_section=bulk_section, exclusions=gmail_exclusions)
     if calendar_service is not None:
         handlers["calendar"] = lambda it: handle_calendar_item(
             calendar_service, store, it, bulk_section=bulk_section)
@@ -461,10 +532,15 @@ def run_sync_cycle(store, embedder, *, gmail_service=None,
         handlers["reflow"] = _reflow.handle
     else:
         handlers["reflow"] = lambda it: DEFER
+    # A switched-off source keeps its queued rows: defer them with a delay
+    # (attempts untouched) so they neither fail nor sit at the head of the
+    # queue every cycle. They are worked when the source is switched back on.
+    for name in disabled:
+        handlers[name] = _defer_disabled(store)
     result["worked"] = work_queue(
         store, handlers=handlers,
         limit=config.sync_work_limit(home) if home else 50,
-        budget=budget)
+        budget=budget, sources=(only,) if only is not None else None)
     # Flush each source's accumulated skip tally now that work_queue has
     # drained everything it will this cycle -- a source with nothing skipped
     # never populated its dict (`setdefault` above only creates an entry once
@@ -651,6 +727,7 @@ def run_sync_cycle(store, embedder, *, gmail_service=None,
         drive_service=drive_service,
         calendar_service=calendar_service,
         bulk_section=bulk_section,
+        gmail_exclusions=gmail_exclusions,
     )
     result["backfill"] = bf
     if any(bf.get(k, 0) for k in ("gmail", "drive", "calendar")):
@@ -771,6 +848,7 @@ def progressive_backfill_step(
     stop_after_empty_windows: int = _STOP_AFTER_EMPTY_WINDOWS,
     now: datetime | None = None,
     bulk_section=None,
+    gmail_exclusions=None,
 ) -> dict:
     """Run ONE backfill window per source, walking newest -> oldest. No horizon.
 
@@ -838,6 +916,7 @@ def progressive_backfill_step(
                 before=end.strftime("%Y/%m/%d"),
                 max_messages=max_per_source,
                 bulk_section=bulk_section,
+                exclusions=gmail_exclusions,
             )
         result["gmail"] = _step("gmail_backfill_until", "gmail_backfill_empty",
                                 _gmail, "gmail_done")

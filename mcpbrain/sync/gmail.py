@@ -77,6 +77,115 @@ def generated_label_ids(store, service, *, now=None) -> frozenset:
     return frozenset(ids)
 
 
+# Store meta key caching the mailbox's label name -> id map, for resolving the
+# owner's `ingest.exclude_labels` (typed as names) to the ids messages carry.
+_LABEL_MAP_META_KEY = "gmail_label_map"
+
+
+def resolve_label_ids(store, service, names, *, now=None) -> dict:
+    """Map each label NAME in `names` (case-insensitive) to its Gmail id.
+
+    Messages carry label ids, never names, and a user label's id is opaque
+    (`Label_123`). The mailbox's full name->id map is listed at most once per
+    `_GENERATED_LABEL_TTL_S` and cached in store meta, the same way
+    generated_label_ids caches the marker label. Returns {lowercased name: id}
+    for the names that exist; names that are already ids (INBOX,
+    CATEGORY_PROMOTIONS) are matched directly by GmailExclusions and need no
+    entry. A failed list raises; the caller keeps going without the map."""
+    from datetime import datetime, timezone
+    wanted = {str(n).strip().lower() for n in names or () if str(n).strip()}
+    if not wanted:
+        return {}
+    now = now or datetime.now(timezone.utc)
+    by_name = None
+    raw = store.get_meta(_LABEL_MAP_META_KEY)
+    if raw:
+        try:
+            cached = json.loads(raw)
+            at = datetime.fromisoformat(cached.get("at") or "")
+            if at.tzinfo is None:
+                at = at.replace(tzinfo=timezone.utc)
+            if (now - at).total_seconds() < _GENERATED_LABEL_TTL_S:
+                by_name = dict(cached.get("labels") or {})
+        except (ValueError, TypeError, AttributeError):
+            by_name = None
+    if by_name is None:
+        resp = service.users().labels().list(userId="me").execute(
+            num_retries=_NUM_RETRIES)
+        by_name = {str(lb["name"]).lower(): str(lb["id"])
+                   for lb in resp.get("labels") or [] if lb.get("name") and lb.get("id")}
+        store.set_meta(_LABEL_MAP_META_KEY,
+                       json.dumps({"labels": by_name, "at": now.isoformat()}))
+    return {n: by_name[n] for n in sorted(wanted) if n in by_name}
+
+
+class GmailExclusions:
+    """The owner's sender and label keep-out lists (`ingest.exclude_senders`,
+    `ingest.exclude_labels`), built once per sync cycle.
+
+    A match skips the message entirely: nothing is indexed and one
+    `gmail_excluded` ingest skip is recorded naming the rule (spec 10.4). This
+    is distinct from the subject-prefix and Drive-folder rules, which index the
+    item and only keep it out of the graph."""
+
+    def __init__(self, addresses, domains, labels):
+        self.addresses = frozenset(addresses)     # exact addresses
+        self.domains = tuple(domains)             # bare domains
+        self.labels = dict(labels)                # UPPER id -> rule as typed
+
+    @classmethod
+    def build(cls, *, senders, labels, label_ids=None) -> "GmailExclusions":
+        addresses, domains, by_id = set(), [], {}
+        for s in senders or ():
+            s = str(s).strip().lower()
+            if not s:
+                continue
+            if "@" in s and not s.startswith("@"):
+                addresses.add(s)
+            else:
+                domains.append(s.lstrip("@"))
+        resolved = {str(k).lower(): v for k, v in (label_ids or {}).items()}
+        for lb in labels or ():
+            rule = str(lb).strip()
+            if not rule:
+                continue
+            by_id[rule.upper()] = rule                 # typed as an id
+            lid = resolved.get(rule.lower())
+            if lid:
+                by_id[lid.upper()] = rule              # typed as a name
+        return cls(addresses, domains, by_id)
+
+    def __bool__(self) -> bool:
+        return bool(self.addresses or self.domains or self.labels)
+
+    def match(self, sender_header, label_ids) -> str | None:
+        """The rule that excludes this message, as a readable detail, or None."""
+        from email.utils import getaddresses
+        for _, addr in getaddresses([str(sender_header or "")]):
+            addr = addr.strip().lower()
+            if not addr:
+                continue
+            if addr in self.addresses:
+                return f"sender {addr} matches exclude_senders '{addr}'"
+            host = addr.rsplit("@", 1)[-1]
+            for d in self.domains:
+                if host == d or host.endswith("." + d):
+                    return f"sender {addr} matches exclude_senders '{d}'"
+        for lid in label_ids or ():
+            rule = self.labels.get(str(lid).upper())
+            if rule is not None:
+                return f"label '{rule}' matches exclude_labels"
+        return None
+
+
+def _excluded(raw, exclusions) -> str | None:
+    if not exclusions:
+        return None
+    from mcpbrain.sync.normalise import get_header
+    headers = (raw.get("payload") or {}).get("headers") or []
+    return exclusions.match(get_header(headers, "from"), raw.get("labelIds") or [])
+
+
 def _supersede_drafts(store, chunks) -> None:
     """After writing a message, retire older DRAFT versions of its thread.
 
@@ -187,7 +296,7 @@ def discover_gmail(service, store, source: str = "gmail", *, budget=None) -> int
 
 
 def handle_gmail_item(service, store, item, *, fetch_attachments: bool = False,
-                      bulk_section=None) -> None:
+                      bulk_section=None, exclusions=None) -> None:
     """Work one queued Gmail message. Raises on failure so the loop backs off.
 
     Matches the per-message body of the old (now-deleted, pre-queue)
@@ -205,6 +314,12 @@ def handle_gmail_item(service, store, item, *, fetch_attachments: bool = False,
     does an uncached exists()+read_text()+json.loads() per call, and paying
     that once per message is the exact overhead class the 0.7.105 fix removed
     from metadata queries.
+
+    `exclusions` (a GmailExclusions, built once per cycle) skips a message
+    from an excluded sender or with an excluded label before anything is
+    fetched or written beyond the message itself: the row completes, one
+    `gmail_excluded` ingest skip names the rule. Normalise's own skips (an
+    empty body) are recorded per message too.
     """
     bulk_section = bulk_section or nullcontext
     try:
@@ -234,6 +349,10 @@ def handle_gmail_item(service, store, item, *, fetch_attachments: bool = False,
                         match_thread=False)
             return
         raise
+    rule = _excluded(raw, exclusions)
+    if rule:
+        ingest_report.record_skip(store, "gmail_excluded", item["ref_id"], rule)
+        return
     skips: dict = {}
     att_chunks = (attachments.fetch_and_normalise(service, raw, store=store)
                   if fetch_attachments else [])
@@ -246,6 +365,8 @@ def handle_gmail_item(service, store, item, *, fetch_attachments: bool = False,
             store.upsert_chunk(chunk.doc_id, chunk.text, chunk.content_hash,
                                chunk.metadata)
         _supersede_drafts(store, body_chunks)
+    for reason in sorted(skips):
+        ingest_report.record_skip(store, f"gmail_{reason}", item["ref_id"])
 
 
 def _fetch_one(service, mid: str, *, fetch_attachments: bool,
@@ -277,7 +398,7 @@ def _fetch_one(service, mid: str, *, fetch_attachments: bool,
 def backfill_gmail(service, store, after: str, before: str | None = None,
                    max_messages: int | None = None, bulk_section=None,
                    q_extra: str = "", max_workers: int = 1,
-                   service_factory=None) -> int:
+                   service_factory=None, exclusions=None) -> int:
     """One-shot bounded backfill via messages.list with an `after:YYYY/MM/DD` query.
 
     Fetches each matched message (format=full), normalises, upserts its chunks.
@@ -318,6 +439,11 @@ def backfill_gmail(service, store, after: str, before: str | None = None,
     message's writes, and attachment fetching stays OUTSIDE it — see
     `handle_gmail_item` for why `_bulk_lock` must never be held across
     network I/O.
+
+    `exclusions` skips excluded mail exactly as handle_gmail_item does, but
+    the skips are tallied per rule and recorded once per run (a backfill
+    window can hold hundreds of one sender's messages; a row each would evict
+    the change log).
     """
     if bulk_section is None:
         bulk_section = nullcontext
@@ -339,14 +465,24 @@ def backfill_gmail(service, store, after: str, before: str | None = None,
     fetch_attachments = config.gmail_attachments(str(config.app_dir()))
     parallel = max_workers > 1 and service_factory is not None
 
+    excluded: dict = {}
+
     def _flush_skips() -> None:
         for reason, count in sorted(skips.items()):
             ingest_report.record_skip(store, f"gmail_{reason}", "gmail", str(count))
+        for rule, count in sorted(excluded.items()):
+            ingest_report.record_skip(store, "gmail_excluded", "gmail",
+                                      f"{count} message(s): {rule}")
         attachments.flush_skip_report(store, att_report)
 
     def _write(raw, att_chunks) -> None:
         """The ONLY writer. Always runs on the calling thread."""
         nonlocal processed
+        rule = _excluded(raw, exclusions)
+        if rule:
+            excluded[rule] = excluded.get(rule, 0) + 1
+            processed += 1          # handled: the window is not empty
+            return
         with bulk_section():
             body_chunks = normalise_gmail(raw, report=skips)
             for ch in body_chunks:

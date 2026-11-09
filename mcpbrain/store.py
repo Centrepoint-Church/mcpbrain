@@ -1967,6 +1967,12 @@ class Store:
             # --- Phase C: FTS contextual-reindex marker (bounded backfill) -----
             if "fts_context_version" not in ch_cols:
                 db.execute("ALTER TABLE chunks ADD COLUMN fts_context_version INTEGER DEFAULT 0")
+            # --- console source controls (2026-11-09): enrichment priority ----
+            # The owner can move waiting chunks to the front of the enrichment
+            # queue ("See what's waiting" -> Prioritise). unenriched_chunks
+            # orders priority DESC, rowid DESC.
+            if "priority" not in ch_cols:
+                db.execute("ALTER TABLE chunks ADD COLUMN priority INTEGER DEFAULT 0")
 
             # --- partial indexes for the two work-queue filters ----------------
             # Both backlog scans were a full `SCAN chunks` (confirmed by EXPLAIN
@@ -1997,8 +2003,14 @@ class Store:
             # not the bare column — an expression no plain-column index can
             # seek. That and the doc_id NOT LIKE are filtered per row either
             # way.
-            db.execute("CREATE INDEX IF NOT EXISTS idx_chunks_unenriched "
-                       "ON chunks(rowid) WHERE enriched=0")
+            #
+            # 2026-11-09: the queue now orders `priority DESC, rowid DESC`, so
+            # the key is (priority, rowid) -- a reverse walk of it is that
+            # order, again with no temp b-tree. The rowid-only index it
+            # replaces is dropped (same predicate, so nothing else loses it).
+            db.execute("DROP INDEX IF EXISTS idx_chunks_unenriched")
+            db.execute("CREATE INDEX IF NOT EXISTS idx_chunks_unenriched_prio "
+                       "ON chunks(priority, rowid) WHERE enriched=0")
             # reindex_fts_batch's `embedded=1 AND fts_context_version < N`.
             #
             # That query MUST filter the bare column, not COALESCE(...,0): a
@@ -3545,10 +3557,12 @@ class Store:
         # hallucination grounding check cannot catch, because the digest text
         # trivially contains the exact names being "grounded" against itself.
         # Found and fixed 2026-08-03, before it had fired in production.
+        #
+        # Prioritised chunks (prioritise_chunks) come first, then newest-first.
         sql = ("SELECT rowid,doc_id,text,metadata FROM chunks "
                "WHERE enriched=0 AND COALESCE(enrich_state,'') != 'cold' "
                "AND doc_id NOT LIKE 'enriched-%' "
-               "ORDER BY rowid DESC")
+               "ORDER BY priority DESC, rowid DESC")
         params: tuple = ()
         if limit is not None:
             sql += " LIMIT ?"
@@ -5344,7 +5358,7 @@ class Store:
             return db.execute("SELECT count(*) FROM sync_queue WHERE source=?",
                               (source,)).fetchone()[0]
 
-    def due_sync_items(self, *, limit: int, now: str) -> list[dict]:
+    def due_sync_items(self, *, limit: int, now: str, sources=None) -> list[dict]:
         """Queue rows ready to work, newest-first. A PURE READ -- no lease.
 
         The daemon is the only worker and holds the single-writer lock, and a
@@ -5354,14 +5368,24 @@ class Store:
         Filtering on next_attempt_at is what makes "retry forever" safe: a
         backed-off item is simply not selected, so it can never sit at the head
         of the queue and stall everything behind it.
+
+        `sources` (prefixes, e.g. ("drive",)) narrows the selection to those
+        sources and their `<prefix>:<id>` sub-sources -- a per-source sync.
         """
+        where = "(next_attempt_at IS NULL OR next_attempt_at <= ?)"
+        args: list = [now]
+        if sources:
+            prefs = [str(p) for p in sources]
+            where += " AND (" + " OR ".join(
+                "source = ? OR substr(source, 1, ?) = ?" for _ in prefs) + ")"
+            for p in prefs:
+                args += [p, len(p) + 1, p + ":"]
         with self._connect() as db:
             return [dict(r) for r in db.execute(
                 "SELECT source, ref_id, version, event, modified_at, discovered_at, "
                 "       attempts, next_attempt_at, last_error, transient_defers "
-                "FROM sync_queue "
-                "WHERE next_attempt_at IS NULL OR next_attempt_at <= ? "
-                "ORDER BY modified_at DESC LIMIT ?", (now, limit)).fetchall()]
+                f"FROM sync_queue WHERE {where} "
+                "ORDER BY modified_at DESC LIMIT ?", (*args, limit)).fetchall()]
 
     def complete_sync_item(self, source: str, ref_id: str) -> None:
         """Delete the queue row, marking the item done.
@@ -6642,6 +6666,83 @@ class Store:
                     cal_docs.add(r["doc_id"])
         docs = set(self.doc_ids_for_messages(msg_ids)) | set(rel_docs) | cal_docs
         return sorted(docs)
+
+    def reinclude_chunks(self, doc_ids) -> int:
+        """Put skipped chunks back into the enrichment queue, for good.
+
+        The owner's "re-include" from the console's cold list: enrich_state is
+        cleared, enriched/enriched_version/enrich_attempts reset to 0, and
+        `metadata.force_enrich = true` is stamped so prepare's salience and
+        derived gates (should_enrich / _is_derived) do not cold-mark the chunk
+        again on the next pass. Returns the number of chunks changed (unknown
+        ids are ignored). One transaction."""
+        ids = [d for d in dict.fromkeys(doc_ids or []) if d]
+        if not ids:
+            return 0
+        changed = 0
+        with self._connect(write=True) as db:
+            for i in range(0, len(ids), 500):
+                part = ids[i:i + 500]
+                ph = ",".join("?" * len(part))
+                rows = db.execute(f"SELECT doc_id, metadata FROM chunks "
+                                  f"WHERE doc_id IN ({ph})", part).fetchall()
+                for r in rows:
+                    try:
+                        meta = json.loads(r["metadata"] or "{}")
+                    except (TypeError, ValueError):
+                        meta = {}
+                    if not isinstance(meta, dict):
+                        meta = {}
+                    meta["force_enrich"] = True
+                    db.execute("UPDATE chunks SET enrich_state='', enriched=0, "
+                               "enriched_version=0, enrich_attempts=0, metadata=? "
+                               "WHERE doc_id=?", (json.dumps(meta), r["doc_id"]))
+                    changed += 1
+        return changed
+
+    def prioritise_chunks(self, doc_ids) -> int:
+        """Move chunks to the front of the enrichment queue (priority=1;
+        unenriched_chunks orders priority DESC). Returns rows changed."""
+        ids = [d for d in dict.fromkeys(doc_ids or []) if d]
+        if not ids:
+            return 0
+        changed = 0
+        with self._connect(write=True) as db:
+            for i in range(0, len(ids), 500):
+                part = ids[i:i + 500]
+                ph = ",".join("?" * len(part))
+                changed += db.execute(f"UPDATE chunks SET priority=1 WHERE doc_id IN ({ph})",
+                                      part).rowcount
+        return changed
+
+    # The console's chunk lists (source_controls): which chunks each names.
+    _CHUNK_LISTS = {
+        "cold": ("COALESCE(enrich_state,'')='cold'", "rowid DESC"),
+        "waiting": ("enriched=0 AND COALESCE(enrich_state,'') != 'cold' "
+                    "AND doc_id NOT LIKE 'enriched-%'", "priority DESC, rowid DESC"),
+        "reflow_gave_up": (f"{_meta_extract('$.reflow_skipped')}='gave_up'", "rowid DESC"),
+    }
+
+    def chunk_list_page(self, kind: str, *, offset: int, limit: int) -> tuple[list[dict], int]:
+        """One page of the named chunk list, and the list's total.
+        Rows: {doc_id, metadata (dict), enrich_state, priority}."""
+        where, order = self._CHUNK_LISTS[kind]
+        with self._connect() as db:
+            total = db.execute(f"SELECT COUNT(*) FROM chunks WHERE {where}").fetchone()[0]
+            rows = db.execute(
+                f"SELECT doc_id, metadata, enrich_state, priority FROM chunks "
+                f"WHERE {where} ORDER BY {order} LIMIT ? OFFSET ?",
+                (int(limit), int(offset))).fetchall()
+        out = []
+        for r in rows:
+            try:
+                meta = json.loads(r["metadata"] or "{}")
+            except (TypeError, ValueError):
+                meta = {}
+            out.append({"doc_id": r["doc_id"], "metadata": meta if isinstance(meta, dict) else {},
+                        "enrich_state": r["enrich_state"] or "",
+                        "priority": int(r["priority"] or 0)})
+        return out, int(total)
 
     def reset_enriched(self, doc_ids) -> int:
         """Set enriched=0, enriched_version=0 on the given chunks so the daemon

@@ -711,7 +711,8 @@ def run_cycle(store, embedder, *, gmail_service=None, calendar_service=None,
               synthesis_requests: list | None = None,
               extra_blocks: dict | None = None, budget=None,
               on_progress=None, bulk_section=None,
-              embed_max_items: int = EMBED_MAX_ITEMS) -> dict:
+              embed_max_items: int = EMBED_MAX_ITEMS,
+              sync_only: str | None = None) -> dict:
     """One sync -> embed -> enrich cycle.
 
     Sync each provided source and embed via run_sync_cycle (the tested core),
@@ -786,6 +787,7 @@ def run_cycle(store, embedder, *, gmail_service=None, calendar_service=None,
         budget=budget,
         bulk_section=bulk_section,
         embed_max_items=embed_max_items,
+        only=sync_only,
     )
     if on_progress is not None:
         on_progress("sync")
@@ -1349,11 +1351,15 @@ class Daemon:
         self._pause = threading.Event()   # set == paused
         self._stop = threading.Event()    # set == stop the loop
         self._wake = threading.Event()    # set == run a cycle now
-        # Single-flight guard for enrich-backfill: non-blocking acquire means a
-        # duplicate start_enrich_backfill call is a no-op. _backfill_active
-        # signals run_one to yield its write cycle while the backfill is live.
+        # Set == another writer holds the store: run_one and the cadence passes
+        # yield their writes (restamping liveness). Its only setter, the
+        # catch-up enrich-backfill, was removed (console redesign spec 10.3);
+        # the yield points are kept for any future long single-writer job.
         self._backfill_active = threading.Event()
-        self._backfill_lock = threading.Lock()
+        # One-shot per-source sync (sync_now(source)): read and cleared by the
+        # next run_one, under its own lock so a request is never lost.
+        self._sync_only: str | None = None
+        self._sync_only_lock = threading.Lock()
         # Guards the _pending_* stashes. They are written by cadence passes and
         # read-and-cleared by run_one; once those run on different threads that
         # is a genuine read-delete race.
@@ -2576,30 +2582,6 @@ class Daemon:
         finally:
             self._auth_lock.release()
 
-    def start_enrich_backfill(self) -> None:
-        """One-shot enrich-backfill on a daemon thread. Single-flight; pauses the
-        daemon's own write cycle for the duration so there is only one writer."""
-        import threading
-        from mcpbrain import enrich_backfill
-        if not self._backfill_lock.acquire(blocking=False):
-            log.info("enrich-backfill already running; ignoring duplicate start")
-            return
-        self._backfill_active.set()
-        def _run():
-            try:
-                enrich_backfill.run_backfill(store=self._store, embedder=self._embedder)
-            except Exception as exc:  # noqa: BLE001
-                log.warning("enrich-backfill failed: %s", exc)
-            finally:
-                self._backfill_active.clear()
-                self._backfill_lock.release()
-        threading.Thread(target=_run, daemon=True).start()
-
-    def cancel_enrich_backfill(self) -> None:
-        """Write the cancel flag so the running enrich-backfill loop stops cleanly."""
-        from mcpbrain import enrich_backfill
-        enrich_backfill.request_cancel(str(app_dir()))
-
     def bootstrap_baseline_once(self, services=None, *, force=False) -> dict | None:
         """Import the org snapshot + shared-drive ingest caches before first sync.
 
@@ -2639,9 +2621,23 @@ class Daemon:
 
     # -- wake / stop --------------------------------------------------------
 
-    def sync_now(self) -> None:
-        """Wake the loop for an immediate cycle."""
+    def sync_now(self, source: str | None = None) -> None:
+        """Wake the loop for an immediate cycle.
+
+        With `source` (gmail/drive/calendar/anarlog) the next cycle syncs only
+        that source; the cycle after it is a normal one. A later plain
+        sync_now() replaces a pending per-source request (everything wins)."""
+        with self._sync_only_lock:
+            self._sync_only = source
         self._wake.set()
+
+    def _take_sync_only(self) -> str | None:
+        lock = getattr(self, "_sync_only_lock", None)
+        if lock is None:          # built via __new__ in tests
+            return None
+        with lock:
+            only, self._sync_only = self._sync_only, None
+        return only
 
     def request_backup(self) -> bool:
         """Capture now and upload until the outbox is empty: makes the next
@@ -2879,6 +2875,7 @@ class Daemon:
             return None
         self._graph_cleanup_once()
         self._graph_recompute_once()
+        sync_only = self._take_sync_only()
         services = self.ensure_services()
         # Before the first real sync: seed the graph from the org snapshot and
         # bulk-import shared-drive caches, so run_cycle only extracts cache-misses.
@@ -2925,6 +2922,7 @@ class Daemon:
                            on_progress=self._note_progress,
                            bulk_section=self._cycle_bulk_section,
                            embed_max_items=getattr(self, "_embed_max_items", EMBED_MAX_ITEMS),
+                           sync_only=sync_only,
                            **services)
         drained = ((result or {}).get("enrich") or {}).get("drain") or {}
         self._stash_clear_drained(drained, taken)

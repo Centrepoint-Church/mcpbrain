@@ -251,12 +251,6 @@ class ControlClient:
         """POST /api/backup/run (back up on the daemon's next loop iteration)."""
         return self._request("/api/backup/run", method="POST", error_body=True)
 
-    def start_enrich_backfill(self) -> dict:
-        return self._request("/api/enrich-backfill/start", method="POST")
-
-    def cancel_enrich_backfill(self) -> dict:
-        return self._request("/api/enrich-backfill/cancel", method="POST")
-
     def bootstrap_baseline(self) -> dict:
         """POST /api/bootstrap-baseline — import the org snapshot + shared-drive
         ingest caches (re-runnable; idempotent daemon-side)."""
