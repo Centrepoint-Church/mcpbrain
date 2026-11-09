@@ -208,3 +208,34 @@ def test_graph_colours_stay_off_the_meaning_colours():
                 assert d >= 25 or (meaning == 30 and hue == 20), (mode, i, hue, meaning)
         ev, mt = _lch(css, f"--{mode}-type-event"), _lch(css, f"--{mode}-type-meeting")
         assert abs(ev[0] - mt[0]) >= 15, (mode, ev, mt)
+
+
+def _graph_colours(css):
+    """Every graph kind and circle colour, both modes: name -> (L, C, H)."""
+    out = {}
+    for m in re.finditer(r"(--(?:lt|dk)-(?:type|circle)-[\w-]+): oklch\(([\d.]+)% ([\d.]+) ([\d.]+)\)", css):
+        out[m.group(1)] = tuple(float(x) for x in m.groups()[1:])
+    return out
+
+
+def test_graph_colours_avoid_violet_yellow_and_brown():
+    css = (_WIZ / "console.css").read_text(encoding="utf-8")
+    cols = _graph_colours(css)
+    assert len(cols) >= 2 * (10 + 6), sorted(cols)   # kinds and six circles, both modes
+    for name, (L, C, H) in cols.items():
+        if C <= 0.02:
+            continue   # a neutral grey: its hue doesn't show
+        assert not 265 <= H <= 330, f"{name} is violet"
+        assert not 40 <= H <= 110, f"{name} is yellow, amber or orange"
+        assert not (20 <= H <= 60 and C < 0.08 and L < 60), f"{name} reads brown"
+
+
+def test_circles_close_in_hue_differ_in_lightness():
+    css = (_WIZ / "console.css").read_text(encoding="utf-8")
+    for mode in ("lt", "dk"):
+        circles = [_lch(css, f"--{mode}-circle-{i}") for i in range(1, 7)]
+        for i, a in enumerate(circles):
+            for b in circles[i + 1:]:
+                dh = min(abs(a[2] - b[2]), 360 - abs(a[2] - b[2]))
+                if dh < 30:
+                    assert abs(a[0] - b[0]) >= 12, (mode, a, b)
