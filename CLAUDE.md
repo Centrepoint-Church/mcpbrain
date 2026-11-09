@@ -550,6 +550,25 @@ Found by auditing why chunks exceeded the embed window and why one owner stayed 
 
 ## Shipping caveats
 
+- **Current state (2026-11-09): the four version files (+ `uv.lock`) are at
+  `0.7.146`, RELEASED** — source `012f321f`, gh-pages `7f60a6dd`, plugin `6b0886e`;
+  index serves only `mcpbrain-0.7.146-py3-none-any.whl`. **0.7.146 ships the console
+  redesign** (Overview, Settings, Graph, Setup; spec
+  `docs/superpowers/specs/2026-11-06-console-redesign-design.md`, plans
+  `2026-11-09-console-redesign.md` and `-followups.md`) **plus the nameparser bound.**
+  **0.7.145 was broken on a fresh resolve and lived ~1 h on the index:**
+  `nameparser>=1.1` was unbounded, the fleet resolved nameparser 3.0.1 (a rewrite with
+  no `HumanName`), and `graph_write` failed at import, so the daemon, CLI and MCP server
+  could not start. Caught by the runbook's install-from-index step on the author
+  machine, not by the suite (the lock held 1.1.3). Fixed in 0.7.146 with `<2` and
+  `tests/test_nameparser_pin.py`. Fleet resolves mcp/mcp-types 2.3.0, fastembed 0.9.1,
+  nameparser 1.4.0, and new majors cryptography 50, filelock 4, oauthlib 4, pillow 13,
+  pyobjc 13, python-dateutil 4; the full suite under exactly that set **5701 passed**.
+  One full-suite run under that set hung with every worker idle; eight repeats of the
+  lock and multiprocess tests and a full re-run with `--timeout=120` all passed, so the
+  hang is intermittent and its test is unidentified. Installed from the published
+  index; doctor 0 need action. **The Windows HARDWARE QA GATE remains OPEN**, and the
+  owner acceptance checklist for the console was not run before release.
 - **Current state (2026-10-27): the four version files (+ `uv.lock`) are at
   `0.7.144`, RELEASED** — source `46b39883`, gh-pages `50cd0a6c`, plugin `9871f2c`;
   index serves only `mcpbrain-0.7.144-py3-none-any.whl`, `install.ps1` 200; fleet
