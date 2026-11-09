@@ -295,7 +295,32 @@ async function dismissFinding(btn, out, li, f){
   } catch (e) { /* Undo stays available under What changed */ }
 }
 
+/* An automatic change that stopped part way: it may be made in part, so it is
+   never offered for Apply again. Check it opens what it touched; Clear marks
+   it handled. */
+function interruptedItem(p, primary){
+  const kind = cap(kindLabel(p.kind));
+  const ck = p.check || {};
+  return decisionRow(p.summary || kind, kind + ". This may have been applied, check it before doing anything else.",
+    (out, li) => [
+      ck.href
+        ? el("a", {class: primary ? "btn btn--primary" : "btn", href: ck.href,
+            text: "Check it", "aria-label": "Check it: " + (ck.label || "open what it changed")})
+        : el("button", {class: primary ? "btn btn--primary" : "btn", type: "button", text: "Check it",
+            onclick: () => said(out, ck.file
+              ? "Open " + ck.file + " in your records folder and check it reads as it should."
+              : "Check it under Automatic changes in Settings.", "ok")}),
+      el("button", {class: "btn", type: "button", text: "Clear",
+        onclick: (ev) => act(ev.currentTarget, out, async () => {
+          await api(`/api/pending/${p.id}/clear`, {method: "POST"});
+          disableRow(li);
+          return "Cleared.";
+        })}),
+    ]);
+}
+
 function pendingItem(p, primary){
+  if (p.status === "interrupted") return interruptedItem(p, primary);
   const kind = cap(kindLabel(p.kind));
   const sub = kind + ", proposed " + C.relTime(p.created_at)
     + (p.kind === "consolidation" ? ". Memory consolidation waits until you decide this one." : "");
@@ -303,7 +328,13 @@ function pendingItem(p, primary){
     el("button", {class: primary && i === 0 ? "btn btn--primary" : "btn", type: "button",
       text: verb === "apply" ? "Apply" : "Decline",
       onclick: (ev) => act(ev.currentTarget, out, async () => {
-        await api(`/api/pending/${p.id}/${verb}`, {method: "POST"});
+        try {
+          await api(`/api/pending/${p.id}/${verb}`, {method: "POST"});
+        } catch (e) {
+          // Stopped part way: the list redraws it with Check it and Clear.
+          if (e.data && e.data.status === "interrupted") setTimeout(() => loadNeeds(true), 2500);
+          throw e;
+        }
         disableRow(li);
         return verb === "apply" ? "Applied. You can undo it under What changed." : "Declined.";
       })})));
@@ -720,15 +751,17 @@ const CHUNKS = {
 const PAGE_SIZE = 50;
 /* word-maps:start */
 // The list endpoints give short reason codes (source_controls); each in words.
-const REASON = {bulk: "bulk mail", other: "kept out by an earlier rule", queued: "in the queue",
-  prioritised: "queued first", "re-included": "included by you", "reflow gave up": "re-chunking gave up",
-  promotions: "Gmail promotions", social: "Gmail social", forums: "Gmail forums",
-  table: "a table", transcript: "a transcript", summary: "a summary", draft: "a draft",
-  "superseded draft": "a draft replaced by a later version", "consolidated note": "a consolidated note",
-  "session note": "a session note", "own automated document": "a document your own automation made",
-  "Drive folder": "in a Drive folder you keep out", "own automated mail": "mail your own automation sent",
-  spreadsheet: "a spreadsheet", "short document": "a short document"};
-function reasonText(r){ return r ? worded(REASON, r, "skipped for another reason") : ""; }
+// Every reason reads as one short sentence about the item: "It's ...".
+const REASON = {bulk: "It's bulk mail.", other: "It's kept out by an earlier rule.",
+  queued: "It's in the queue.", prioritised: "It's queued first.",
+  "re-included": "It's queued because you included it.", "reflow gave up": "It's one re-chunking gave up on.",
+  promotions: "It's a Gmail promotion.", social: "It's Gmail social mail.", forums: "It's Gmail forum mail.",
+  table: "It's a table.", transcript: "It's a transcript.", summary: "It's a summary.", draft: "It's a draft.",
+  "superseded draft": "It's a draft a later version replaced.", "consolidated note": "It's a consolidated note.",
+  "session note": "It's a session note.", "own automated document": "It's a document your own automation made.",
+  "Drive folder": "It's in a Drive folder you keep out.", "own automated mail": "It's mail your own automation sent.",
+  spreadsheet: "It's a spreadsheet.", "short document": "It's a short document."};
+function reasonText(r){ return r ? worded(REASON, r, "It's here for another reason.") : ""; }
 // The Source column: where an item came from.
 const SOURCE_WORDS = {gmail: "Gmail", drive: "Drive", calendar: "Calendar", anarlog: "Meetings",
   note: "Note", other: "another source"};
@@ -741,7 +774,7 @@ function offered(kind, i){
   return kind !== "cold" || (i.includable !== false && !i.enriched);
 }
 function notOffered(i){
-  return i.includable === false ? "made from other items, so it can't be added" : "already in the graph";
+  return i.includable === false ? "It's made from other items, so it can't be added." : "It's already in the graph.";
 }
 
 function selectedChunks(){
@@ -781,7 +814,7 @@ async function openChunks(kind, page){
       el("td", {text: cap(sourceText(i.source))}),
       el("td", {class: "measured", text: String(i.date || "").slice(0, 10)}),
       el("td", {}, reasonText(i.reason),
-        offered(kind, i) ? null : el("span", {class: "muted small", text: ", " + notOffered(i)})))) : el("tr", {}, el("td", {colspan: 5, class: "muted", text: "Nothing here."})));
+        offered(kind, i) ? null : el("span", {class: "muted small", text: " " + notOffered(i)})))) : el("tr", {}, el("td", {colspan: 5, class: "muted", text: "Nothing here."})));
   } catch (e) {
     setText("chunks-page", "");
     fill($("chunks-body"), el("tr", {}, el("td", {colspan: 5}, el("span", {class: "said said--bad", text: "Could not load the list. " + errText(e)}))));

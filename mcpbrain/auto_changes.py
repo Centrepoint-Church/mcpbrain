@@ -13,12 +13,14 @@ config.auto_change_mode(home, kind) and branches:
 decide() settles a queued change: approving runs the same APPLY[kind] the
 writer runs in apply mode, so the undoable change is recorded then; declining
 leaves the data alone. Either way the pending_change finding is resolved with
-a verdict, so it never reopens.
+a verdict, so it never reopens. An approval that stops part way is settled
+'interrupted': Needs you offers Check it and Clear (clear()), never Apply.
 """
 from __future__ import annotations
 
 import json
 import logging
+import time
 from datetime import datetime, timezone
 from typing import Callable
 
@@ -36,6 +38,15 @@ CHANGED_SINCE = "This has changed since it was proposed"
 _PENDING, _APPLIED, _DECLINED = "pending", "applied", "declined"
 # Claimed by one decide() while it runs, so two clicks can't both apply.
 _DECIDING = "deciding"
+# APPLY started and did not finish cleanly: part or all of the change may be
+# made. Terminal: never offered for Apply again, only Check it and Clear.
+_INTERRUPTED = "interrupted"
+# An interrupted change the owner checked and marked handled.
+_CLEARED = "cleared"
+INTERRUPTED = "This may have been applied, check it before doing anything else"
+NOT_INTERRUPTED = "Only a change that stopped part way can be cleared"
+# Status writes that must not be lost are retried with these pauses (seconds).
+_RETRY_PAUSES = (0.05, 0.2, 0.5)
 
 
 class NotApplied(Exception):
@@ -90,7 +101,9 @@ def propose(store, kind: str, target: str, summary: str, payload: dict) -> int:
 def pending_targets(store, kind: str, *, include_declined: bool = False) -> set[str]:
     """Targets of `kind` waiting for review (and, optionally, declined), so a
     builder can skip asking the LLM about them again."""
-    statuses = (_PENDING, _DECIDING, _DECLINED) if include_declined else (_PENDING, _DECIDING)
+    statuses = (_PENDING, _DECIDING, _INTERRUPTED)
+    if include_declined:
+        statuses += (_DECLINED,)
     marks = ",".join("?" * len(statuses))
     with store._connect() as db:
         return {r[0] for r in db.execute(
@@ -99,11 +112,64 @@ def pending_targets(store, kind: str, *, include_declined: bool = False) -> set[
 
 
 def list_pending(store) -> list[dict]:
-    """Changes waiting for review, oldest first."""
+    """Changes waiting for the owner, oldest first: queued ones (status
+    'pending': Apply or Decline) and ones that stopped part way (status
+    'interrupted': Check it, which opens `check`, or Clear)."""
     with store._connect() as db:
-        return [dict(r) for r in db.execute(
-            "SELECT id, kind, target, summary, created_at FROM pending_changes "
-            "WHERE status=? ORDER BY id", (_PENDING,)).fetchall()]
+        rows = [dict(r) for r in db.execute(
+            "SELECT id, kind, target, summary, payload, status, created_at FROM pending_changes "
+            "WHERE status IN (?, ?) ORDER BY id", (_PENDING, _INTERRUPTED)).fetchall()]
+    out = []
+    for r in rows:
+        payload = r.pop("payload")
+        if r["status"] == _INTERRUPTED:
+            try:
+                r["check"] = _check_target(store, r["kind"], r["target"],
+                                           json.loads(payload or "{}"))
+            except Exception:  # noqa: BLE001 -- Settings is always somewhere to look
+                r["check"] = _SETTINGS_CHECK
+        out.append(r)
+    return out
+
+
+_SETTINGS_CHECK = {"href": "/settings#automatic", "label": "Automatic changes in Settings"}
+
+
+def _entity_check(store, eid) -> dict:
+    eid = str(eid or "")
+    if not eid:
+        return _SETTINGS_CHECK
+    try:
+        e = store.get_entity(eid)
+    except Exception:  # noqa: BLE001
+        e = None
+    if not e:
+        return _SETTINGS_CHECK
+    return {"href": "/graph?entity=" + eid, "label": (e.get("name") or "the entity") + " in the graph"}
+
+
+def _check_target(store, kind: str, target: str, payload: dict) -> dict:
+    """What an interrupted change touched, for its Check it action: a graph
+    entity ({href, label}), a records file ({file}), or Settings."""
+    if kind == "profiles":
+        return _entity_check(store, payload.get("entity_id") or target)
+    if kind == "circles":
+        return {"href": "/graph?view=circles", "label": "Circles in the graph"}
+    if kind == "voice":
+        return {"file": "context/voice.md"}
+    if kind == "reference":
+        lane, name = payload.get("lane"), str(payload.get("filename") or "")
+        if lane in ("reference", "context") and name and "/" not in name and "\\" not in name:
+            return {"file": f"{lane}/{name}"}
+        return _SETTINGS_CHECK
+    if kind == "tidy":
+        if target.startswith("pair:"):
+            return _entity_check(store, target[5:].split("|")[0])
+        if (payload.get("block") or "") != "review_ownerless":
+            f = store.get_finding((payload.get("verdict") or {}).get("finding_id"))
+            if f:
+                return _entity_check(store, f["ref_id"])
+    return _SETTINGS_CHECK
 
 
 def _close_finding(store, pid: int, verdict: str) -> None:
@@ -117,13 +183,15 @@ def _close_finding(store, pid: int, verdict: str) -> None:
 def decide(store, home, pending_id: int, *, approve: bool) -> dict:
     """Approve (apply through APPLY[kind]) or decline one queued change.
 
-    Returns {"ok": bool, "reason": str}. An approval whose APPLY makes no
-    change (the item changed since, a guard refused) leaves the change pending
-    with the reason, so the owner can decline it.
+    Returns {"ok": bool, "reason": str} (plus "status": "interrupted" when an
+    approval stopped part way). An approval whose APPLY raises NotApplied
+    (nothing changed: the item changed since, a guard refused) leaves the
+    change pending with the reason, so the owner can decline it.
 
-    The row is claimed ('deciding') so two clicks can't both apply it. Any
-    exception after the claim puts it back to 'pending' with the error noted,
-    so a failure never strands it; a crash is repaired by recover_stale()."""
+    The row is claimed ('deciding') so two clicks can't both apply it. Once
+    APPLY has started, any other exception settles it 'interrupted' (Check it
+    or Clear, never Apply again). A failed decline goes back to 'pending'; a
+    crash mid-decision is settled by recover_stale()."""
     home = str(home)
     with store._connect(write=True) as db:
         row = db.execute("SELECT * FROM pending_changes WHERE id=?",
@@ -164,15 +232,12 @@ def _decide_claimed(store, home: str, row: dict, approve: bool) -> dict:
     except NotApplied as exc:
         reason = str(exc) or "Nothing to change"
         if _landed(store, row["id"]):
-            return _finish_applied(store, row["id"], None, f"Applied in part: {reason}")
+            return _interrupt(store, row["id"], f"Stopped part way: {reason}")
         _release(store, row["id"], reason)
         return {"ok": False, "reason": reason}
-    except Exception as exc:  # noqa: BLE001 -- surface it, keep the review
-        log.exception("auto_changes: applying pending change %s failed", row["id"])
-        if _landed(store, row["id"]):
-            return _finish_applied(store, row["id"], None, f"Applied, then failed: {exc}")
-        _release(store, row["id"], f"Apply failed: {exc}")
-        return {"ok": False, "reason": f"Apply failed: {exc}"}
+    except Exception as exc:  # noqa: BLE001 -- part of it may be made: never Apply again
+        log.exception("auto_changes: applying pending change %s stopped part way", row["id"])
+        return _interrupt(store, row["id"], f"Stopped part way: {exc}")
     finally:
         SETTLING_PENDING.reset(token)
     return _finish_applied(store, row["id"], change_id, "")
@@ -211,16 +276,54 @@ def _settle(store, pid: int, status: str, change_id, error: str = "") -> None:
                    (status, _now(), change_id, error[:500], pid))
 
 
+def _write_status(store, sql: str, params: tuple, what: str) -> bool:
+    """Run one status write, retried with short pauses. True if it ran."""
+    for pause in (*_RETRY_PAUSES, None):
+        try:
+            with store._connect(write=True) as db:
+                db.execute(sql, params)
+            return True
+        except Exception:  # noqa: BLE001
+            if pause is None:
+                log.exception("auto_changes: could not %s", what)
+                return False
+            time.sleep(pause)
+    return False
+
+
 def _mark_applied(store, pid: int, error: str) -> None:
-    """Last resort after a failed _settle: status and error only. If even this
-    write fails and no recorded change marked the row, it stays 'deciding' and
-    recover_stale() returns it at the next start (logged above)."""
-    try:
-        with store._connect(write=True) as db:
-            db.execute("UPDATE pending_changes SET status=?, decided_at=?, error=? WHERE id=?",
-                       (_APPLIED, _now(), error[:500], pid))
-    except Exception:  # noqa: BLE001
-        log.exception("auto_changes: could not mark pending change %s applied", pid)
+    """Last resort after a failed _settle: status and error only, retried. If
+    it still fails the row stays 'deciding', and recover_stale() settles it
+    'interrupted' at the next start, never 'pending'."""
+    _write_status(store, "UPDATE pending_changes SET status=?, decided_at=?, error=? WHERE id=?",
+                  (_APPLIED, _now(), error[:500], pid), f"mark pending change {pid} applied")
+
+
+def _interrupt(store, pid: int, error: str) -> dict:
+    """APPLY stopped part way: settle the row 'interrupted' with the error
+    (retried; if it still fails, recover_stale() settles it at the next
+    start). Its finding stays open, so Needs you keeps it until Clear."""
+    _write_status(store, "UPDATE pending_changes SET status=?, decided_at=?, error=? "
+                  "WHERE id=? AND status IN (?, ?)",
+                  (_INTERRUPTED, _now(), error[:500], pid, _DECIDING, _APPLIED),
+                  f"mark pending change {pid} interrupted")
+    return {"ok": False, "reason": INTERRUPTED, "status": _INTERRUPTED}
+
+
+def clear(store, pending_id: int) -> dict:
+    """The owner checked an interrupted change: mark it handled ('cleared')
+    and close its finding. Returns {"ok": bool, "reason": str}."""
+    with store._connect(write=True) as db:
+        row = db.execute("SELECT id FROM pending_changes WHERE id=?",
+                         (int(pending_id),)).fetchone()
+        if row is None:
+            return {"ok": False, "reason": NOT_FOUND}
+        n = db.execute("UPDATE pending_changes SET status=?, decided_at=? WHERE id=? AND status=?",
+                       (_CLEARED, _now(), row["id"], _INTERRUPTED)).rowcount
+    if not n:
+        return {"ok": False, "reason": NOT_INTERRUPTED}
+    _close_finding(store, row["id"], "cleared")
+    return {"ok": True, "reason": ""}
 
 
 def _release(store, pid: int, error: str) -> None:
@@ -236,25 +339,33 @@ def _release(store, pid: int, error: str) -> None:
 
 def recover_stale(store, *, claimed_before: str | None = None,
                   older_than_s: float | None = None) -> int:
-    """Return rows stuck in 'deciding' (a crash between claim and settle) to
-    'pending'. Only rows claimed before `claimed_before` (an ISO UTC stamp, as
-    _now() writes) or more than `older_than_s` seconds ago are touched, so a
-    decision in flight right now is left alone; with neither, every such row.
-    The daemon calls this at startup with its own start time. Returns the count."""
+    """Settle rows stuck in 'deciding' (a crash or a failed status write
+    between claim and settle). A row with a claim time had its decision
+    started, so part of the change may be made: it becomes 'interrupted'
+    (Check it or Clear), never 'pending'. A row with no claim time (written
+    before claims were stamped) goes back to 'pending'. Only rows claimed
+    before `claimed_before` (an ISO UTC stamp, as _now() writes) or more than
+    `older_than_s` seconds ago are touched, so a decision in flight right now
+    is left alone; with neither, every such row. The daemon calls this at
+    startup with its own start time. Returns the count."""
     if older_than_s is not None:
         cutoff = datetime.fromtimestamp(
             datetime.now(timezone.utc).timestamp() - older_than_s, timezone.utc
         ).strftime("%Y-%m-%dT%H:%M:%SZ")
         claimed_before = min(claimed_before, cutoff) if claimed_before else cutoff
-    sql = ("UPDATE pending_changes SET status=?, decided_at='', "
-           "error='Interrupted before it finished; try again' WHERE status=?")
-    params: list = [_PENDING, _DECIDING]
+    started = ("UPDATE pending_changes SET status=?, "
+               "error='Interrupted before it finished' "
+               "WHERE status=? AND COALESCE(decided_at,'')!=''")
+    started_params: list = [_INTERRUPTED, _DECIDING]
     if claimed_before is not None:
-        sql += " AND (COALESCE(decided_at,'')='' OR decided_at < ?)"
-        params.append(claimed_before)
+        started += " AND decided_at < ?"
+        started_params.append(claimed_before)
     with store._connect(write=True) as db:
-        return db.execute(sql, params).rowcount
-
+        n = db.execute(started, started_params).rowcount
+        n += db.execute("UPDATE pending_changes SET status=?, decided_at='' "
+                        "WHERE status=? AND COALESCE(decided_at,'')=''",
+                        (_PENDING, _DECIDING)).rowcount
+    return n
 
 def _on_decline(store, kind: str, payload: dict) -> None:
     """Make a decline stick where the source would otherwise re-queue it:

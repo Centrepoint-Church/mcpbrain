@@ -160,13 +160,13 @@ console.log(JSON.stringify({kind: kindLabel(U), type: typeLabel(U), skip1: skipT
           skipText("extraction_empty", 2)]}));""")
     assert o["kind"] == "an automatic change"
     assert o["type"] == ["an automatic change", "automatic changes"]
-    assert o["reason"] == "skipped for another reason"
+    assert o["reason"] == "It's here for another reason."
     assert o["source"] == "another source"
     for k in ("skip1", "skip3", "skip0"):
         assert "skipped for another reason" in o[k].lower(), o[k]
     assert "Budget.xlsx" in o["skip1"]
     assert "zz_new_code" not in json.dumps(o)
-    assert o["known"] == ["Graph tidy-up", "fact added", "bulk mail", "Drive",
+    assert o["known"] == ["Graph tidy-up", "fact added", "It's bulk mail.", "Drive",
                           "Skipped 2 items, no text could be read from it"]
 
 
@@ -616,3 +616,334 @@ def test_grouped_undone_rows_are_struck_through():
     css = (_WIZ / "console.css").read_text(encoding="utf-8")
     rule = re.search(r"\.items li\.is-undone \.name\s*\{([^}]*)\}", css)
     assert rule and "line-through" in rule.group(1)
+
+
+# =========================================================================================
+# Fix round 1
+# =========================================================================================
+
+# --- F1. an approval that stops inside APPLY is interrupted, never re-queued ---------------
+
+def test_apply_that_changes_a_file_then_fails_to_record_is_interrupted(tmp_path, home, monkeypatch):
+    from mcpbrain import auto_changes
+    s = _store(tmp_path)
+    target = tmp_path / "touched.md"
+    target.write_text("# Notes\n")
+    calls = []
+
+    def fake_apply(store, home_, payload):
+        calls.append(1)
+        target.write_text(target.read_text() + "Hall B is booked.\n")
+        store.record_change("voice_apply", summary="Voice updated")   # raises below
+        return 1
+
+    def bad_record(*a, **k):
+        raise RuntimeError("database is locked")
+    monkeypatch.setitem(auto_changes.APPLY, "voice", fake_apply)
+    pid = auto_changes.propose(s, "voice", "voice", "Add 1 voice rule", {"suggestion_ids": [1]})
+    monkeypatch.setattr(s, "record_change", bad_record)
+    out = auto_changes.decide(s, home, pid, approve=True)
+    assert out == {"ok": False, "reason": auto_changes.INTERRUPTED, "status": "interrupted"}
+    row = _pending_row(s, pid)
+    assert row["status"] == "interrupted" and "database is locked" in row["error"]
+    assert auto_changes.decide(s, home, pid, approve=True)["reason"] == auto_changes.ALREADY_DECIDED
+    assert auto_changes.recover_stale(s) == 0
+    assert calls == [1]
+    assert target.read_text().count("Hall B is booked.") == 1
+
+
+def _voice_setup(tmp_path, home):
+    repo = _records(tmp_path)
+    (repo / "context").mkdir(exist_ok=True)
+    (repo / "context" / "voice.md").write_text("# Voice\n")
+    _git(repo, "add", "-A")
+    _git(repo, "commit", "-m", "voice")
+    config.write_config(home, {"procedural_memory": True, "records_dir": str(repo),
+                               "auto_changes": {"voice": "ask"}})
+    s = _store(tmp_path)
+    sid = s.insert_voice_suggestion("tone", "Open with the decision for Acme.", 0.9, [], "seen often")
+    return repo, s, sid
+
+
+def test_voice_approval_interrupted_after_writing_never_appends_twice(tmp_path, home, monkeypatch):
+    from mcpbrain import auto_changes, voice_apply
+    repo, s, sid = _voice_setup(tmp_path, home)
+    pid = auto_changes.propose(s, "voice", "voice", "Add 1 voice rule", {"suggestion_ids": [sid]})
+    real = s.record_change
+
+    def bad_record(change_type, **kw):
+        if change_type == "voice_apply":
+            raise RuntimeError("disk I/O error")
+        return real(change_type, **kw)
+    monkeypatch.setattr(s, "record_change", bad_record)
+    out = auto_changes.decide(s, home, pid, approve=True)
+    assert out["status"] == "interrupted"
+    voice = (repo / "context" / "voice.md").read_text()
+    assert voice.count("Open with the decision for Acme.") == 1
+    # The suggestion was marked applied (with last_applied_at) before the write.
+    assert s.pending_voice_suggestions() == []
+    assert s.get_voice_analyser_state("last_applied_at")
+    assert auto_changes.decide(s, home, pid, approve=True)["reason"] == auto_changes.ALREADY_DECIDED
+    monkeypatch.setattr(voice_apply, "can_apply", lambda store, h: (True, ""))
+    assert voice_apply.apply_suggestions(s, home, suggestion_ids=[sid])["applied"] == 0
+    assert (repo / "context" / "voice.md").read_text() == voice
+
+
+def test_voice_write_failure_puts_suggestions_back(tmp_path, home, monkeypatch):
+    from mcpbrain import voice_apply
+    repo, s, sid = _voice_setup(tmp_path, home)
+
+    def bad_mkstemp(*a, **k):
+        raise OSError("read-only file system")
+    monkeypatch.setattr(voice_apply.tempfile, "mkstemp", bad_mkstemp)
+    out = voice_apply.apply_suggestions(s, home, suggestion_ids=[sid])
+    assert out["applied"] == 0 and out["blocked"]
+    assert [x["id"] for x in s.pending_voice_suggestions()] == [sid]
+    assert s.get_voice_analyser_state("last_applied_at") == ""
+
+
+def test_pending_route_lists_interrupted_with_check_and_clear(server, home, monkeypatch):
+    from mcpbrain import auto_changes
+    srv, s = server
+    s.upsert_entity("dana-okafor", "Dana Okafor", "person")
+    pid = auto_changes.propose(s, "profiles", "dana-okafor", "New profile for Dana Okafor",
+                               {"entity_id": "dana-okafor", "profile": "Dana runs finance."})
+
+    def boom(store, h, payload):
+        raise RuntimeError("stopped")
+    monkeypatch.setitem(auto_changes.APPLY, "profiles", boom)
+    code, out = _req(srv, "POST", f"/api/pending/{pid}/apply")
+    assert code == 409 and out["status"] == "interrupted"
+    code, out = _req(srv, "GET", "/api/pending")
+    item = out["items"][0]
+    assert item["status"] == "interrupted"
+    assert item["check"] == {"href": "/graph?entity=dana-okafor",
+                             "label": "Dana Okafor in the graph"}
+    assert _req(srv, "POST", f"/api/pending/{pid}/apply")[1]["reason"] == \
+        auto_changes.ALREADY_DECIDED
+    assert _req(srv, "POST", f"/api/pending/{pid}/clear") == (200, {"ok": True})
+    assert _pending_row(s, pid)["status"] == "cleared"
+    assert _req(srv, "GET", "/api/pending") == (200, {"items": []})
+    assert not [f for f in s.open_findings() if f["finding_type"] == "pending_change"]
+    code, out = _req(srv, "POST", f"/api/pending/{pid}/clear")
+    assert code == 409 and out["reason"] == auto_changes.NOT_INTERRUPTED
+
+
+def test_interrupted_check_targets(tmp_path):
+    from mcpbrain import auto_changes
+    s = _store(tmp_path)
+    assert auto_changes._check_target(s, "voice", "voice", {}) == {"file": "context/voice.md"}
+    assert auto_changes._check_target(s, "reference", "x", {"lane": "reference",
+                                                             "filename": "acme.md"}) == \
+        {"file": "reference/acme.md"}
+    assert auto_changes._check_target(s, "draft_style", "x", {})["href"] == "/settings#automatic"
+
+
+def test_dashboard_offers_check_and_clear_for_interrupted_never_apply():
+    page = (_WIZ / "dashboard.html").read_text(encoding="utf-8")
+    body = page[page.index("function interruptedItem("):page.index("function pendingItem(")]
+    assert '"Check it"' in body and '"Clear"' in body and "/clear" in body
+    assert '"Apply"' not in body and "/apply" not in body
+    assert "This may have been applied, check it before doing anything else" in body
+    assert 'p.status === "interrupted"' in page
+
+
+# --- F2. a double failure is settled interrupted, never pending -----------------------------
+
+def test_double_failure_row_is_settled_interrupted_by_recover_stale(tmp_path, home, monkeypatch):
+    from mcpbrain import auto_changes
+    s = _store(tmp_path)
+    monkeypatch.setitem(auto_changes.APPLY, "circles",
+                        lambda store, h, p: (_ for _ in ()).throw(RuntimeError("stopped")))
+    pid = auto_changes.propose(s, "circles", "7", "Name circle 7 Acme volunteers", {})
+    monkeypatch.setattr(auto_changes, "_write_status", lambda *a, **k: False)
+    auto_changes.decide(s, home, pid, approve=True)
+    assert _pending_row(s, pid)["status"] == "deciding"
+    monkeypatch.undo()
+    assert auto_changes.recover_stale(s) == 1
+    assert _pending_row(s, pid)["status"] == "interrupted"
+
+
+def test_status_write_is_retried(tmp_path, monkeypatch):
+    from mcpbrain import auto_changes
+    s = _store(tmp_path)
+    pid = auto_changes.propose(s, "circles", "7", "Name circle 7", {})
+    monkeypatch.setattr(auto_changes, "_RETRY_PAUSES", (0, 0, 0))
+    real = s._connect
+    fails = {"n": 2}
+
+    def flaky(*a, **k):
+        if k.get("write") and fails["n"]:
+            fails["n"] -= 1
+            raise RuntimeError("database is locked")
+        return real(*a, **k)
+    monkeypatch.setattr(s, "_connect", flaky)
+    assert auto_changes._write_status(s, "UPDATE pending_changes SET error='x' WHERE id=?",
+                                      (pid,), "test") is True
+    monkeypatch.setattr(s, "_connect", real)
+    assert _pending_row(s, pid)["error"] == "x"
+
+
+# --- F3. hot.md writers in other processes share the records lock --------------------------
+
+def _hot_repo(tmp_path) -> Path:
+    repo = _records(tmp_path)
+    (repo / "state" / "hot.md").write_text("# Hot\n\n## Just decided\n\n")
+    _git(repo, "add", "-A")
+    _git(repo, "commit", "-m", "hot")
+    return repo
+
+
+def _append_hot(repo, n, home):
+    os.environ["MCPBRAIN_HOME"] = home
+    from mcpbrain import records_write
+    for i in range(n):
+        records_write.append_continuity(repo, text=f"Acme hall booking step {i}")
+
+
+def _prune_hot(repo, n, home):
+    os.environ["MCPBRAIN_HOME"] = home
+    from mcpbrain import records_cadences, records_write
+    for _ in range(n):
+        # An old entry for each pass to prune, so every pass rewrites hot.md.
+        with records_write.repo_lock(repo):
+            p = Path(repo) / "state" / "hot.md"
+            p.write_text(p.read_text() + "- **2020-01-01:** Old Acme note\n")
+        records_cadences.prune_and_commit(repo)
+
+
+def test_prune_and_daemon_append_in_two_processes_both_survive(tmp_path, home):
+    repo = _hot_repo(tmp_path)
+    ctx = mp.get_context("spawn")
+    procs = [ctx.Process(target=_append_hot, args=(str(repo), 25, home)),
+             ctx.Process(target=_prune_hot, args=(str(repo), 25, home))]
+    for p in procs:
+        p.start()
+    for p in procs:
+        p.join(120)
+        assert p.exitcode == 0
+    hot = (repo / "state" / "hot.md").read_text()
+    for i in range(25):
+        assert f"Acme hall booking step {i}" in hot, i
+    _git(repo, "fsck", "--strict")
+
+
+def test_cadence_and_voice_writers_take_the_records_lock():
+    rc = (_ROOT / "mcpbrain" / "records_cadences.py").read_text(encoding="utf-8")
+    for fn in ("def prune_hot_md(", "def prune_and_commit(", "def prepend_digest_to_hot("):
+        body = rc[rc.index(fn):]
+        body = body[:body.index("\ndef ", 5)]
+        assert "repo_lock(repo)" in body, fn
+    va = (_ROOT / "mcpbrain" / "voice_apply.py").read_text(encoding="utf-8")
+    assert "with repo_lock(records):" in va
+
+
+# --- F4. the restart claim never leaks ---------------------------------------------------------
+
+def test_restart_claim_released_when_the_restart_never_starts(server, monkeypatch):
+    from mcpbrain import system_ops
+    srv, _s = server
+
+    def boom(d, **kw):
+        raise RuntimeError("no thread")
+    monkeypatch.setattr(system_ops, "request_restart", boom)
+    assert _req(srv, "POST", "/api/restart") == (202, {"restarting": True})
+    time.sleep(0.2)
+    assert system_ops.claim_restart() is True
+    system_ops.release_restart()
+
+
+def test_restart_claim_released_when_the_reply_fails(server, monkeypatch):
+    from mcpbrain import control_api, system_ops
+    srv, _s = server
+    real = control_api.h_json
+    started = []
+    monkeypatch.setattr(system_ops, "request_restart", lambda d, **kw: started.append(1))
+
+    def gone(h, code, obj):
+        if obj == {"restarting": True}:
+            raise BrokenPipeError("client went away")
+        return real(h, code, obj)
+    monkeypatch.setattr(control_api, "h_json", gone)
+    try:
+        _req(srv, "POST", "/api/restart")
+    except Exception:  # noqa: BLE001 -- the reply never arrived, as intended
+        pass
+    time.sleep(0.2)
+    assert started == []
+    assert system_ops.claim_restart() is True
+    system_ops.release_restart()
+
+
+# --- F5. maintenance errors are words ----------------------------------------------------------
+
+def test_maintenance_error_is_worded(server, monkeypatch):
+    srv, s = server
+
+    def boom(**kw):
+        raise RuntimeError("sqlite3 internal kaboom")
+    monkeypatch.setattr(s, "reflow_status", boom)
+    code, out = _req(srv, "GET", "/api/maintenance")
+    assert code == 500
+    assert "kaboom" not in out["error"] and "sqlite" not in out["error"]
+    page = (_WIZ / "settings.html").read_text(encoding="utf-8")
+    body = page[page.index("async function loadMaintenance("):]
+    body = body[:body.index("\n}\n")]
+    assert "errText" not in body
+
+
+# --- F6. cold reasons read as one sentence form -------------------------------------------------
+
+def test_every_chunk_reason_is_one_sentence_form():
+    page = (_WIZ / "dashboard.html").read_text(encoding="utf-8")
+    block = page[page.index("const REASON = {"):page.index("function reasonText(")]
+    values = re.findall(r':\s*"([^"]+)"', block)
+    assert len(values) >= 20
+    for v in values:
+        assert v.startswith("It's ") and v.endswith("."), v
+    assert "It's here for another reason." in page
+
+
+# --- F7. the records lock follows a gitfile ------------------------------------------------------
+
+def test_records_lock_follows_a_worktree_gitfile(tmp_path, monkeypatch):
+    from mcpbrain import records_write
+    repo = _records(tmp_path)
+    wt = tmp_path / "records-wt"
+    _git(repo, "worktree", "add", "-q", str(wt))
+    assert (wt / ".git").is_file()
+    path = records_write._lock_path(str(wt))
+    assert path is not None
+    assert Path(path).parent.resolve() == (repo / ".git" / "worktrees" / wt.name).resolve()
+    ready = tmp_path / "ready-wt"
+    p = mp.get_context("spawn").Process(target=_hold_records_lock, args=(str(wt), str(ready)))
+    p.start()
+    try:
+        _wait_for(ready)
+        monkeypatch.setattr(records_write, "LOCK_TIMEOUT_S", 0.3)
+        with pytest.raises(records_write.RecordsBusy):
+            records_write.append_decision(str(wt), text="Acme moves Hall B to Sunday")
+    finally:
+        p.kill()
+        p.join(10)
+
+
+def test_records_lock_logs_once_when_a_gitfile_points_nowhere(tmp_path, caplog):
+    from mcpbrain import records_write
+    repo = tmp_path / "odd"
+    repo.mkdir()
+    (repo / ".git").write_text("gitdir: /nowhere/at/all\n")
+    with caplog.at_level("WARNING", logger="mcpbrain.records_write"):
+        assert records_write._lock_path(str(repo)) is None
+        assert records_write._lock_path(str(repo)) is None
+    assert len([r for r in caplog.records if "git folder" in r.getMessage()]) == 1
+
+
+# --- F8. /api/status counts findings the way the console does -----------------------------------
+
+def test_daemon_status_open_findings_is_the_grouped_count(tmp_path, home):
+    s, d, _clock = _review_daemon(tmp_path)
+    s.record_finding("agent_stderr", "a.err", summary="Enrichment task failed")
+    s.record_finding("agent_stderr", "b.err", summary="Enrichment task failed")
+    s.record_finding("lint:orphan_entity", "e1", summary="orphan")
+    assert d.status()["open_findings"] == 1

@@ -1792,7 +1792,8 @@ class Store:
             # payload is what auto_changes.APPLY[kind] needs to make the change
             # later; change_log_id is the undoable change approval recorded.
             # status: pending | deciding (claimed by one decide; decided_at is
-            # the claim time) | applied | declined.
+            # the claim time) | applied | declined | interrupted (APPLY stopped
+            # part way: Check it or Clear, never Apply again) | cleared.
             db.execute(f"""CREATE TABLE IF NOT EXISTS pending_changes(
                 id            INTEGER PRIMARY KEY AUTOINCREMENT,
                 kind          TEXT NOT NULL,
@@ -7311,10 +7312,12 @@ class Store:
             return row[0] if row else 0
 
     def pending_changes_count(self) -> int:
-        """Automatic changes waiting for the owner's review."""
+        """Automatic changes waiting for the owner: queued for review, or
+        stopped part way and waiting to be checked."""
         with self._connect() as db:
             row = db.execute(
-                "SELECT COUNT(*) FROM pending_changes WHERE status='pending'").fetchone()
+                "SELECT COUNT(*) FROM pending_changes "
+                "WHERE status IN ('pending', 'interrupted')").fetchone()
             return row[0] if row else 0
 
     def get_finding(self, finding_id) -> dict | None:
@@ -7945,6 +7948,38 @@ class Store:
                 "UPDATE voice_suggestions SET status='applied', applied_at=? WHERE id=?",
                 (ts, suggestion_id),
             )
+
+    def claim_voice_suggestions(self, suggestion_ids: list[int]) -> list[int]:
+        """Mark these pending suggestions applied and stamp last_applied_at, in
+        one transaction, before voice.md is written: a retry after a later
+        failure finds them applied and can't append them again. Returns the
+        ids this call moved from pending to applied."""
+        ts = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+        claimed: list[int] = []
+        with self._connect(write=True) as db:
+            for sid in suggestion_ids:
+                if db.execute("UPDATE voice_suggestions SET status='applied', applied_at=? "
+                              "WHERE id=? AND status='pending'", (ts, sid)).rowcount:
+                    claimed.append(sid)
+            if claimed:
+                db.execute(
+                    "INSERT INTO voice_analyser_state(key, value, updated_at) VALUES(?, ?, ?) "
+                    "ON CONFLICT(key) DO UPDATE SET value=excluded.value, "
+                    "updated_at=excluded.updated_at", ("last_applied_at", ts, ts))
+        return claimed
+
+    def unclaim_voice_suggestions(self, suggestion_ids: list[int],
+                                  last_applied_at: str) -> None:
+        """Undo claim_voice_suggestions when voice.md could not be written:
+        the suggestions go back to pending and last_applied_at to its prior
+        value."""
+        ts = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+        with self._connect(write=True) as db:
+            for sid in suggestion_ids:
+                db.execute("UPDATE voice_suggestions SET status='pending', applied_at='' "
+                           "WHERE id=? AND status='applied'", (sid,))
+            db.execute("UPDATE voice_analyser_state SET value=?, updated_at=? "
+                       "WHERE key='last_applied_at'", (last_applied_at or "", ts))
 
     def get_voice_analyser_state(self, key: str, default: str = "") -> str:
         """Read a key from voice_analyser_state."""

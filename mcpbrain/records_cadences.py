@@ -147,20 +147,34 @@ def prune_hot_md(
     When dry_run=True the count is computed but the file is NOT written and
     nothing is logged.
 
-    Idempotent. Does not commit — the subcommand layer commits.
+    Idempotent. Does not commit (prune_and_commit does). The read and the
+    write run under the records lock the daemon's writers share across
+    processes, so an entry appended meanwhile is never lost.
     """
     now = now or datetime.now(timezone.utc)
     cutoff = (now - timedelta(days=days)).date()
     p = Path(repo) / "state" / "hot.md"
-    if not p.exists():
-        return 0
-    text = p.read_text()
-    pruned, dropped = _prune_blocks(text, cutoff)
-    removed = len(dropped)
+    with records_write.repo_lock(repo):
+        if not p.exists():
+            return 0
+        text = p.read_text()
+        pruned, dropped = _prune_blocks(text, cutoff)
+        removed = len(dropped)
+        if removed and not dry_run:
+            p.write_text(pruned)
     if removed and not dry_run:
-        p.write_text(pruned)
         _write_prune_log(dropped)
     return removed
+
+
+def prune_and_commit(repo: str, *, days: int = _PRUNE_DAYS, dry_run: bool = False) -> int:
+    """records-prune: prune hot.md and commit it, read to commit under one
+    hold of the records lock. Returns the count removed."""
+    with records_write.repo_lock(repo):
+        n = prune_hot_md(repo, days=days, dry_run=dry_run)
+        if n and not dry_run:
+            records_write._commit_file(repo, "state/hot.md", "prune: hot.md")
+    return n
 
 
 def context_health(repo: str, mcpbrain_home: str) -> list[str]:
@@ -267,21 +281,23 @@ def prepend_digest_to_hot(repo: str, *, since_days: int = 7) -> bool:
     if not digest:
         return False
     p = Path(repo) / "state" / "hot.md"
-    if not p.exists():
-        return False
-    original = p.read_text()
-    anchor = "## Just decided"
-    idx = original.find(anchor)
-    if idx == -1:
-        log.warning("prepend_digest_to_hot: anchor %r not found in hot.md; "
-                    "prepending at top of file", anchor)
-        insert = 0
-    else:
-        insert = original.find("\n", idx) + 1
-        while insert < len(original) and original[insert] == "\n":
-            insert += 1
-    p.write_text(original[:insert] + digest + "\n" + original[insert:])
-    return records_write._commit_file(repo, "state/hot.md", "gardener: weekly digest")
+    # Read, write and commit under the records lock (shared across processes).
+    with records_write.repo_lock(repo):
+        if not p.exists():
+            return False
+        original = p.read_text()
+        anchor = "## Just decided"
+        idx = original.find(anchor)
+        if idx == -1:
+            log.warning("prepend_digest_to_hot: anchor %r not found in hot.md; "
+                        "prepending at top of file", anchor)
+            insert = 0
+        else:
+            insert = original.find("\n", idx) + 1
+            while insert < len(original) and original[insert] == "\n":
+                insert += 1
+        p.write_text(original[:insert] + digest + "\n" + original[insert:])
+        return records_write._commit_file(repo, "state/hot.md", "gardener: weekly digest")
 
 
 def main(argv=None) -> int:
@@ -295,9 +311,7 @@ def main(argv=None) -> int:
     home = str(config.app_dir())
     repo = config.records_dir(home)
     if ns.cmd == "records-prune":
-        n = prune_hot_md(repo, days=ns.days, dry_run=ns.dry_run)
-        if n and not ns.dry_run:
-            records_write._commit_file(repo, "state/hot.md", "prune: hot.md")
+        n = prune_and_commit(repo, days=ns.days, dry_run=ns.dry_run)
         print(f"pruned {n} entries")
         return 0
     if ns.cmd == "records-digest":

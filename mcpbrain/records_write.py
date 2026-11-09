@@ -38,9 +38,38 @@ class RecordsBusy(RuntimeError):
         super().__init__(BUSY)
 
 
+_UNRESOLVED_LOGGED: set[str] = set()
+
+
+def _git_dir(repo) -> Path | None:
+    """The repo's git folder: <repo>/.git, or where a .git file (a worktree or
+    submodule gitfile, "gitdir: <path>") points. None if there is none."""
+    dot = Path(repo) / ".git"
+    if dot.is_dir():
+        return dot
+    if dot.is_file():
+        try:
+            line = dot.read_text(encoding="utf-8").strip()
+        except OSError:
+            line = ""
+        if line.startswith("gitdir:"):
+            target = Path(line[len("gitdir:"):].strip())
+            if not target.is_absolute():
+                target = Path(repo) / target
+            if target.is_dir():
+                return target
+    return None
+
+
 def _lock_path(repo) -> str | None:
-    git_dir = Path(repo) / ".git"
-    return str(git_dir / LOCK_FILE) if git_dir.is_dir() else None
+    git_dir = _git_dir(repo)
+    if git_dir is None:
+        if (Path(repo) / ".git").exists() and str(repo) not in _UNRESOLVED_LOGGED:
+            _UNRESOLVED_LOGGED.add(str(repo))
+            log.warning("records lock: can't find the git folder of %s; "
+                        "only this process's writes are serialised", repo)
+        return None
+    return str(git_dir / LOCK_FILE)
 
 
 @contextmanager

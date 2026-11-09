@@ -259,9 +259,10 @@ class ControlServer:
                         return h_json(self, 200, {
                             "reflow": server.store.reflow_status(),
                             "ingestion_cleanup": ingestion_cleanup.status(server.store)})
-                    except Exception as exc:
+                    except Exception:  # noqa: BLE001 -- logged; the page gets words
                         log.exception("%s failed", self.path)
-                        return h_json(self, 500, {"error": str(exc)})
+                        return h_json(self, 500, {"error": "The maintenance history "
+                                                           "couldn't be read. Try again in a moment."})
                 if self.path in ("/api/pending", "/api/findings"):
                     if server.store is None:
                         return h_json(self, 503, {"error": "dashboard not available"})
@@ -628,8 +629,13 @@ class ControlServer:
                 # A second click while one restart runs is answered, not repeated.
                 if not system_ops.claim_restart():
                     return h_json(h, 202, {"restarting": True, "already": True})
-                h_json(h, 202, {"restarting": True})
-                system_ops.request_restart(d, home=self.home)
+                try:
+                    h_json(h, 202, {"restarting": True})
+                    system_ops.request_restart(d, home=self.home)
+                except Exception:  # noqa: BLE001 -- the client left, or it never started
+                    # Nothing is restarting: free the claim so the next click works.
+                    log.exception("restart: did not start")
+                    system_ops.release_restart()
                 return None
             if h.path == "/api/system/login":
                 on = body.get("on")
@@ -843,13 +849,17 @@ class ControlServer:
                     return h_json(h, 400, {"error": out["error"]})
                 return h_json(h, 200, out)
 
-            m = re.match(r"^/api/pending/(\d+)/(apply|decline)$", h.path)
+            m = re.match(r"^/api/pending/(\d+)/(apply|decline|clear)$", h.path)
             if m:
                 if self.store is None:
                     return h_json(h, 503, {"error": "dashboard not available"})
                 from mcpbrain import auto_changes
-                out = auto_changes.decide(self.store, str(self.home), int(m.group(1)),
-                                          approve=(m.group(2) == "apply"))
+                if m.group(2) == "clear":
+                    # An interrupted change the owner has checked.
+                    out = auto_changes.clear(self.store, int(m.group(1)))
+                else:
+                    out = auto_changes.decide(self.store, str(self.home), int(m.group(1)),
+                                              approve=(m.group(2) == "apply"))
                 if out["ok"]:
                     return h_json(h, 200, {"ok": True})
                 return h_json(h, 404 if out["reason"] == auto_changes.NOT_FOUND else 409, out)

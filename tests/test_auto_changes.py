@@ -726,7 +726,8 @@ def test_pending_routes(server, home):
     code, out = _req(srv, "GET", "/api/pending")
     assert code == 200
     assert [i["id"] for i in out["items"]] == [a, b]
-    assert set(out["items"][0]) == {"id", "kind", "target", "summary", "created_at"}
+    assert set(out["items"][0]) == {"id", "kind", "target", "summary", "status", "created_at"}
+    assert out["items"][0]["status"] == "pending"
     assert _req(srv, "POST", f"/api/pending/{a}/apply") == (200, {"ok": True})
     assert _entity(s, "dana-okafor")["profile"] == "Dana runs finance."
     code, out = _req(srv, "POST", f"/api/pending/{a}/apply")
@@ -845,7 +846,9 @@ def _queued_profile(s):
                                 {"entity_id": "dana-okafor", "profile": "Dana runs finance."})
 
 
-def test_exception_inside_apply_leaves_row_pending_and_listed(server, monkeypatch):
+def test_exception_inside_apply_settles_interrupted_and_listed(server, monkeypatch):
+    """Once APPLY has started, an exception other than NotApplied may have
+    left part of the change made: the row is interrupted, never re-queued."""
     srv, s = server
     pid = _queued_profile(s)
 
@@ -853,10 +856,12 @@ def test_exception_inside_apply_leaves_row_pending_and_listed(server, monkeypatc
         raise RuntimeError("disk on fire")
     monkeypatch.setitem(auto_changes.APPLY, "profiles", boom)
     code, out = _req(srv, "POST", f"/api/pending/{pid}/apply")
-    assert code == 409 and "disk on fire" in out["reason"]
+    assert code == 409 and out["reason"] == auto_changes.INTERRUPTED
+    assert out["status"] == "interrupted"
     row = _pending(s)[0]
-    assert row["status"] == "pending" and "disk on fire" in row["error"]
-    assert [i["id"] for i in _req(srv, "GET", "/api/pending")[1]["items"]] == [pid]
+    assert row["status"] == "interrupted" and "disk on fire" in row["error"]
+    items = _req(srv, "GET", "/api/pending")[1]["items"]
+    assert [(i["id"], i["status"]) for i in items] == [(pid, "interrupted")]
 
 
 def test_exception_inside_settle_leaves_row_pending_and_listed(server, monkeypatch):
@@ -888,11 +893,14 @@ def test_stale_deciding_row_is_recovered(tmp_path, home):
     _set_deciding(s, fresh, "2099-01-01T00:00:00Z")    # claimed after the cutoff
     assert auto_changes.list_pending(s) == []
     assert auto_changes.recover_stale(s, claimed_before="2026-06-01T00:00:00Z") == 1
-    assert [r["id"] for r in auto_changes.list_pending(s)] == [old]
+    # A started decision may have changed something: interrupted, not re-queued.
+    assert [(r["id"], r["status"]) for r in auto_changes.list_pending(s)] == [(old, "interrupted")]
     assert s.pending_changes_count() == 1
     assert auto_changes.recover_stale(s, older_than_s=60) == 0   # 2099 claim is "now-ish"
     assert auto_changes.recover_stale(s) == 1
-    assert auto_changes.decide(s, home, fresh, approve=False)["ok"] is True
+    assert auto_changes.decide(s, home, fresh, approve=False)["reason"] == \
+        auto_changes.ALREADY_DECIDED
+    assert auto_changes.clear(s, fresh)["ok"] is True
 
 
 def test_daemon_startup_sweep_recovers_rows_claimed_before_start(tmp_path, monkeypatch):
@@ -904,7 +912,7 @@ def test_daemon_startup_sweep_recovers_rows_claimed_before_start(tmp_path, monke
     class _D:
         _store = s
     assert daemon_mod.Daemon._recover_pending_changes(_D()) == 1
-    assert _pending(s)[0]["status"] == "pending"
+    assert _pending(s)[0]["status"] == "interrupted"
     # a stranded consolidation review no longer blocks future passes forever
     assert auto_changes.pending_targets(s, "consolidation") == {"x"}
 

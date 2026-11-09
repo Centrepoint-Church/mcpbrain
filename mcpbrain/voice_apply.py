@@ -78,71 +78,75 @@ def apply_suggestions(store, home: str,
         log.info("voice_apply: blocked — %s", reason)
         return {"applied": 0, "skipped": 0, "blocked": reason}
 
-    pending = store.pending_voice_suggestions()
-    if suggestion_ids is not None:
-        id_set = set(suggestion_ids)
-        pending = [s for s in pending if s["id"] in id_set]
-    pending = [s for s in pending if float(s.get("confidence") or 0.0) >= _MIN_CONFIDENCE]
+    from mcpbrain import config as _cfg
+    from mcpbrain.records_write import _commit_file, repo_lock
+    records = _cfg.records_dir(home)
+    # Read, write and commit voice.md under the records lock every records
+    # writer shares (across processes), so no other write lands in between.
+    with repo_lock(records):
+        pending = store.pending_voice_suggestions()
+        if suggestion_ids is not None:
+            id_set = set(suggestion_ids)
+            pending = [s for s in pending if s["id"] in id_set]
+        pending = [s for s in pending if float(s.get("confidence") or 0.0) >= _MIN_CONFIDENCE]
 
-    if not pending:
-        return {"applied": 0, "skipped": 0, "blocked": None}
+        if not pending:
+            return {"applied": 0, "skipped": 0, "blocked": None}
 
-    voice_path = _voice_path(home)
-    existed = voice_path.exists()
-    existing = voice_path.read_text() if existed else ""
+        # Diff cap: don't apply if the change exceeds MAX_DIFF_LINES
+        if len(pending) > _MAX_DIFF_LINES:
+            log.warning("voice_apply: %d additions exceed diff cap %d — truncating",
+                        len(pending), _MAX_DIFF_LINES)
+            pending = pending[:_MAX_DIFF_LINES]
 
-    additions: list[str] = []
-    for s in pending:
-        line = f"- [{s['kind']}] {s['rule']}"
-        additions.append(line)
+        # Mark them applied (with last_applied_at) BEFORE writing the file, in
+        # one transaction: if anything after this fails, a retry finds them
+        # applied and can't append the same section twice.
+        prior_last = store.get_voice_analyser_state("last_applied_at")
+        claimed = set(store.claim_voice_suggestions([s["id"] for s in pending]))
+        pending = [s for s in pending if s["id"] in claimed]
+        if not pending:
+            return {"applied": 0, "skipped": 0, "blocked": None}
 
-    # Diff cap: don't apply if the change exceeds MAX_DIFF_LINES
-    if len(additions) > _MAX_DIFF_LINES:
-        log.warning("voice_apply: %d additions exceed diff cap %d — truncating",
-                    len(additions), _MAX_DIFF_LINES)
-        additions = additions[:_MAX_DIFF_LINES]
-        pending = pending[:_MAX_DIFF_LINES]
+        voice_path = _voice_path(home)
+        existed = voice_path.exists()
+        existing = voice_path.read_text() if existed else ""
+        additions = [f"- [{s['kind']}] {s['rule']}" for s in pending]
 
-    # Write new content (append a section at the end of voice.md)
-    ts = _now_iso()[:10]
-    new_section = f"\n\n## Voice suggestions applied {ts}\n" + "\n".join(additions) + "\n"
-    new_content = existing.rstrip() + new_section
+        # Write new content (append a section at the end of voice.md)
+        ts = _now_iso()[:10]
+        new_section = f"\n\n## Voice suggestions applied {ts}\n" + "\n".join(additions) + "\n"
+        new_content = existing.rstrip() + new_section
 
-    # Atomic write
-    try:
-        voice_path.parent.mkdir(parents=True, exist_ok=True)
-        fd, tmp = tempfile.mkstemp(dir=str(voice_path.parent),
-                                   prefix=".voice.", suffix=".tmp")
-        with os.fdopen(fd, "w") as f:
-            f.write(new_content)
-        os.replace(tmp, voice_path)
-    except OSError as exc:
-        log.error("voice_apply: write failed: %s", exc)
-        return {"applied": 0, "skipped": len(pending), "blocked": str(exc)}
+        # Atomic write
+        try:
+            voice_path.parent.mkdir(parents=True, exist_ok=True)
+            fd, tmp = tempfile.mkstemp(dir=str(voice_path.parent),
+                                       prefix=".voice.", suffix=".tmp")
+            with os.fdopen(fd, "w") as f:
+                f.write(new_content)
+            os.replace(tmp, voice_path)
+        except OSError as exc:
+            log.error("voice_apply: write failed: %s", exc)
+            # Nothing was written: put the suggestions back for next time.
+            store.unclaim_voice_suggestions([s["id"] for s in pending], prior_last)
+            return {"applied": 0, "skipped": len(pending), "blocked": str(exc)}
 
-    # Mark suggestions applied
-    for s in pending:
-        store.mark_voice_suggestion_applied(s["id"])
+        from mcpbrain.change_undo import revert_json
+        change_id = store.record_change(
+            "voice_apply",
+            summary=f"Applied {len(pending)} voice suggestions to voice.md",
+            source="voice_apply",
+            revert_ref=revert_json({"content": existing if existed else None},
+                                   {"content": new_content}),
+        )
 
-    store.set_voice_analyser_state("last_applied_at", _now_iso())
-    from mcpbrain.change_undo import revert_json
-    change_id = store.record_change(
-        "voice_apply",
-        summary=f"Applied {len(pending)} voice suggestions to voice.md",
-        source="voice_apply",
-        revert_ref=revert_json({"content": existing if existed else None},
-                               {"content": new_content}),
-    )
-
-    # Commit voice.md to the records git repo (git is the safety net for auto-apply).
-    try:
-        from mcpbrain import config as _cfg
-        from mcpbrain.records_write import _commit_file
-        records = _cfg.records_dir(home)
-        _commit_file(records, "context/voice.md",
-                     f"voice: applied {len(pending)} voice suggestions")
-    except Exception as exc:  # noqa: BLE001
-        log.warning("voice_apply: git commit failed (suggestions still applied): %s", exc)
+        # Commit voice.md to the records git repo (git is the safety net for auto-apply).
+        try:
+            _commit_file(records, "context/voice.md",
+                         f"voice: applied {len(pending)} voice suggestions")
+        except Exception as exc:  # noqa: BLE001
+            log.warning("voice_apply: git commit failed (suggestions still applied): %s", exc)
 
     log.info("voice_apply: applied %d suggestions", len(pending))
     return {"applied": len(pending), "skipped": 0, "blocked": None, "change_id": change_id}

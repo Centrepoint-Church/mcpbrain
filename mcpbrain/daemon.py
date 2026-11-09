@@ -1921,7 +1921,10 @@ class Daemon:
         except OSError as exc:
             log.debug("status: spool counts unavailable: %s", exc)
         try:
-            open_findings = self._store.open_findings_count()
+            # The same grouped count the console's Needs you shows (repeats of
+            # one finding count once; tidy lint input and reviews excluded).
+            from mcpbrain.dashboard import findings_view
+            open_findings = len(findings_view(self._store))
         except Exception:  # noqa: BLE001 — degrade gracefully, never crash status poll
             open_findings = 0
         from mcpbrain import probes
@@ -5431,7 +5434,7 @@ class Daemon:
             from mcpbrain import auto_changes
             n = auto_changes.recover_stale(self._store, claimed_before=_PROCESS_STARTED_AT)
             if n:
-                log.info("startup: returned %d interrupted review decision(s) to the queue", n)
+                log.info("startup: settled %d review decision(s) a stop interrupted", n)
             return n
         except Exception as exc:  # noqa: BLE001
             log.warning("pending-change recovery failed: %s", exc, exc_info=True)

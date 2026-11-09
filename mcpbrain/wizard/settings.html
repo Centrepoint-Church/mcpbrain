@@ -1100,8 +1100,10 @@ async function loadMaintenance(){
     const m = await api("/api/maintenance");
     rows = maintLines(m, maintDay).map(l => el("div", {}, el("h3", {text: l.title}), el("p", {text: l.text})));
   } catch (e) {
+    // Fixed words: a failure's own text is for the log, not the page.
     rows = [el("div", {id: "maint-body"}, el("p", {class: "said said--bad",
-      text: "Couldn’t load the maintenance history. " + errText(e)}))];
+      text: e && e.offline ? "Couldn’t load the maintenance history. mcpbrain is not responding."
+        : "Couldn’t load the maintenance history. Try again in a moment."}))];
   }
   fill($("maint"), $("maint-head"), rows);
   busy("maint", false);
