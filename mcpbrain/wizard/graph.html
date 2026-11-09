@@ -1058,20 +1058,16 @@ async function showMergePreview(otherId){
         res.notes ? el("li", {}, el("span", {text: "Notes"}), el("span", {text: res.notes})) : null),
       el("div", {class: "acts"}, go, el("button", {class: "btn", type: "button", text: "Back", onclick: renderMerge})), out));
     go.addEventListener("click", ()=> doMerge(go, out, p.loser_id, p.winner_id, $("dw-m-name").value.trim()));
-  }catch(e){ fill(box); said(err, e.data && e.data.message ? e.data.message : errText(e), "bad"); }
+  }catch(e){ fill(box); said(err, errText(e), "bad"); }
 }
 function doMerge(btn, out, loserId, winnerId, name){
   act(btn, out, async ()=>{
-    try {
-      const r = await api("/api/graph/merge", {method: "POST", body: { loser_id: loserId, winner_id: winnerId, name }});
-      closeDrawer(true);
-      setSearchStatus("Merged. Kept " + (r.winner_name || "the more linked one") + ".");
-      load();
-      return "";
-    } catch (e) {
-      if (e.data && e.data.message) e.message = e.data.message;
-      throw e;
-    }
+    // A refusal's words arrive as the error's message (worded reason).
+    const r = await api("/api/graph/merge", {method: "POST", body: { loser_id: loserId, winner_id: winnerId, name }});
+    closeDrawer(true);
+    setSearchStatus("Merged. Kept " + (r.winner_name || "the more linked one") + ".");
+    load();
+    return "";
   });
 }
 

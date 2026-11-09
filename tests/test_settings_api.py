@@ -155,7 +155,8 @@ def test_settings_routes(home):
         assert out["settings"]["ingest"]["generated_drive_folders"] == ["Acme/Reports"]
         before = _raw(home)
         code, out = _req(srv, "POST", "/api/settings", {"x": 1})
-        assert (code, out) == (400, {"error": "unknown key: x"})
+        assert code == 400 and out["error"] == "unknown key: x"
+        assert out["worded"] is True and "unknown key" not in out["reason"]
         assert _raw(home) == before
         code, out = _req(srv, "POST", "/api/settings", {"review_max_apply_per_run": "lots"})
         assert code == 400 and out["error"]

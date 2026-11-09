@@ -579,8 +579,8 @@ def _orient(store, loser_id: str, winner_id: str):
         return {"ok": False, "error": "not_found", "message": "Entity not found."}
     if is_role_address(loser.get("email_addr", "")) or is_role_address(winner.get("email_addr", "")):
         return {"ok": False, "error": "role_inbox",
-                "message": "One of these is keyed on a shared/role inbox "
-                           "(e.g. office@) — merging could fuse distinct people. Refused."}
+                "message": "One of these is keyed on a shared inbox (such as office@), "
+                           "so merging could fuse different people. Not merged."}
     if store.is_distinct_pair(loser_id, winner_id):
         return {"ok": False, "error": "marked_distinct",
                 "message": "These were marked as different entities. Undo that correction first."}

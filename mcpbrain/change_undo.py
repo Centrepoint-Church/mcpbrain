@@ -28,8 +28,12 @@ CHANGED_SINCE = "This has changed since; undo the later change first"
 ALREADY_UNDONE = "Already undone"
 NOT_FOUND = "No such change"
 NOT_UNDOABLE = "This change can't be undone"
+# An undo that failed for an unexpected reason: the exception is logged, the
+# page gets these words.
+UNDO_FAILED = "Undo couldn't finish. Nothing was changed."
 
 _UNDONE = "change_undone"
+_WORDED = frozenset({CHANGED_SINCE, ALREADY_UNDONE, NOT_FOUND, NOT_UNDOABLE})
 
 
 class Refused(Exception):
@@ -363,7 +367,8 @@ def _undo_graph_correction(store, home, row):
         raise Refused(NOT_UNDOABLE) from exc
     out = graph_corrections.undo(store, cid)
     if out.get("status") != "reverted":
-        raise Refused(out.get("error") or CHANGED_SINCE)
+        log.info("change_undo: correction %s not reverted: %s", cid, out.get("error"))
+        raise Refused(CHANGED_SINCE)
 
 
 # graph_view.suppress_entity always writes this reason; a legacy
@@ -568,16 +573,15 @@ def undo(store, home, change_id: int) -> dict:
     try:
         UNDO[row["change_type"]](store, home, row)
     except Refused as exc:
-        return {"ok": False, "reason": str(exc)}
-    except RuntimeError as exc:
+        # Refusals carry one of the worded constants above.
+        reason = str(exc)
+        return {"ok": False, "reason": reason if reason in _WORDED else CHANGED_SINCE}
+    except Exception as exc:  # noqa: BLE001 -- logged; the page gets words
         from mcpbrain import records_write
         if isinstance(exc, records_write.RecordsBusy):
             return {"ok": False, "reason": records_write.BUSY}
         log.exception("change_undo: undo of change %s failed", row["id"])
-        return {"ok": False, "reason": f"Undo failed: {exc}"}
-    except Exception as exc:  # noqa: BLE001 -- surface, don't crash the route
-        log.exception("change_undo: undo of change %s failed", row["id"])
-        return {"ok": False, "reason": f"Undo failed: {exc}"}
+        return {"ok": False, "reason": UNDO_FAILED}
     store.record_change(_UNDONE, ref_id=str(row["id"]),
                         summary=f"Undid: {row.get('summary') or row['change_type']}",
                         source="dashboard")

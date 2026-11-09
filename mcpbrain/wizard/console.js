@@ -84,9 +84,26 @@
     document.dispatchEvent(new CustomEvent(on ? "mcpconsole:offline" : "mcpconsole:online"));
   }
 
+  /* api-message:start */
+  /* The words a failed request shows. A server's own text is shown only when
+     the route marked it as written for the page ({"worded": true, "reason"})
+     on a 4xx; `error` fields and exception text never reach the page. */
+  var SERVER_FAILED = "Something went wrong on the brain's side. Try again in a moment, or run Diagnostics in Settings.";
+  var REQUEST_FAILED = "That didn't work. Try again in a moment.";
+  function apiMessage(status, data) {
+    // A restored snapshot is being swapped in: every route answers 503.
+    if (status === 503 && data && data.error === "restoring")
+      return "mcpbrain is restoring a backup, try again in a moment.";
+    if (status >= 500) return SERVER_FAILED;
+    if (status >= 400 && data && data.worded === true && typeof data.reason === "string" && data.reason)
+      return data.reason;
+    return REQUEST_FAILED;
+  }
+  /* api-message:end */
+
   /* api(path, {method, body, text}) resolves with the parsed JSON body of a
    * 2xx reply, or with the raw text when text is true (logs, reports). Anything else rejects with an Error carrying .status and .data
-   * (the parsed body, so a 409's {reason} or {error} can be shown in place).
+   * (the parsed body); its message is apiMessage()'s words.
    * A failed connection marks the page offline (status 0); the next reply
    * of any kind marks it back online. */
   function api(path, opts) {
@@ -107,11 +124,7 @@
         var data = null;
         try { data = text ? JSON.parse(text) : null; } catch (e) { data = {error: text}; }
         if (res.ok) return data;
-        var msg = (data && (data.reason || data.error)) || ("Request failed (" + res.status + ")");
-        // A restored snapshot is being swapped in: every route answers 503.
-        if (res.status === 503 && data && data.error === "restoring")
-          msg = "mcpbrain is restoring a backup, try again in a moment.";
-        var err = new Error(msg);
+        var err = new Error(apiMessage(res.status, data));
         err.status = res.status;
         err.data = data;
         throw err;

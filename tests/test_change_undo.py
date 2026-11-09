@@ -612,7 +612,7 @@ def test_routes_undo_feed_added_and_circle_title(tmp_path):
         assert code == 200 and any(i["id"] == row["id"] for i in body["items"])
         assert _req(srv, "POST", f"/api/changes/{row['id']}/undo") == (200, {"ok": True})
         code, body = _req(srv, "POST", f"/api/changes/{row['id']}/undo")
-        assert code == 409 and body == {"ok": False, "reason": "Already undone"}
+        assert code == 409 and body == {"ok": False, "reason": "Already undone", "worded": True}
         code, _ = _req(srv, "POST", "/api/changes/99999/undo")
         assert code == 404
         code, body = _req(srv, "GET", "/api/changes/added?hours=24")

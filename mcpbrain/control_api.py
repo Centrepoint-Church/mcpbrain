@@ -64,6 +64,12 @@ def h_json(h, code, obj):
     h.send_header("Content-Length", str(len(b))); h.end_headers(); h.wfile.write(b)
 
 
+def worded(reason: str, **extra) -> dict:
+    """A refusal written for the page: console.js shows `reason` only when the
+    body carries "worded": true (anything else gets its fixed sentence)."""
+    return {"ok": False, **extra, "reason": reason, "worded": True}
+
+
 def h_text(h, code, text):
     b = text.encode("utf-8")
     h.send_response(code); h.send_header("Content-Type", "text/plain; charset=utf-8")
@@ -371,7 +377,8 @@ class ControlServer:
                     out = graph_view.merge_preview(server.store, q.get("loser", [""])[0], q.get("winner", [""])[0])
                     if out.get("ok"): return h_json(self, 200, out)
                     code = 404 if out.get("error") == "not_found" else 409
-                    return h_json(self, code, out)
+                    return h_json(self, code, {**out, "reason": out.get("message")
+                                               or "Those two can't be merged.", "worded": True})
                 if self.path.split("?")[0] == "/api/graph/ego":
                     if server.store is None: return h_json(self, 503, {"error": "dashboard not available"})
                     from mcpbrain import graph_view
@@ -555,17 +562,23 @@ class ControlServer:
             if f["finding_type"] == auto_changes.FINDING_TYPE:
                 out = auto_changes.decide(self.store, str(self.home), int(f["ref_id"]),
                                           approve=False)
-                return h_json(h, 200 if out["ok"] else 409, {"ok": out["ok"], "declined": True})
+                if not out["ok"]:
+                    return h_json(h, 409, worded(out["reason"], declined=True))
+                return h_json(h, 200, {"ok": True, "declined": True})
             if f["finding_type"] == gc.FINDING_TYPE:
                 ok = gc.decline(self.store, int(f["ref_id"]))["status"] == "declined"
-                return h_json(h, 200 if ok else 409, {"ok": ok, "declined": True})
+                if not ok:
+                    return h_json(h, 409, worded("That correction isn't waiting any more.",
+                                                 declined=True))
+                return h_json(h, 200, {"ok": True, "declined": True})
         with self.store._connect() as db:
             row = db.execute("SELECT summary FROM proactive_findings WHERE id=?",
                              (finding_id,)).fetchone()
         label = ((row["summary"] if row else "") or (f or {}).get("finding_type") or "finding")
         ids = dash.close_finding_group(self.store, finding_id, dismiss=dismiss)
         if not ids:
-            return h_json(h, 404, {"error": "finding not found or already closed"})
+            return h_json(h, 404, worded("That finding is already closed.",
+                                         error="finding not found or already closed"))
         if len(ids) > 1:
             label += f" (x{len(ids)})"
         if dismiss:
@@ -619,7 +632,11 @@ class ControlServer:
                                                     + ", ".join(_SYNC_SOURCES)})
                 from mcpbrain import config as _config
                 if not _config.source_enabled(str(self.home), source):
-                    return h_json(h, 409, {"error": f"{source} is switched off"})
+                    label = {"gmail": "Gmail", "drive": "Drive", "calendar": "Calendar",
+                             "anarlog": "Meetings"}.get(source, "That source")
+                    return h_json(h, 409, worded(f"{label} is switched off. Turn it on under "
+                                                 "Sources in Settings to sync it.",
+                                                 error=f"{source} is switched off"))
                 d.sync_now(source)
                 return h_json(h, 200, {"woken": True, "source": source})
             if h.path == "/api/restart":
@@ -649,7 +666,8 @@ class ControlServer:
                 try:
                     system_ops.apply_update(d)
                 except system_ops.UpToDate:
-                    return h_json(h, 409, {"error": "already up to date"})
+                    return h_json(h, 409, worded("mcpbrain is already up to date.",
+                                                 error="already up to date"))
                 return h_json(h, 202, {"updating": True, "version": d._pending_update})
             if h.path == "/api/diagnostics/run":
                 try:
@@ -714,10 +732,14 @@ class ControlServer:
                 except RestoreHoldRefused as exc:
                     # A store-writing tool during the restore hold: a clean,
                     # readable refusal (ToolExecutionError on the MCP side).
-                    return h_json(h, 409, {"error": str(exc)})
+                    # `error` is the MCP server's contract (it reaches Claude,
+                    # not a page); a page only ever shows the worded reason.
+                    log.info("control API /api/tool held for restore: %s", exc)
+                    return h_json(h, 409, worded("mcpbrain is restoring a backup. Try again "
+                                                 "in a moment.", error=str(exc)))
                 except ValueError as exc:
                     log.error("control API /api/tool refused %r: %s", name, exc)
-                    return h_json(h, 400, {"error": str(exc)})
+                    return h_json(h, 400, worded("That request wasn't accepted.", error=str(exc)))
             if h.path == "/api/recall-feedback":
                 # The accept signal (S2/S4/S5 keystone): the hook reports doc_ids
                 # that stayed relevant across the session (recalled again) as 'used'.
@@ -779,7 +801,8 @@ class ControlServer:
                 if not ok:
                     # Mirrors the dismiss route: nothing to snooze (unknown id or
                     # already closed) is a 404, not a success-shaped 200.
-                    return h_json(h, 404, {"error": "action not found or not open"})
+                    return h_json(h, 404, worded("That action isn't open any more.",
+                                                 error="action not found or not open"))
                 return h_json(h, 200, {"snoozed": True})
 
             m = re.match(r"^/api/changes/(\d+)/undo$", h.path)
@@ -791,7 +814,7 @@ class ControlServer:
                 if out["ok"]:
                     return h_json(h, 200, {"ok": True})
                 code = 404 if out["reason"] == change_undo.NOT_FOUND else 409
-                return h_json(h, code, out)
+                return h_json(h, code, {**out, "worded": True})
 
             m = re.match(r"^/api/circles/(\d+)/title$", h.path)
             if m:
@@ -803,7 +826,8 @@ class ControlServer:
                 from mcpbrain.community_synth import set_community_title
                 if not set_community_title(self.store, int(m.group(1)), title.strip()[:200],
                                            source="dashboard"):
-                    return h_json(h, 404, {"error": "circle not found"})
+                    return h_json(h, 404, worded("That circle no longer exists.",
+                                                 error="circle not found"))
                 return h_json(h, 200, {"ok": True})
 
             m = re.match(r"^/api/corrections/(\d+)/(apply|decline)$", h.path)
@@ -814,9 +838,17 @@ class ControlServer:
                 cid = int(m.group(1))
                 if m.group(2) == "apply":
                     out = gc.approve(self.store, cid, via="dashboard")
-                    return h_json(h, 200 if out["status"] == "applied" else 409, out)
+                    if out["status"] == "applied":
+                        return h_json(h, 200, out)
+                    log.info("correction %s not applied: %s", cid, out.get("error"))
+                    return h_json(h, 409, worded(
+                        "That correction couldn't be applied. It may no longer fit the graph.",
+                        status=out["status"], correction_id=cid))
                 out = gc.decline(self.store, cid)
-                return h_json(h, 200 if out["status"] == "declined" else 404, out)
+                if out["status"] == "declined":
+                    return h_json(h, 200, out)
+                return h_json(h, 404, worded("That correction isn't waiting any more.",
+                                             status=out["status"], correction_id=cid))
 
             if h.path in ("/api/chunks/reinclude", "/api/chunks/prioritise",
                           "/api/chunks/reflow-retry"):
@@ -846,7 +878,9 @@ class ControlServer:
                 from mcpbrain import settings_api
                 out = settings_api.apply_settings(self.home, body)
                 if not out["ok"]:
-                    return h_json(h, 400, {"error": out["error"]})
+                    # `error` names the key for API callers; the page gets words.
+                    return h_json(h, 400, worded("That setting couldn't be saved. Reload the "
+                                                 "page and try again.", error=out["error"]))
                 return h_json(h, 200, out)
 
             m = re.match(r"^/api/pending/(\d+)/(apply|decline|clear)$", h.path)
@@ -862,7 +896,8 @@ class ControlServer:
                                               approve=(m.group(2) == "apply"))
                 if out["ok"]:
                     return h_json(h, 200, {"ok": True})
-                return h_json(h, 404 if out["reason"] == auto_changes.NOT_FOUND else 409, out)
+                return h_json(h, 404 if out["reason"] == auto_changes.NOT_FOUND else 409,
+                              {**out, "worded": True})
 
             m = re.match(r"^/api/findings/(\d+)/(fixed|dismiss)$", h.path)
             if m:
@@ -896,13 +931,14 @@ class ControlServer:
                                               int(finding["ref_id"]), approve=False)
                     if out["ok"]:
                         return h_json(h, 200, {"dismissed": True, "change": "declined"})
-                    return h_json(h, 409, {"dismissed": False, "reason": out["reason"]})
+                    return h_json(h, 409, worded(out["reason"], dismissed=False))
                 from mcpbrain.agent_errs import FINDING_TYPE as _AGENT_STDERR_FINDING_TYPE
                 verdict = (None if finding and finding["finding_type"] == _AGENT_STDERR_FINDING_TYPE
                            else "dismissed_by_human")
                 ok = self.store.resolve_finding(finding_id, verdict=verdict)
                 if not ok:
-                    return h_json(h, 404, {"error": "finding not found or already dismissed"})
+                    return h_json(h, 404, worded("That finding is already closed.",
+                                                 error="finding not found or already dismissed"))
                 self.store.record_change("finding_dismissed", ref_id=str(finding_id))
                 return h_json(h, 200, {"dismissed": True})
 
@@ -963,7 +999,8 @@ class ControlServer:
                 # interval and the failure backoff. `mcpbrain backup` polls
                 # /api/status (backup_running) and backup_state.json for the result.
                 if not d.request_backup():
-                    return h_json(h, 409, {"error": "backup is not configured"})
+                    return h_json(h, 409, worded("Backup isn't set up yet. Set it up in Settings.",
+                                                 error="backup is not configured"))
                 return h_json(h, 202, {"requested": True})
             if h.path == "/api/backup/enable":
                 try:
@@ -1077,10 +1114,10 @@ class ControlServer:
                 if out.get("ok"):
                     return h_json(h, 200, out)
                 if out.get("error") == "not_found":
-                    return h_json(h, 404, {"ok": False, "reason": "No such entity"})
+                    return h_json(h, 404, worded("That entity isn't in the graph any more."))
                 if out.get("error") == "hidden":
-                    return h_json(h, 409, {"ok": False, "reason": out["reason"]})
-                return h_json(h, 400, {"ok": False, "reason": out.get("reason") or "Not saved"})
+                    return h_json(h, 409, worded(out["reason"]))
+                return h_json(h, 400, worded(out.get("reason") or "Not saved."))
             m = re.match(r"^/api/graph/entity/([^/?]+)/restore$", h.path)
             if m:
                 if self.store is None: return h_json(h, 503, {"error": "dashboard not available"})
@@ -1089,8 +1126,8 @@ class ControlServer:
                 if out.get("ok"):
                     return h_json(h, 200, out)
                 if out.get("error") == "not_found":
-                    return h_json(h, 404, {"ok": False, "reason": "No such entity"})
-                return h_json(h, 409, {"ok": False, "reason": "It isn't hidden any more"})
+                    return h_json(h, 404, worded("That entity isn't in the graph any more."))
+                return h_json(h, 409, worded("It isn't hidden any more."))
             m = re.match(r"^/api/graph/entity/([^/?]+)$", h.path)
             if m:
                 if self.store is None: return h_json(h, 503, {"error": "dashboard not available"})
@@ -1109,7 +1146,8 @@ class ControlServer:
                                                 name_override=body.get("name"))
                 if out.get("ok"): return h_json(h, 200, out)
                 code = 404 if out.get("error") == "not_found" else 409
-                return h_json(h, code, out)
+                return h_json(h, code, {**out, "reason": out.get("message")
+                                        or "Those two can't be merged.", "worded": True})
 
         except Exception as exc:
             log.exception("control API POST %s failed", h.path)

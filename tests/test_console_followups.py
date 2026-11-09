@@ -1024,3 +1024,151 @@ def test_reference_not_applied_reasons_are_words(tmp_path, home):
         with pytest.raises(auto_changes.NotApplied) as e:
             auto_changes._apply_reference(s, home, payload)
         assert str(e.value) == "That file can't be changed this way"
+
+
+# =========================================================================================
+# Fix round 3: the page shows a server's words only when the route marked them
+# =========================================================================================
+
+SERVER_FAILED = ("Something went wrong on the brain's side. Try again in a moment, "
+                 "or run Diagnostics in Settings.")
+REQUEST_FAILED = "That didn't work. Try again in a moment."
+_TRACE = "Traceback (most recent call last): sqlite3.OperationalError: database is locked"
+
+
+def _api_messages(tmp_path, cases):
+    """Run console.js apiMessage() over [(status, body)] in node."""
+    js = (_WIZ / "console.js").read_text(encoding="utf-8")
+    return _node(tmp_path, _blocks(js, "api-message")
+                 + "\nconsole.log(JSON.stringify(" + json.dumps(cases)
+                 + ".map(c => apiMessage(c[0], c[1]))));")
+
+
+@pytest.mark.skipif(not _node_ok(), reason="node not installed")
+def test_console_api_message_never_shows_server_text(tmp_path):
+    o = _api_messages(tmp_path, [
+        [500, {"error": _TRACE}],
+        [500, {"error": _TRACE, "reason": "Fine words", "worded": True}],
+        [409, {"ok": False, "reason": "Failed: " + _TRACE}],
+        [409, {"error": _TRACE}],
+        [409, {"ok": False, "reason": "Already undone", "worded": True}],
+        [400, {"ok": False, "reason": "", "worded": True}],
+        [404, None],
+        [503, {"error": "restoring"}],
+        [503, {"error": "dashboard not available"}],
+    ])
+    assert o == [SERVER_FAILED, SERVER_FAILED, REQUEST_FAILED, REQUEST_FAILED,
+                 "Already undone", REQUEST_FAILED, REQUEST_FAILED,
+                 "mcpbrain is restoring a backup, try again in a moment.", SERVER_FAILED]
+
+
+def test_console_api_builds_its_error_from_api_message_only():
+    js = (_WIZ / "console.js").read_text(encoding="utf-8")
+    body = js[js.index("function api(path, opts)"):js.index("// ---- time")]
+    assert "new Error(apiMessage(res.status, data))" in body
+    assert "data.error" not in body and "data.reason" not in body
+
+
+@pytest.mark.parametrize("page", ["dashboard.html", "settings.html", "graph.html", "index.html"])
+def test_pages_never_show_an_error_body_field(page):
+    text = (_WIZ / page).read_text(encoding="utf-8")
+    assert "e.data.message" not in text and "data.reason" not in text
+    # settings reads e.data.error only to recognise an unsupported platform.
+    for m in re.finditer(r"e\.data && e\.data\.error", text):
+        line = text[text.rfind("\n", 0, m.start()):text.find("\n", m.end() + 1)]
+        assert "const msg" in line, line
+
+
+# --- undo answers in words --------------------------------------------------------------------
+
+@pytest.mark.parametrize("exc", [RuntimeError(_TRACE), ValueError(_TRACE), KeyError(_TRACE)])
+def test_undo_exception_paths_are_worded(tmp_path, home, monkeypatch, exc):
+    from mcpbrain import change_undo
+    s = _store(tmp_path)
+    cid = s.record_change("bandit_applied", summary="Draft style changed",
+                          revert_ref=change_undo.revert_json({"recall_max_distance": 0.4},
+                                                             {"recall_max_distance": 0.5}))
+
+    def boom(store, h, row):
+        raise exc
+    monkeypatch.setitem(change_undo.UNDO, "bandit_applied", boom)
+    out = change_undo.undo(s, home, cid)
+    assert out == {"ok": False, "reason": change_undo.UNDO_FAILED}
+    assert "sqlite" not in out["reason"] and "Traceback" not in out["reason"]
+
+
+def test_undo_refusal_with_unexpected_text_is_worded(tmp_path, home, monkeypatch):
+    from mcpbrain import change_undo
+    s = _store(tmp_path)
+    cid = s.record_change("bandit_applied", summary="Draft style changed",
+                          revert_ref=change_undo.revert_json({"recall_max_distance": 0.4},
+                                                             {"recall_max_distance": 0.5}))
+
+    def refuse(store, h, row):
+        raise change_undo.Refused("correction 12 is not pending")
+    monkeypatch.setitem(change_undo.UNDO, "bandit_applied", refuse)
+    assert change_undo.undo(s, home, cid)["reason"] == change_undo.CHANGED_SINCE
+
+
+# --- sweep: every page-facing refusal is marked or falls back to a fixed sentence ---------------
+
+def test_every_4xx_reason_in_control_api_is_marked():
+    """Every non-2xx, non-5xx reply in control_api: its body is built with
+    worded(...) or carries "worded", or has no `reason` at all (then the page
+    shows its fixed sentence, as the node test above proves)."""
+    import ast
+    src = (_ROOT / "mcpbrain" / "control_api.py").read_text(encoding="utf-8")
+    tree = ast.parse(src)
+    checked = 0
+    for node in ast.walk(tree):
+        if not (isinstance(node, ast.Call) and getattr(node.func, "id", "") == "h_json"
+                and len(node.args) == 3):
+            continue
+        code, body = node.args[1], node.args[2]
+        if isinstance(code, ast.Constant) and not 400 <= code.value < 500:
+            continue
+        if isinstance(code, ast.IfExp) and all(
+                isinstance(c, ast.Constant) and not 400 <= c.value < 500
+                for c in (code.body, code.orelse)):
+            continue      # 2xx or 5xx only: the page shows its fixed 5xx sentence
+        seg = ast.get_source_segment(src, body)
+        checked += 1
+        if isinstance(body, ast.Call) and getattr(body.func, "id", "") == "worded":
+            continue
+        if isinstance(body, ast.Dict):
+            keys = [k.value for k in body.keys if isinstance(k, ast.Constant)]
+            assert "reason" not in keys or "worded" in keys, seg
+            continue
+        # A module's dict passed through: only the canvas 413 (counts, no reason).
+        assert seg == "result", seg
+    assert checked > 40
+
+
+def test_live_refusals_render_as_words(server, home, tmp_path):
+    from mcpbrain import auto_changes
+    srv, s = server
+    config.write_config(home, {"sources": {"gmail": False}})
+    pid = auto_changes.propose(s, "circles", "7", "Name circle 7 Acme volunteers", {})
+    cases = [
+        _req(srv, "POST", "/api/changes/999/undo"),
+        _req(srv, "POST", f"/api/pending/{pid}/clear"),
+        _req(srv, "POST", "/api/pending/999/apply"),
+        _req(srv, "POST", "/api/findings/999/fixed"),
+        _req(srv, "POST", "/api/graph/entity/nobody/restore"),
+        _req(srv, "POST", "/api/sync-now", {"source": "gmail"}),
+        _req(srv, "POST", "/api/settings", {"no_such_setting": 1}),
+        _req(srv, "POST", "/api/circles/999/title", {"title": "Acme volunteers"}),
+        _req(srv, "POST", "/api/dashboard/actions/999/snooze", {"until": "2026-12-01"}),
+        _req(srv, "GET", "/api/changes?hours=0"),
+    ]
+    for code, body in cases:
+        assert 400 <= code < 500, (code, body)
+    shown = _api_messages(tmp_path, [[c, b] for c, b in cases]) if _node_ok() else []
+    for (code, body), text in zip(cases, shown):
+        if body.get("worded"):
+            assert text == body["reason"]
+            assert "_" not in text and "Traceback" not in text and "—" not in text
+        else:
+            assert text == REQUEST_FAILED
+    marked = [b for _c, b in cases if b.get("worded")]
+    assert len(marked) >= 9
