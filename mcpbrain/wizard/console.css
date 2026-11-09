@@ -419,8 +419,8 @@ details.adv[open] > summary { margin-bottom: var(--space-md); }
 .step { display: grid; gap: var(--space-sm); padding: var(--space-lg); }
 .step__head { display: flex; align-items: center; gap: var(--space-sm); }
 .step h2 { max-width: none; }
-.num { flex: 0 0 auto; display: inline-flex; align-items: center; justify-content: center; width: 28px; height: 28px; border-radius: 50%; border: var(--rule-hair) solid var(--color-rule-2); font-size: var(--text-sm); font-weight: 500; color: var(--color-ink-2); letter-spacing: 0; }
-.step.is-done .num { border-color: color-mix(in oklab, var(--color-ok) 45%, var(--color-rule)); color: var(--color-ok); }
+.step__head .num { flex: 0 0 auto; display: inline-flex; align-items: center; justify-content: center; width: 28px; height: 28px; border-radius: 50%; border: var(--rule-hair) solid var(--color-rule-2); font-size: var(--text-sm); font-weight: 500; color: var(--color-ink-2); letter-spacing: 0; }
+.step.is-done .step__head .num { border-color: color-mix(in oklab, var(--color-ok) 45%, var(--color-rule)); color: var(--color-ok); }
 .step > p { color: var(--color-muted); }
 .step .acts { gap: var(--space-sm); }
 

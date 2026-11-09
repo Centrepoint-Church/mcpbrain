@@ -112,6 +112,17 @@ def test_stylesheet_carries_hallmark_stamp_and_no_amber():
 
 # ---- packaging --------------------------------------------------------------
 
+def test_step_number_rule_is_scoped_to_the_setup_steps():
+    # A bare `.num {` is the Setup page's 28px circle; table cells use `.num` for
+    # right alignment, so an unscoped rule rings every count on the Overview.
+    css = (WIZARD / "console.css").read_text(encoding="utf-8")
+    bare = [ln for ln in css.splitlines() if re.match(r"\s*\.num\s*\{", ln)]
+    assert not bare, bare
+    assert re.search(r"^\.step__head \.num \{", css, re.M)
+    assert re.search(r"^\.step\.is-done \.step__head \.num \{", css, re.M)
+    assert re.search(r"\.table td\.num, \.table th\.num \{ text-align: right; \}", css)
+
+
 def test_package_data_declares_console_assets():
     import tomllib
     cfg = tomllib.loads((ROOT / "pyproject.toml").read_text())

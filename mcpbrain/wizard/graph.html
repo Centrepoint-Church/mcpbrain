@@ -1235,7 +1235,7 @@ function unlinkedRow(r){
   return el("tr", {},
     el("td", {}, el("strong", {text: name})),
     el("td", {text: kindWord(r.type)}),
-    el("td", {class: r.org ? null : "muted", text: r.org || "None"}),
+    el("td", {class: r.org ? null : "muted", text: r.org || "No organisation"}),
     el("td", {class: "nowrap"}, seen ? el("span", {class: "measured", text: seen})
       : el("span", {class: "muted", text: "Not recorded"})),
     el("td", {}, el("div", {class: "acts"},

@@ -323,6 +323,15 @@ def test_unlinked_list_markup():
         assert f">{col}<" in head.group(0), col
 
 
+def test_unlinked_row_words_an_empty_organisation():
+    rows = _block("unlinked-rows")
+    # "None" reads as nonsense once the row stacks ("Person None 9 Nov 2026").
+    assert 'r.org || "No organisation"' in rows
+    assert '"None"' not in rows
+    # Still muted when there is no organisation.
+    assert 'class: r.org ? null : "muted"' in rows
+
+
 def test_unlinked_rows_use_the_existing_flows():
     rows = _block("unlinked-rows")
     # Open: the entity drawer.
