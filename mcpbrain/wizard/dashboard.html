@@ -317,17 +317,13 @@ function ago(iso){
   return Math.round(m / 1440) + " d ago";
 }
 
-// Older than this and the source is shown with a warning (matches the
-// server's STALE_HOURS).
-const STALE_MS = 6 * 3600 * 1000;
-
 function renderSources(sources){
   const body = $("sources-body");
   const frag = document.createDocumentFragment();
   for(const s of (sources || [])){
     const h = s.history || {};
     const t = s.last_synced_at ? Date.parse(s.last_synced_at) : NaN;
-    const stale = !isNaN(t) && (Date.now() - t) > STALE_MS;
+    const stale = !!s.stale;  // the server decides (STALE_HOURS)
     const row = document.createElement("div");
     row.className = "row";
     const dot = document.createElement("span");

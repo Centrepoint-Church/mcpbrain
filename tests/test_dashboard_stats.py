@@ -134,6 +134,47 @@ def test_stats_meetings_is_the_fourth_source(tmp_path):
     assert srcs[0]["history"] == {"done": False, "reached": "2019-03-01T00:00:00+00:00"}
     assert srcs[1]["shared"] == {"total": 0, "stale": 0}
     assert "shared" not in srcs[0]
+    assert [s["stale"] for s in srcs] == [False, False, False, False]
+
+
+def test_stats_source_stale_flag(tmp_path):
+    p = tmp_path / "b.sqlite3"
+    _seed(p)
+    _fresh_cursors(p, hours_ago=7.5)
+    out = dashboard.stats(_Store(p), str(tmp_path), _status())
+    assert all(s["stale"] is True for s in out["sources"])
+    q = tmp_path / "c.sqlite3"
+    _seed(q)
+    out = dashboard.stats(_Store(q), str(tmp_path), _status())  # never synced
+    assert all(s["stale"] is False and s["last_synced_at"] is None for s in out["sources"])
+
+
+def test_stats_stale_shared_drive_does_not_touch_base_drive(tmp_path):
+    p = tmp_path / "b.sqlite3"
+    _seed(p)
+    _fresh_cursors(p)
+    old = (datetime.now(timezone.utc) - timedelta(days=120)).strftime("%Y-%m-%d %H:%M:%S")
+    with sqlite3.connect(str(p)) as db:
+        db.execute("INSERT INTO sync_cursors VALUES('drive:0AFAKE','t',?)", (old,))
+    out = dashboard.stats(_Store(p), str(tmp_path), _status())
+    drive = out["sources"][1]
+    assert out["health"]["state"] != "stalled"
+    assert drive["last_synced_at"] is not None and drive["stale"] is False
+    assert drive["shared"] == {"total": 1, "stale": 1}
+
+
+def test_stats_degrades_when_store_is_unreadable(tmp_path):
+    p = tmp_path / "junk.sqlite3"
+    p.write_bytes(b"this is not a sqlite database" * 50)
+    out = dashboard.stats(_Store(p), str(tmp_path), _status())
+    assert list(out) == ["as_of", "index", "enrich", "graph", "sources", "health",
+                         "needs_you", "connections", "system"]
+    assert out["index"]["total"] == 0 and out["index"]["pct"] == 0
+    assert len(out["graph"]["by_type"]) == 9 and out["graph"]["unlinked"] == 0
+    assert all(s["last_synced_at"] is None for s in out["sources"])
+    assert out["enrich"]["last_push_at"] is None and out["enrich"]["pushes_24h"] == 0
+    missing = dashboard.stats(_Store(tmp_path / "nope.sqlite3"), str(tmp_path), _status())
+    assert missing["index"]["total"] == 0
 
 
 def test_stats_reports_a_starved_queue(tmp_path):

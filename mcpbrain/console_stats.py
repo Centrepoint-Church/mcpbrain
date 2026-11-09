@@ -17,13 +17,14 @@ Definitions (the single source of truth):
 from __future__ import annotations
 
 import logging
+import sqlite3
 from datetime import datetime, timedelta, timezone
 
 log = logging.getLogger(__name__)
 
 # One place for the freshness threshold: 6h covers an overnight gap in the
 # hourly enrichment task.
-STALE_HOURS = 6
+STALE_HOURS = 6.0
 
 SOURCE_KEYS = ("gmail", "drive", "calendar", "anarlog")
 _SOURCE_LABELS = {"gmail": "Gmail", "drive": "Drive", "calendar": "Calendar",
@@ -199,6 +200,11 @@ def enrich_activity(db, now: datetime) -> dict:
     return out
 
 
+def _is_stale(iso, now: datetime) -> bool:
+    when = parse_utc(iso)
+    return when is not None and now - when > timedelta(hours=STALE_HOURS)
+
+
 # --- health ----------------------------------------------------------------
 
 def _plural(n: int, word: str) -> str:
@@ -278,15 +284,28 @@ def stats(store, home, status: dict, *, now: datetime | None = None) -> dict:
 
     now = now or datetime.now(timezone.utc)
     path = store._path if hasattr(store, "_path") else store.path
-    db = _open_ro(path)
     try:
-        idx = index_counts(db)
-        gc = graph_counts(db)
-        times = source_times(db)
-        shared = shared_drive_health(db, now)
-        activity = enrich_activity(db, now)
-    finally:
-        db.close()
+        db = _open_ro(path)
+        try:
+            idx = index_counts(db)
+            gc = graph_counts(db)
+            times = source_times(db)
+            shared = shared_drive_health(db, now)
+            activity = enrich_activity(db, now)
+        finally:
+            db.close()
+    except sqlite3.Error as exc:
+        # A WAL checkpoint or lock must not blank the dashboard: zero sections.
+        log.warning("stats: cannot read the store: %s", exc)
+        empty = sqlite3.connect(":memory:")
+        try:
+            idx = index_counts(empty)
+            gc = graph_counts(empty)
+            times = source_times(empty)
+            shared = shared_drive_health(empty, now)
+            activity = enrich_activity(empty, now)
+        finally:
+            empty.close()
 
     try:
         circles = len(store.list_communities())
@@ -306,6 +325,7 @@ def stats(store, home, status: dict, *, now: datetime | None = None) -> dict:
         entry = {
             "name": key, "label": _SOURCE_LABELS[key],
             "last_synced_at": times[key],
+            "stale": _is_stale(times[key], now),
             # Meetings has no backfill: it reads the local database in full.
             "history": {"done": True if key == "anarlog" else bool(bf.get("done")),
                         "reached": bf.get("reached")},
