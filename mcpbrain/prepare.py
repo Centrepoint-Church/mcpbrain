@@ -1116,6 +1116,36 @@ def _unit_id(kind: str, signature: str) -> str:
     return "u-" + hashlib.sha1(f"{kind}:{signature}".encode("utf-8")).hexdigest()[:12]
 
 
+def _thread_signature(entry: dict) -> str:
+    """One threads[] entry's part of a unit id. A part of a split thread also
+    names the chunks it covers: keyed on thread_id alone, every part of one
+    thread hashed to the same unit id and each overwrote the last, so only
+    part k of k was ever queued."""
+    tid = str(entry.get("thread_id"))
+    if "part" not in entry:
+        return tid
+    return f"{tid}#{entry.get('part')}/{entry.get('of')}:" + \
+        ",".join(entry.get("part_doc_ids") or [])
+
+
+def queued_thread_ids(home) -> set[str]:
+    """Thread ids that already have a thread unit in the queue. An unreadable
+    unit file is skipped (it is the drain's or the worker's to deal with)."""
+    from pathlib import Path
+    units_dir = Path(home) / "enrich_queue" / "units"
+    out: set[str] = set()
+    if not units_dir.is_dir():
+        return out
+    for p in units_dir.glob("*.json"):
+        try:
+            d = json.loads(p.read_text())
+        except (OSError, ValueError):
+            continue
+        if d.get("kind") == "thread":
+            out.update(str(t.get("thread_id")) for t in d.get("threads") or [])
+    return out
+
+
 def _pack_by_size(items, budget, sizer):
     """Greedily pack items into chunks whose serialized size stays under budget,
     always keeping at least one item per chunk."""
@@ -1173,8 +1203,7 @@ def write_units(data: dict, *, home=None, pull_cap=None,
     written = 0
     for chunk in _pack_by_size(data.get("threads") or [], budget,
                                lambda t: len(json.dumps(t)) + 1):
-        tids = sorted(str(t.get("thread_id")) for t in chunk)
-        uid = _unit_id("thread", ",".join(tids))
+        uid = _unit_id("thread", ",".join(sorted(_thread_signature(t) for t in chunk)))
         body = {"unit_id": uid, "kind": "thread", "threads": chunk}
         body["context"] = {**standing,
                            "known_people": _scoped_known_people(
@@ -1242,6 +1271,13 @@ def prepare_units(store, *, thread_cap: int, char_budget: int,
     if now is None:
         now = datetime.datetime.now(datetime.timezone.utc)
     batches = _group_unenriched_threads(store, thread_cap=thread_cap)
+    # A thread with a unit still queued waits for it to drain. Re-preparing it
+    # would rewrite the unit under a worker holding it (drain re-reads the unit
+    # file, so a renumbered part marked the wrong chunks enriched), and would
+    # re-split a half-drained thread into units overlapping the parts queued.
+    queued = queued_thread_ids(home or config.app_dir())
+    if queued:
+        batches = [b for b in batches if str(b.thread_id) not in queued]
     _home = str(config.app_dir())
     # Derived sources first, and UNCONDITIONALLY (not behind salience_gate):
     # a session, brief, draft, consolidated note or digest is never evidence.
