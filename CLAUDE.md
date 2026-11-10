@@ -551,8 +551,18 @@ Found by auditing why chunks exceeded the embed window and why one owner stayed 
 ## Shipping caveats
 
 - **Current state (2026-11-10): the four version files (+ `uv.lock`) are at
-  `0.7.148`, RELEASED** — source `614d0af6`, gh-pages `1d53a35c`, plugin `75b4220`;
-  index serves only `mcpbrain-0.7.148-py3-none-any.whl`. One change on 0.7.147:
+  `0.7.149`, RELEASED** — source `3f02aa85`, gh-pages `3844182d`, plugin `862da39`;
+  index serves only `mcpbrain-0.7.149-py3-none-any.whl`. Changes on 0.7.148:
+  console Diagnostics shows server-side words per doctor check
+  (`diag_words.py`, generic sentence for an unworded check, never raw text;
+  a test fails on a doctor line with no wording), problems first, no doctor
+  header/summary; doctor treats the uv link and the venv script as one
+  install (no false connector alarm from the launchd daemon); sync queue
+  warns only once its oldest item is an hour old; every test gets an empty
+  `MCPBRAIN_HOME` (tests/eval excepted), since 4 drain tests had been reading
+  the owner's real `auto_changes.tidy`. Fleet dependency set unchanged.
+- **Previous (2026-11-10): `0.7.148`, RELEASED** — source `614d0af6`, gh-pages
+  `1d53a35c`, plugin `75b4220`. One change on 0.7.147:
   the consolidator replies with a JSON card (note, title, description,
   `standing`) and only a `standing` note graduates to memory/*.md, under the
   model's title; a plain-text reply is kept as a note and never graduates;
