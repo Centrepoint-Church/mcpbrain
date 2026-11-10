@@ -188,7 +188,8 @@ def test_consolidation_pass_undo_removes_notes_tiers_and_graduation(tmp_path, mo
                         lambda store, cap: cluster)
     monkeypatch.setattr(consolidation, "_cluster", lambda chunks, embedder=None: [cluster])
     summary = "Acme budget review settled the Q3 numbers. Dana Okafor owns the follow-up."
-    monkeypatch.setattr(consolidation, "_call_claude", lambda prompt: summary)
+    monkeypatch.setattr(consolidation, "_call_claude", lambda prompt: json.dumps(
+        {"note": summary, "title": "Acme budget review", "standing": True}))
 
     out = consolidation.consolidate(s, home)
     assert out["notes_written"] == 1
@@ -736,8 +737,8 @@ def test_consolidation_undo_refused_when_graduated_file_edited(tmp_path, monkeyp
     monkeypatch.setattr(consolidation, "_episodic_chunks_for_consolidation",
                         lambda store, cap: cluster)
     monkeypatch.setattr(consolidation, "_cluster", lambda chunks, embedder=None: [cluster])
-    monkeypatch.setattr(consolidation, "_call_claude",
-                        lambda prompt: "Acme budget review settled the Q3 numbers.")
+    monkeypatch.setattr(consolidation, "_call_claude", lambda prompt: json.dumps(
+        {"note": "Acme budget review settled the Q3 numbers.", "standing": True}))
     consolidation.consolidate(s, home)
     row = _last(s, "consolidation_pass")
     p = _payload(row)

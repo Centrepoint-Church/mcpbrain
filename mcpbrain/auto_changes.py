@@ -472,7 +472,10 @@ def _apply_voice(store, home, payload) -> int:
 def _apply_consolidation(store, home, payload) -> int:
     from mcpbrain import consolidation
     cid = consolidation.apply_proposal(store, home, list(payload.get("doc_ids") or []),
-                                       payload.get("summary") or "")
+                                       payload.get("summary") or "",
+                                       standing=payload.get("standing") is True,
+                                       title=payload.get("title") or "",
+                                       description=payload.get("description") or "")
     if not cid:
         raise NotApplied(CHANGED_SINCE)
     return cid

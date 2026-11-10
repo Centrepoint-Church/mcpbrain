@@ -110,10 +110,23 @@ def _cluster_chunks(chunks: list[dict], *, threshold: float = 0.12) -> list[list
 # ---------------------------------------------------------------------------
 
 _PROMPT_TEMPLATE = """\
-You are a memory consolidator. Below are related email/note excerpts. \
-Write a concise durable semantic note (3-6 sentences) that captures the \
-key facts, decisions, and relationships. Cite source IDs in the note \
-using [id] notation. Return ONLY the note text, no preamble.
+You are a memory consolidator. Below are related email/note excerpts.
+
+Reply with ONE JSON object and nothing else:
+{{"title": "...", "description": "...", "note": "...", "standing": true}}
+
+- note: a concise semantic note (3-6 sentences) capturing the key facts, \
+decisions and relationships. Cite source IDs using [id] notation.
+- title: 3 to 8 words naming the subject, e.g. "Byford hub construction loan".
+- description: one sentence, under 150 characters, saying what the note records.
+- standing: true only for knowledge worth recalling months from now: how \
+something works, who holds which role, a decision, a policy, an ongoing \
+project or arrangement. false for one person's application, enquiry, form \
+or personal circumstances; a single booking, trip, delivery or event; a \
+calendar series; what an attachment or spreadsheet contains; a status \
+digest of open items.
+
+Never include email addresses, phone numbers, dates of birth or booking references.
 
 Source IDs and excerpts:
 {excerpts}
@@ -130,6 +143,39 @@ _PREAMBLE = re.compile(
     r"|here(?:'s| is) (?:the|a|my) (?:consolidated |semantic |durable )?note"
     r"|i'?ll write|i will write|writing the (?:consolidated )?note"
     r"|note text only)", re.IGNORECASE)
+
+
+def _parse_reply(text: str) -> dict:
+    """The consolidator's reply as {note, title, description, standing}.
+
+    The structured reply is what lets graduation judge: only a note the model
+    marks `standing` becomes a memory file, titled from its own title. Before
+    this, every cluster over the source and salience thresholds graduated and
+    took its slug from the note's first line, so applicants' forms, calendar
+    series and spreadsheet descriptions became standing memory, some titled
+    after the model's commentary.
+
+    A reply that is not that JSON object (an older prompt's plain note, or the
+    model ignoring the format) is kept as a plain note: written to the store,
+    never graduated. note is '' when nothing usable came back."""
+    import json as _json
+    card = {"note": "", "title": "", "description": "", "standing": False}
+    text = (text or "").strip()
+    start, end = text.find("{"), text.rfind("}")
+    if start != -1 and end > start:
+        try:
+            obj = _json.loads(text[start:end + 1])
+        except ValueError:
+            obj = None
+        if isinstance(obj, dict) and isinstance(obj.get("note"), str):
+            card["note"] = _strip_preamble(obj["note"])
+            for k in ("title", "description"):
+                v = obj.get(k)
+                card[k] = " ".join(v.split()) if isinstance(v, str) else ""
+            card["standing"] = obj.get("standing") is True
+            return card
+    card["note"] = _strip_preamble(text)
+    return card
 
 
 def _strip_preamble(summary: str) -> str:
@@ -305,7 +351,8 @@ def _infer_memory_type(cluster: list[dict], summary: str) -> str:
 
 
 def _graduate_note(store, home: str, cluster: list[dict], summary: str, *,
-                   graduated: list | None = None) -> bool:
+                   graduated: list | None = None, title: str = "",
+                   description: str = "") -> bool:
     """Promote a high-confidence consolidated note to a durable memory/*.md file.
 
     Graduation criteria (all must pass):
@@ -347,8 +394,9 @@ def _graduate_note(store, home: str, cluster: list[dict], summary: str, *,
                  ", ".join(held))
         return False
 
-    slug = _make_slug(summary)
-    first_sent = (summary.split(". ")[0] + ".").strip()[:120]
+    slug = _make_slug(title or summary)
+    first_sent = description[:150] if description else \
+        (summary.split(". ")[0] + ".").strip()[:120]
     memory_type = _infer_memory_type(cluster, summary)
     records_repo = config.records_dir(home)
 
@@ -495,9 +543,12 @@ def _promote_sources(store, cluster: list[dict], prior_tiers: dict[str, str]) ->
 
 
 def _apply_cluster(store, home: str, cluster: list[dict], summary: str, *,
-                   notes: list, prior_tiers: dict, graduated: list) -> bool:
-    """Write one cluster's note, promote its sources and graduate it, adding
-    what changed to the undo lists. True when a note was written."""
+                   notes: list, prior_tiers: dict, graduated: list,
+                   standing: bool = False, title: str = "",
+                   description: str = "") -> bool:
+    """Write one cluster's note, promote its sources and, when the consolidator
+    judged it `standing` knowledge, graduate it, adding what changed to the
+    undo lists. True when a note was written."""
     doc_id = _write_note(store, cluster, summary, written=notes)
     if not doc_id:
         return False
@@ -506,7 +557,9 @@ def _apply_cluster(store, home: str, cluster: list[dict], summary: str, *,
     _promote_sources(store, cluster, prior_tiers)
     log.info("consolidation: wrote semantic note %s from %d sources",
              doc_id, len(cluster))
-    _graduate_note(store, home, cluster, summary, graduated=graduated)
+    if standing:
+        _graduate_note(store, home, cluster, summary, graduated=graduated,
+                       title=title, description=description)
     return True
 
 
@@ -558,10 +611,13 @@ def chunks_for_proposal(store, doc_ids: list[str]) -> list[dict] | None:
     return cluster
 
 
-def apply_proposal(store, home: str, doc_ids: list[str], summary: str) -> int:
+def apply_proposal(store, home: str, doc_ids: list[str], summary: str, *,
+                   standing: bool = False, title: str = "",
+                   description: str = "") -> int:
     """Write one queued (ask-first) cluster note exactly as apply mode would.
     Returns the consolidation_pass change id, or 0 when the sources changed
-    since the proposal or no note was written."""
+    since the proposal or no note was written. A proposal queued before the
+    structured reply carries no `standing` and so never graduates."""
     cluster = chunks_for_proposal(store, doc_ids)
     summary = _strip_preamble(summary)  # proposals queued before the strip
     if cluster is None or not summary:
@@ -570,7 +626,8 @@ def apply_proposal(store, home: str, doc_ids: list[str], summary: str) -> int:
     prior_tiers: dict[str, str] = {}
     graduated: list[str] = []
     if not _apply_cluster(store, home, cluster, summary, notes=notes,
-                          prior_tiers=prior_tiers, graduated=graduated):
+                          prior_tiers=prior_tiers, graduated=graduated,
+                          standing=standing, title=title, description=description):
         return 0
     return _record_pass(store, home, written=1, clusters=1, notes=notes,
                         prior_tiers=prior_tiers, graduated=graduated)
@@ -622,21 +679,26 @@ def consolidate(store, home: str, *, cap: int = _CONSOLIDATION_CAP,
     graduated: list[str] = []
     for cluster in clusters[:cap]:
         prompt = _build_prompt(cluster)
-        summary = _strip_preamble(_call_claude(prompt))
+        card = _parse_reply(_call_claude(prompt))
+        summary = card["note"]
         if not summary:
             continue
         if mode == "ask":
             doc_ids = [c["doc_id"] for c in cluster]
             target = hashlib.sha256("|".join(sorted(doc_ids)).encode()).hexdigest()[:16]
-            first = summary.split("\n")[0].strip()
+            subject = card["title"] or summary.split("\n")[0].strip()
+            keep = " and keep it as standing memory" if card["standing"] else ""
             auto_changes.propose(
                 store, "consolidation", target,
-                f"Consolidate {len(cluster)} items into a note: {first[:100]}",
-                {"doc_ids": doc_ids, "summary": summary})
+                f"Consolidate {len(cluster)} items into a note{keep}: {subject[:100]}",
+                {"doc_ids": doc_ids, "summary": summary, "standing": card["standing"],
+                 "title": card["title"], "description": card["description"]})
             proposed += 1
             continue
         if _apply_cluster(store, home, cluster, summary, notes=notes,
-                          prior_tiers=prior_tiers, graduated=graduated):
+                          prior_tiers=prior_tiers, graduated=graduated,
+                          standing=card["standing"], title=card["title"],
+                          description=card["description"]):
             written += 1
 
     if mode == "ask":

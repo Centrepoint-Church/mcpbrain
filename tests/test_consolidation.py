@@ -419,8 +419,8 @@ def test_consolidate_triggers_graduation(store, home_consolidation, monkeypatch)
         return False  # skip real git I/O; return value doesn't matter for consolidate
 
     monkeypatch.setattr(consolidation, "_graduate_note", _tracking_graduate)
-    monkeypatch.setattr(consolidation, "_call_claude",
-                        lambda prompt, timeout=60: "A semantic summary from the cluster.")
+    monkeypatch.setattr(consolidation, "_call_claude", lambda prompt, timeout=60: _card(
+        "A semantic summary from the cluster.", standing=True))
 
     _seed_cluster(store, "g", n=4, salience=5.0)
     result = consolidation.consolidate(store, home_consolidation, threshold=0.0)
@@ -511,3 +511,103 @@ def test_strip_preamble_leaves_an_ordinary_note_alone():
     from mcpbrain.consolidation import _strip_preamble
     note = "Pat Nguyen chairs Acme's operations meeting [gmail-4-body-0]."
     assert _strip_preamble(note) == note
+
+
+# ---------------------------------------------------------------------------
+# Structured reply: only a note judged standing graduates, titled by the model
+# ---------------------------------------------------------------------------
+
+def _card(note, *, standing, title="", description=""):
+    import json as _json
+    return _json.dumps({"note": note, "title": title, "description": description,
+                        "standing": standing})
+
+
+def test_parse_reply_reads_the_card_inside_code_fences():
+    from mcpbrain.consolidation import _parse_reply
+    raw = "```json\n" + _card("Acme leases Hall B [g-1].", standing=True,
+                             title="Acme Hall B lease",
+                             description="Acme's lease of Hall B.") + "\n```"
+    assert _parse_reply(raw) == {"note": "Acme leases Hall B [g-1].",
+                                 "title": "Acme Hall B lease",
+                                 "description": "Acme's lease of Hall B.",
+                                 "standing": True}
+
+
+def test_parse_reply_treats_a_plain_note_as_never_standing():
+    from mcpbrain.consolidation import _parse_reply
+    card = _parse_reply("This is a memory consolidation task, so I'll write the "
+                        "note directly.\n\nAcme leases Hall B [g-1].")
+    assert card == {"note": "Acme leases Hall B [g-1].", "title": "",
+                    "description": "", "standing": False}
+
+
+def test_parse_reply_only_a_literal_true_is_standing():
+    from mcpbrain.consolidation import _parse_reply
+    import json as _json
+    assert _parse_reply(_json.dumps({"note": "x [g-1]", "standing": "yes"}))["standing"] is False
+    assert _parse_reply(_json.dumps({"note": 3}))["note"] == '{"note": 3}'
+
+
+def _run_pass(store, home, monkeypatch, reply):
+    from mcpbrain import consolidation
+    graduated = []
+    monkeypatch.setattr(consolidation, "_graduate_note",
+                        lambda store, home, cluster, summary, **kw:
+                        graduated.append(kw) or True)
+    monkeypatch.setattr(consolidation, "_call_claude", lambda prompt, timeout=60: reply)
+    _seed_cluster(store, "s", n=4, salience=5.0)
+    result = consolidation.consolidate(store, home, threshold=0.0)
+    return result, graduated
+
+
+def test_a_note_judged_not_standing_is_written_but_not_graduated(store, home_consolidation,
+                                                                 monkeypatch):
+    result, graduated = _run_pass(store, home_consolidation, monkeypatch, _card(
+        "Dana Okafor applied for the Acme internship [g-2].", standing=False,
+        title="Dana Okafor internship application"))
+    assert result["notes_written"] >= 1
+    assert graduated == []
+
+
+def test_a_standing_note_graduates_under_the_models_title(store, home_consolidation,
+                                                          monkeypatch):
+    result, graduated = _run_pass(store, home_consolidation, monkeypatch, _card(
+        "Acme's board approved the Hall B lease [g-3].", standing=True,
+        title="Acme Hall B lease", description="Acme's board approved the Hall B lease."))
+    assert graduated and graduated[0]["title"] == "Acme Hall B lease"
+    assert graduated[0]["description"] == "Acme's board approved the Hall B lease."
+
+
+def test_graduated_slug_and_description_come_from_the_title(home_consolidation, monkeypatch):
+    from mcpbrain.consolidation import _graduate_note
+    from mcpbrain.store import Store
+    store = Store(Path(home_consolidation) / "test-title.sqlite3", dim=4)
+    store.init()
+    written = []
+    monkeypatch.setattr("mcpbrain.records_write.write_memory",
+                        lambda repo, **kw: written.append(kw) or True)
+    _graduate_note(store, home_consolidation, _make_cluster(n=5, salience=5.0),
+                   "These excerpts cover the lease. Acme's board approved it [g-4].",
+                   title="Acme Hall B lease", description="Board approved the Hall B lease.")
+    assert written[0]["slug"] == "acme-hall-b-lease"
+    assert written[0]["description"] == "Board approved the Hall B lease."
+
+
+def test_ask_mode_proposal_carries_the_verdict_and_names_it(store, home_consolidation,
+                                                           monkeypatch):
+    from mcpbrain import auto_changes, consolidation
+    proposals = []
+    from mcpbrain import config
+    monkeypatch.setattr(config, "auto_change_mode", lambda home, kind: "ask")
+    monkeypatch.setattr(auto_changes, "propose",
+                        lambda store, kind, target, summary, payload:
+                        proposals.append((summary, payload)))
+    monkeypatch.setattr(consolidation, "_call_claude", lambda prompt, timeout=60: _card(
+        "Acme's board approved the Hall B lease [g-5].", standing=True,
+        title="Acme Hall B lease", description="Board approved the lease."))
+    _seed_cluster(store, "a", n=4, salience=5.0)
+    consolidation.consolidate(store, home_consolidation, threshold=0.0)
+    summary, payload = proposals[0]
+    assert "keep it as standing memory: Acme Hall B lease" in summary
+    assert payload["standing"] is True and payload["title"] == "Acme Hall B lease"
