@@ -21,7 +21,6 @@ from mcpbrain import config, records_write
 log = logging.getLogger(__name__)
 
 _PRUNE_DAYS = 14
-_WARN_MEMORY_LINES = 180
 _WARN_HOT_DAYS = 14
 _WARN_BRAIN_MEMORY_DAYS = 7
 
@@ -181,19 +180,26 @@ def context_health(repo: str, mcpbrain_home: str) -> list[str]:
     """Read-only health checks. Returns list of WARN strings (empty == healthy).
 
     Three checks:
-    1. MEMORY.md line count (warn >180)
+    1. memory/*.md files holding personal identifiers (personal_data.find)
     2. hot.md stale entries (>14 days)
     3. <mcpbrain_home>/context/memory.md age (>7 days)
+
+    MEMORY.md's length is not checked: nothing truncates it (owner_context
+    fetches it whole, by name), so a line count warned weekly for nothing.
     """
+    from mcpbrain import personal_data
     warnings: list[str] = []
 
-    memory_md = Path(repo) / "MEMORY.md"
-    if memory_md.exists():
-        n = len(memory_md.read_text().splitlines())
-        if n > _WARN_MEMORY_LINES:
-            warnings.append(
-                f"WARN: MEMORY.md has {n} lines (truncation limit 200 — prune old entries)"
-            )
+    memory_dir = Path(repo) / "memory"
+    if memory_dir.is_dir():
+        for f in sorted(memory_dir.glob("*.md")):
+            held = personal_data.find(f.read_text(errors="replace"))
+            if held:
+                kinds = held[0] if len(held) == 1 else \
+                    ", ".join(held[:-1]) + " and " + held[-1]
+                warnings.append(
+                    f"WARN: memory/{f.name} holds {kinds} (remove the file and "
+                    "its MEMORY.md line, or edit them out)")
 
     hot_md = Path(repo) / "state" / "hot.md"
     if hot_md.exists():

@@ -285,9 +285,10 @@ def _graduate_note(store, home: str, cluster: list[dict], summary: str, *,
                    graduated: list | None = None) -> bool:
     """Promote a high-confidence consolidated note to a durable memory/*.md file.
 
-    Graduation criteria (both must pass):
+    Graduation criteria (all must pass):
       - Source count >= graduation_min_sources (recurrence proxy)
       - Mean source salience >= graduation_min_salience
+      - The summary holds no personal identifier (personal_data.find)
 
     Calls records_write.write_memory() which is no-clobber and commits. Wrapped in
     try/except so a missing records repo (no git) never breaks the consolidation run.
@@ -311,6 +312,16 @@ def _graduate_note(store, home: str, cluster: list[dict], summary: str, *,
     if mean_salience < min_salience:
         log.debug("consolidation: graduation skipped — mean salience %.2f < min %.2f",
                   mean_salience, min_salience)
+        return False
+
+    # Mail about people (applications, volunteer forms, bookings) clusters and
+    # scores high, but its identifiers belong in the source email, not in a
+    # standing memory every session reads. The note itself stays in the store.
+    from mcpbrain import personal_data
+    held = personal_data.find(summary)
+    if held:
+        log.info("consolidation: graduation skipped — the note holds %s",
+                 ", ".join(held))
         return False
 
     slug = _make_slug(summary)

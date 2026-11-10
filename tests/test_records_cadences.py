@@ -60,6 +60,31 @@ def test_context_health_clean_repo_no_warnings(tmp_path):
     assert records_cadences.context_health(repo, str(tmp_path)) == []
 
 
+def test_context_health_ignores_a_long_memory_index(tmp_path):
+    """Nothing truncates the records MEMORY.md (it is fetched by name), so its
+    length is not a warning; the old 180-line rule fired weekly for nothing."""
+    repo = _repo(tmp_path)
+    index = Path(repo) / "MEMORY.md"
+    index.write_text(index.read_text() + "".join(
+        f"- [Acme note {i}](memory/acme-note-{i}.md)\n" for i in range(400)))
+    assert records_cadences.context_health(repo, str(tmp_path)) == []
+
+
+def test_context_health_names_memory_files_holding_personal_details(tmp_path):
+    repo = _repo(tmp_path)
+    mem = Path(repo) / "memory"
+    mem.mkdir(exist_ok=True)
+    (mem / "dana-okafor-applied.md").write_text(
+        "---\nname: dana-okafor-applied\n---\n\n"
+        "Dana Okafor (dana.okafor@gmail.com, born 30 May 2006) applied.\n")
+    (mem / "acme-ops-meeting.md").write_text(
+        "---\nname: acme-ops-meeting\n---\n\nPat Nguyen (pat@example.org) chairs it.\n")
+    warnings = records_cadences.context_health(repo, str(tmp_path))
+    assert warnings == [
+        "WARN: memory/dana-okafor-applied.md holds a personal email address and "
+        "a date of birth (remove the file and its MEMORY.md line, or edit them out)"]
+
+
 def test_context_health_warns_on_stale_hot_entry(tmp_path):
     repo = _repo(tmp_path)
     old = (datetime.now(timezone.utc).date() - timedelta(days=40)).isoformat()

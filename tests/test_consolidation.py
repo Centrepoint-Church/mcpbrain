@@ -323,6 +323,26 @@ def test_graduate_note_calls_write_memory_above_threshold(home_consolidation, mo
     assert written[0]["memory_type"] == "project"
 
 
+def test_graduate_note_refuses_a_note_holding_personal_details(home_consolidation, monkeypatch):
+    """A note naming an applicant's date of birth and personal mailbox stays a
+    consolidated note in the store; it never becomes a durable memory file."""
+    from mcpbrain.consolidation import _graduate_note
+    from mcpbrain.store import Store
+
+    store = Store(Path(home_consolidation) / "test-pd.sqlite3", dim=4)
+    store.init()
+
+    written = []
+    monkeypatch.setattr("mcpbrain.records_write.write_memory",
+                        lambda repo, **kw: written.append(kw) or True)
+
+    cluster = _make_cluster(n=5, salience=5.0)  # passes both thresholds
+    summary = ("Dana Okafor (dana.okafor@gmail.com, born 30 May 2006) applied "
+               "for the Acme internship.")
+    assert _graduate_note(store, home_consolidation, cluster, summary) is False
+    assert written == []
+
+
 def test_graduate_note_skipped_below_source_count(home_consolidation, monkeypatch):
     """_graduate_note is skipped when cluster has fewer than graduation_min_sources chunks."""
     from mcpbrain.consolidation import _graduate_note
