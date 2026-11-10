@@ -1635,3 +1635,71 @@ def test_brief_and_consolidated_never_reach_units(tmp_path, monkeypatch):
     # A brief-prefixed email from someone else is primary mail.
     assert not _cold(store, "gmail-p1-body-0")
     assert "gmail-p1-body-0" in in_units
+
+
+# --- split threads: every part queued, never rewritten under a worker --------
+
+def _parts(tid, k, body="x" * 4000):
+    return [{"thread_id": tid, "part": i, "of": k,
+             "part_doc_ids": [f"{tid}-c{i}"], "prior_thread_context": "",
+             "open_actions": [], "messages": [{"text": body}]}
+            for i in range(1, k + 1)]
+
+
+def test_write_units_queues_every_part_of_a_split_thread(tmp_path):
+    """Parts of one split thread used to share a unit id (a hash of thread ids
+    alone), so each part overwrote the last and only part k of k was ever
+    queued: a k-part thread drained one part per cycle."""
+    data = {"threads": _parts("t-long", 3), "context": {}}
+    summary = prepare.write_units(data, home=str(tmp_path), pull_cap=12_000)
+    units = [json.loads(p.read_text())
+             for p in (tmp_path / "enrich_queue" / "units").glob("*.json")]
+    queued = sorted(t["part"] for u in units for t in u["threads"])
+    assert queued == [1, 2, 3]
+    assert summary["units_written"] == len(units) == 3
+
+
+def test_queued_thread_ids_reads_thread_units_only(tmp_path):
+    units = tmp_path / "enrich_queue" / "units"
+    units.mkdir(parents=True)
+    (units / "u-a.json").write_text(json.dumps(
+        {"kind": "thread", "threads": [{"thread_id": "t-1"}, {"thread_id": "t-2"}]}))
+    (units / "u-b.json").write_text(json.dumps({"kind": "block", "items": []}))
+    (units / "u-c.json").write_text("{not json")
+    assert prepare.queued_thread_ids(str(tmp_path)) == {"t-1", "t-2"}
+    assert prepare.queued_thread_ids(str(tmp_path / "nowhere")) == set()
+
+
+def test_prepare_units_leaves_a_queued_thread_alone(tmp_path, monkeypatch):
+    """A thread with a unit still in the queue is not prepared again. Rewriting
+    it would change the unit under a worker holding it (drain re-reads the unit
+    file, so a part renumbered mid-flight marked the wrong chunks enriched) and,
+    for a half-drained split thread, re-split the remainder into units that
+    overlap the parts still queued."""
+    monkeypatch.setenv("MCPBRAIN_HOME", str(tmp_path))
+    (tmp_path / "config.json").write_text('{"salience_gate": false}')
+    queued = FakeBatch("t-queued", ["d-q1"],
+                       [_msg("m1", "dana@example.org", "2026-06-01", "Hall B",
+                             "Can you confirm the Hall B booking for Sunday?")])
+    fresh = FakeBatch("t-fresh", ["d-f1"],
+                      [_msg("m2", "sam@example.org", "2026-06-02", "Roster",
+                            "Can you send the Acme roster by Friday?")])
+    units = tmp_path / "enrich_queue" / "units"
+    units.mkdir(parents=True)
+    held = units / "u-held.json"
+    held.write_text(json.dumps({"unit_id": "u-held", "kind": "thread",
+                                "threads": [{"thread_id": "t-queued", "part": 2, "of": 2}]}))
+    before = held.read_text()
+    store = FakeStore()
+    monkeypatch.setattr(prepare, "_group_unenriched_threads",
+                        lambda store, **kw: [queued, fresh])
+    _stub_reassemble(monkeypatch)
+    _stub_context(monkeypatch)
+
+    prepare.prepare_units(store, thread_cap=10, char_budget=100000,
+                          resolution_due=False, now=_NOW, home=str(tmp_path))
+
+    assert held.read_text() == before
+    tids = [t["thread_id"] for p in units.glob("*.json") if p != held
+            for t in json.loads(p.read_text()).get("threads") or []]
+    assert tids == ["t-fresh"]
