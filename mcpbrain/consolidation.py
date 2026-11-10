@@ -19,6 +19,7 @@ from __future__ import annotations
 
 import hashlib
 import logging
+import re
 import subprocess
 from datetime import datetime, timezone
 
@@ -117,6 +118,28 @@ using [id] notation. Return ONLY the note text, no preamble.
 Source IDs and excerpts:
 {excerpts}
 """
+
+# The model sometimes opens with commentary on the task despite "no preamble"
+# ("This is a memory consolidation task, not a coding task, so I'll write the
+# note directly."). The first line becomes the memory slug and description, so
+# 17 graduated files were titled after it. A matching line that cites nothing
+# is commentary; a line citing a source is note text, however it opens.
+_PREAMBLE = re.compile(
+    r"^\s*(?:this is a memory consolidation task"
+    r"|these excerpts (?:are|don'?t|do not)"
+    r"|here(?:'s| is) (?:the|a|my) (?:consolidated |semantic |durable )?note"
+    r"|i'?ll write|i will write|writing the (?:consolidated )?note"
+    r"|note text only)", re.IGNORECASE)
+
+
+def _strip_preamble(summary: str) -> str:
+    """Drop leading commentary lines (and blank lines) from a model summary.
+    Returns '' when nothing but commentary remains."""
+    lines = summary.strip().splitlines()
+    while lines and (not lines[0].strip()
+                     or (_PREAMBLE.match(lines[0]) and "[" not in lines[0])):
+        lines.pop(0)
+    return "\n".join(lines).strip()
 
 
 def _call_claude(prompt: str, timeout: int = 60) -> str:
@@ -529,7 +552,8 @@ def apply_proposal(store, home: str, doc_ids: list[str], summary: str) -> int:
     Returns the consolidation_pass change id, or 0 when the sources changed
     since the proposal or no note was written."""
     cluster = chunks_for_proposal(store, doc_ids)
-    if cluster is None:
+    summary = _strip_preamble(summary)  # proposals queued before the strip
+    if cluster is None or not summary:
         return 0
     notes: list[str] = []
     prior_tiers: dict[str, str] = {}
@@ -587,7 +611,7 @@ def consolidate(store, home: str, *, cap: int = _CONSOLIDATION_CAP,
     graduated: list[str] = []
     for cluster in clusters[:cap]:
         prompt = _build_prompt(cluster)
-        summary = _call_claude(prompt)
+        summary = _strip_preamble(_call_claude(prompt))
         if not summary:
             continue
         if mode == "ask":

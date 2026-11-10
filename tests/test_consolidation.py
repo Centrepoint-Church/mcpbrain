@@ -451,3 +451,43 @@ def test_consolidated_note_written_cold_and_never_core(store):
             "SELECT enrich_state FROM chunks WHERE doc_id LIKE ?",
             (long_id.rsplit("-", 1)[0] + "-%",))}
     assert states == {"cold"}
+
+
+# ---------------------------------------------------------------------------
+# Model preamble never becomes the note (or its memory title and slug)
+# ---------------------------------------------------------------------------
+
+def test_strip_preamble_drops_task_commentary_before_the_note():
+    from mcpbrain.consolidation import _strip_preamble
+    raw = ("This is a memory consolidation task, not a coding task, so I'll "
+           "write the note directly.\n\n"
+           "Acme's board approved the hall lease [gmail-1-body-0].")
+    assert _strip_preamble(raw) == "Acme's board approved the hall lease [gmail-1-body-0]."
+
+
+def test_strip_preamble_handles_a_same_line_lead_in():
+    from mcpbrain.consolidation import _strip_preamble
+    raw = ("These excerpts are role description fragments rather than a task "
+           "requiring skill invocation — writing the consolidated note directly.\n"
+           "Dana Okafor leads Acme's finance team [gmail-2-body-0].")
+    assert _strip_preamble(raw) == "Dana Okafor leads Acme's finance team [gmail-2-body-0]."
+
+
+def test_strip_preamble_empties_a_reply_that_is_only_commentary():
+    from mcpbrain.consolidation import _strip_preamble
+    assert _strip_preamble(
+        "These excerpts are governance document text with no relevant "
+        "memory-worthy content, but I'll produce the requested note.") == ""
+
+
+def test_strip_preamble_keeps_a_cited_note_that_opens_with_these_excerpts():
+    from mcpbrain.consolidation import _strip_preamble
+    note = ("These excerpts cover Acme's two open roles [gmail-3-att-0-1]. "
+            "Sam Chen will interview in March [gmail-3-body-0].")
+    assert _strip_preamble(note) == note
+
+
+def test_strip_preamble_leaves_an_ordinary_note_alone():
+    from mcpbrain.consolidation import _strip_preamble
+    note = "Pat Nguyen chairs Acme's operations meeting [gmail-4-body-0]."
+    assert _strip_preamble(note) == note
