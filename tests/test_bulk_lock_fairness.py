@@ -662,7 +662,7 @@ def test_bulk_section_argument_reaches_drain_and_prepare_units(monkeypatch):
             # pending to embed and isn't testing the embed path.
             return []
 
-        def due_sync_items(self, *, limit, now):
+        def due_sync_items(self, *, limit, now, **_narrow):
             # work_queue calls this unconditionally every cycle; this test has
             # no queued sync work to drain and isn't testing sync/queue
             # behaviour, only that run_cycle forwards bulk_section unchanged

@@ -168,6 +168,22 @@ def _live_daemon_status(home) -> dict | None:
         return None
 
 
+def _same_install(command: str, mcpbrain_bin: str) -> bool:
+    """True when the config's command and the running install are one file.
+
+    uv puts a link on PATH (~/.local/bin/mcpbrain) to the tool venv's real
+    script. The connector writes the link; a daemon started by launchd has no
+    ~/.local/bin on PATH, so it sees itself as the venv script. Compared as
+    text the two never match, which reported a correct connector as stale.
+    """
+    if command == mcpbrain_bin:
+        return True
+    try:
+        return Path(command).resolve() == Path(mcpbrain_bin).resolve()
+    except (OSError, RuntimeError, ValueError):
+        return False
+
+
 def connector_lines(*, mcpbrain_bin: str) -> list[str]:
     """One report line per Claude config file on this machine.
 
@@ -210,13 +226,53 @@ def connector_lines(*, mcpbrain_bin: str) -> list[str]:
             lines.append(f"⚠️  {label:<16} {path.name} points at {command}, which "
                          f"does not exist — run 'mcpbrain connect'")
             continue
-        if command != mcpbrain_bin:
+        if not _same_install(command, mcpbrain_bin):
             lines.append(f"⚠️  {label:<16} {path.name} points at {command}, which "
                          f"differs from the current install ({mcpbrain_bin}) — "
                          f"run 'mcpbrain connect'")
             continue
         lines.append(f"✅ {label:<16} registered in {path.name} → {command}")
     return lines
+
+
+# A sync queue item is normally fetched within minutes of being found. Only a
+# backlog whose oldest item has waited this long is worth a person's look;
+# anything younger is the queue doing its job.
+SYNC_QUEUE_STUCK_S = 3600
+
+
+def _age_words(seconds: float) -> str:
+    m = int(seconds // 60)
+    if m < 1:
+        return "under a minute"
+    if m < 120:
+        return f"{m} min"
+    h = m // 60
+    return f"{h} h" if h < 48 else f"{h // 24} days"
+
+
+def sync_queue_line(pending: int, oldest_discovered_at, now: datetime | None = None) -> str:
+    """One doctor line for the sync queue: ✅ while it is moving, ⚠️ once its
+    oldest item has waited SYNC_QUEUE_STUCK_S (the tail-starvation risk
+    accepted with newest-first ordering shows as an age that climbs)."""
+    if not pending:
+        return f"✅ {'Sync queue':<16} 0 pending"
+    now = now or datetime.now(timezone.utc)
+    age = None
+    try:
+        found = datetime.fromisoformat(str(oldest_discovered_at))
+        if found.tzinfo is None:
+            found = found.replace(tzinfo=timezone.utc)
+        age = max(0.0, (now - found).total_seconds())
+    except (TypeError, ValueError):
+        pass
+    if age is None:
+        return (f"⚠️ {'Sync queue':<16} {pending:,} pending "
+                f"(oldest discovered {oldest_discovered_at})")
+    if age < SYNC_QUEUE_STUCK_S:
+        return f"✅ {'Sync queue':<16} {pending:,} pending, oldest {_age_words(age)} old"
+    return (f"⚠️ {'Sync queue':<16} {pending:,} pending, oldest {_age_words(age)} old "
+            f"(discovered {oldest_discovered_at})")
 
 
 def infra_refused_lines(store) -> list[str]:
@@ -537,11 +593,7 @@ def run_doctor(home, *, conns=None, repairs=None, reprobe=None, platform=None,
     # that is not shrinking shows as an age that climbs.
     try:
         q = store.sync_queue_stats()
-        if q["pending"]:
-            lines.append(f"⚠️ {'Sync queue':<16} {q['pending']:,} pending "
-                         f"(oldest discovered {q['oldest_discovered_at']})")
-        else:
-            lines.append(f"✅ {'Sync queue':<16} 0 pending")
+        lines.append(sync_queue_line(q["pending"], q["oldest_discovered_at"]))
         if q["failing"]:
             detail = ", ".join(f"{f['ref_id']} ({f['attempts']} attempts: "
                                f"{f['last_error']})" for f in q["failing"])

@@ -192,3 +192,24 @@ def test_successful_connector_repair_is_reported_as_fixed(tmp_path, monkeypatch)
         "a successful connector repair must not report zero fixes"
     assert "1 fixed automatically" in msg
     assert code == 0
+
+
+def test_a_link_to_the_running_install_is_the_same_install(tmp_path, monkeypatch):
+    """uv puts ~/.local/bin/mcpbrain on PATH as a link to the tool venv's
+    script. The connector writes the link; a daemon started by launchd sees
+    itself as the venv script. That is one install, not a stale connector."""
+    real = tmp_path / "venv" / "bin" / "mcpbrain"
+    real.parent.mkdir(parents=True)
+    real.write_text("#!/bin/sh\n")
+    link = tmp_path / "bin" / "mcpbrain"
+    link.parent.mkdir()
+    link.symlink_to(real)
+    cfg = tmp_path / "claude_desktop_config.json"
+    cfg.write_text(json.dumps({"mcpServers": {
+        "mcpbrain": {"command": str(link), "args": ["mcp-server"]}}}))
+    monkeypatch.setattr(connector, "desktop_config_paths", lambda: [cfg])
+    monkeypatch.setattr(connector, "code_config_path", lambda: tmp_path / "absent.json")
+
+    lines = doctor.connector_lines(mcpbrain_bin=str(real))
+    assert any(line.startswith("✅") and "Connector" in line for line in lines), lines
+    assert not any(line.startswith("⚠️") for line in lines), lines

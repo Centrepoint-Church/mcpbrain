@@ -932,47 +932,29 @@ $("restart-go").addEventListener("click", (ev) => act(ev.currentTarget, $("updat
   return "Restarting. In a few seconds, open the console again from the menu bar.";
 }, AGAIN));
 
-// Diagnostics: doctor's own lines, its status as a chip, and plain words where
-// it would print a terminal-only repair note.
+// Diagnostics: the server words each of doctor's checks (diag_words.py); the
+// page shows those words with a status chip and never doctor's terminal text.
 const DIAG = {ok: ["chip--ok", "OK"], warn: ["chip--person", "Look at this"], bad: ["chip--bad", "Problem"], info: ["chip--quiet", "Note"]};
 /* diag-words:start */
-// doctor writes for a terminal: a status glyph, a padded label, arrows to what
-// it tried, exception text and CLI advice. The page keeps the status (a line
-// it fixed itself counts as OK) and says the rest in words; an exception is
-// never shown, the log is pointed at instead.
-const LOG_HINT = "Details are in the mcpbrain log.";
-const HELP_HINT = "Fix this from the menu bar or ask for help.";
-function diagLine(l){
-  let s = String((l && l.text) || "");
-  let status = (l && l.status) || "info";
-  if (/✅\s*fixed\s*$/u.test(s)) status = "ok";
-  s = s.replace(/^\s*(?:✅|⚠️?|❌|➖|ℹ️?)\s*/u, "")
-    .replace(/\s*→\s*[^→]*?\.\.\.\s*✅\s*fixed\s*$/u, ", fixed automatically.")
-    .replace(/\s*→\s*repair failed:.*$/u, ". The automatic fix failed. " + LOG_HINT)
-    .replace(/\s*→\s*repair did not fix it.*$/u, ". The automatic fix didn’t work. " + HELP_HINT)
-    .replace(/\s*→\s*re-download failed:.*$/u, ". The download failed; run Diagnostics again when you’re online.")
-    .replace(/\s*→\s*re-download did not land.*$/u, ". The download didn’t finish; run Diagnostics again when you’re online.")
-    .replace(/no repair registered for '[^']*'/g, HELP_HINT)
-    .replace(/\b(failed|could not [a-z ]+?):\s.*$/i, "$1. " + LOG_HINT)
-    .replace(/\s*\((?=[^)]*(?:Error|Exception|errno|Traceback|No such file))[^)]*\)/g, ". " + LOG_HINT)
-    .replace(/\brerun mcpbrain doctor\b/gi, "run Diagnostics again")
-    .replace(/\brun mcpbrain (?:setup|doctor --repair|doctor)\b/gi, "fix it from the menu bar or ask for help")
-    .replace(/\s*→\s*/gu, ": ")
-    .replace(/\s{2,}/g, " ");
-  return {status: status, text: words(s).replace(/\.\s*\./g, ".").trim()};
+// Problems first, then everything else in doctor's order.
+const DIAG_RANK = {bad: 0, warn: 1};
+function diagShown(lines){
+  return (lines || []).filter(l => l && l.words)
+    .map((l, i) => ({status: DIAG[l.status] ? l.status : "info", text: String(l.words), i}))
+    .sort((a, b) => ((DIAG_RANK[a.status] ?? 2) - (DIAG_RANK[b.status] ?? 2)) || a.i - b.i)
+    .map(({status, text}) => ({status, text}));
 }
 /* diag-words:end */
 function renderDiag(r){
   const body = $("diag-body");
   if (r.running) { fill(body, el("p", {class: "muted", text: "Running diagnostics. This takes up to a minute."})); return; }
   if (!r.ran_at) return;
-  const lines = r.lines || [];
-  const problems = lines.map(diagLine).filter(d => d.status === "bad" || d.status === "warn").length;
+  const shown = diagShown(r.lines);
+  const problems = shown.filter(d => d.status === "bad" || d.status === "warn").length;
   fill(body,
     el("p", {class: "small"}, problems ? plural(problems, "thing") + " to look at. " : "Everything checked out. ", "Ran ", measured(C.relTime(r.ran_at), true), "."),
-    el("ul", {class: "checks"}, lines.map(l => {
-      const d = diagLine(l);
-      const [cls, w] = DIAG[d.status] || DIAG.info;
+    el("ul", {class: "checks"}, shown.map(d => {
+      const [cls, w] = DIAG[d.status];
       return el("li", {}, el("span", {class: "chip " + cls, text: w}), el("span", {text: d.text}));
     })));
 }

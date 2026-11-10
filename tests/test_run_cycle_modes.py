@@ -31,7 +31,7 @@ class FakeStore:
     def unenriched_chunks(self, limit=None):
         return self._unenriched if limit is None else self._unenriched[:limit]
 
-    def due_sync_items(self, *, limit, now):
+    def due_sync_items(self, *, limit, now, **_narrow):
         # work_queue calls this unconditionally every cycle, even with no
         # services configured. These tests are about enrich-mode/cadence
         # gating, not sync/queue behaviour -- an empty queue is faithful,

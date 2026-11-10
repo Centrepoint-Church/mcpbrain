@@ -268,8 +268,19 @@ def _line_status(text: str) -> str:
 
 
 def parse_doctor(text: str) -> list[dict]:
-    return [{"status": _line_status(ln), "text": ln}
-            for ln in (raw.rstrip() for raw in (text or "").splitlines()) if ln.strip()]
+    """doctor's lines, each with its raw `text` (kept for the support report)
+    and, for the lines the console shows, the plain-English `words`, the check
+    `name` and the status those words carry (diag_words). Header and summary
+    lines have words None: the console counts problems itself."""
+    from mcpbrain import diag_words
+    out = []
+    for ln in (raw.rstrip() for raw in (text or "").splitlines()):
+        if not ln.strip():
+            continue
+        w = diag_words.word(ln)
+        out.append({"status": w["status"] if w else _line_status(ln), "text": ln,
+                    "name": w["name"] if w else None, "words": w["words"] if w else None})
+    return out
 
 
 class Diagnostics:
@@ -309,7 +320,9 @@ class Diagnostics:
             lines = parse_doctor(text)
         except Exception as exc:  # noqa: BLE001 — report it, don't lose the thread silently
             log.exception("diagnostics run failed")
-            code, lines = None, [{"status": "bad", "text": f"Diagnostics failed: {exc}"}]
+            code, lines = None, [{"status": "bad", "text": f"Diagnostics failed: {exc}",
+                                  "name": "Diagnostics",
+                                  "words": "Diagnostics couldn't run. Details are in the mcpbrain log."}]
         with self._lock:
             self._result = {"running": False,
                             "ran_at": datetime.now(timezone.utc).isoformat(timespec="seconds"),

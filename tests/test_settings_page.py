@@ -259,11 +259,6 @@ def test_drive_row_reads_shared_drives_from_stats():
     assert ".shared" in PAGE
 
 
-def test_diagnostics_replaces_the_no_repair_phrase():
-    assert "no repair registered" in PAGE   # the phrase it looks for
-    assert "Fix this from the menu bar or ask for help" in PAGE
-
-
 # --- fleet folders (moved from the setup page) ----------------------------------
 
 def test_fleet_ids_read_only_until_edit_and_saved_together():
@@ -324,32 +319,29 @@ console.log(JSON.stringify([ownerNameFor("Dana Okafor", saved), ownerNameFor("Da
 
 
 @pytest.mark.skipif(shutil.which("node") is None, reason="node not installed")
-def test_doctor_lines_are_worded(tmp_path):
+def test_diagnostics_shows_the_servers_words_problems_first(tmp_path):
     o = _run_block(tmp_path, "diag-words", r"""
+const DIAG = {ok: 1, warn: 1, bad: 1, info: 1};
 const L = [
-  {status: "bad", text: "❌ Google           Sign-in expired — reconnect → repair failed: HttpError 401 boom"},
-  {status: "bad", text: "❌ Claude           Not seen → repair did not fix it; run mcpbrain setup"},
-  {status: "bad", text: "❌ Records          not created → creating... ✅ fixed"},
-  {status: "bad", text: "❌ Daemon           no repair registered for 'daemon'"},
-  {status: "bad", text: "❌ Records          records repo create failed: OSError(13, 'denied')"},
-  {status: "info", text: "➖ Baseline         skipped (RuntimeError: no store)"},
-  {status: "bad", text: "❌ Embedder         weights missing → re-download failed: x (needs network; rerun mcpbrain doctor when online)"},
-  {status: "ok", text: "✅ Watchdog         no stall restarts"},
+  {status: "info", text: "mcpbrain doctor 2026", words: null},
+  {status: "ok", text: "✅ Daemon  Connected", words: "The background service is running."},
+  {status: "warn", text: "⚠️ Connector /Users/x", words: "Claude Desktop isn't connected."},
+  {status: "odd", text: "?", words: "Something."},
+  {status: "bad", text: "❌ Integrity", words: "The database failed its check."},
+  {status: "info", text: "0 fixed automatically, 0 need your action", words: null},
 ];
-console.log(JSON.stringify(L.map(diagLine)));""")
-    texts = [d["text"] for d in o]
-    for t in texts:
-        for raw in ("HttpError", "OSError", "RuntimeError", "mcpbrain setup", "mcpbrain doctor",
-                    "→", "✅", "❌", "➖", "—", "repair registered", "  "):
-            assert raw not in t, (raw, t)
-    assert texts[0].startswith("Google Sign-in expired, reconnect. The automatic fix failed.")
-    assert "Details are in the mcpbrain log." in texts[0]
-    assert "Fix this from the menu bar or ask for help." in texts[1]
-    assert o[2] == {"status": "ok", "text": "Records not created, fixed automatically."}
-    assert texts[3] == "Daemon Fix this from the menu bar or ask for help."
-    assert "Details are in the mcpbrain log." in texts[4] and "Details" in texts[5]
-    assert "run Diagnostics again when you’re online" in texts[6]
-    assert o[7] == {"status": "ok", "text": "Watchdog no stall restarts"}
+console.log(JSON.stringify(diagShown(L)));""")
+    assert o == [
+        {"status": "bad", "text": "The database failed its check."},
+        {"status": "warn", "text": "Claude Desktop isn't connected."},
+        {"status": "ok", "text": "The background service is running."},
+        {"status": "info", "text": "Something."},
+    ]
+
+
+def test_diagnostics_never_renders_doctor_text():
+    body = PAGE[PAGE.index("function renderDiag("):PAGE.index("let diagTimer")]
+    assert "l.text" not in body and "diagShown(r.lines)" in body
 
 
 def test_logs_and_report_go_through_api_text():

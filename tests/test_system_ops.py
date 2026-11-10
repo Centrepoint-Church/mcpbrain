@@ -461,6 +461,11 @@ def test_diagnostics_runs_doctor_without_repairs(tmp_path):
     assert res["running"] is False and res["code"] == 1 and res["ran_at"]
     assert [ln["status"] for ln in res["lines"]] == ["info", "ok", "warn", "bad", "info"]
     assert res["lines"][2]["text"].startswith("⚠️")
+    # The header is kept for the support report but has no words to show; an
+    # unknown check gets a safe sentence, a known one its own.
+    assert res["lines"][0]["words"] is None
+    assert res["lines"][2]["words"] == "One check: this needs a look. Details are in the mcpbrain log."
+    assert res["lines"][4]["words"] == "The shared organisation snapshot isn't checked from here."
 
 
 def test_diagnostics_single_run_at_a_time(tmp_path):
@@ -498,7 +503,8 @@ def test_diagnostics_routes(server, monkeypatch):
     assert r.status == 202
     srv.diagnostics.join(5)
     body = json.loads(_req("GET", base + "/api/diagnostics", srv.token).read())
-    assert body["code"] == 0 and body["lines"] == [{"status": "ok", "text": "✅ fine"}]
+    assert body["code"] == 0 and body["lines"] == [
+        {"status": "ok", "text": "✅ fine", "name": "One check", "words": "One check: OK."}]
 
 
 # -- logs and support report ---------------------------------------------------

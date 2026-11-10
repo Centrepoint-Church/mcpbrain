@@ -285,6 +285,23 @@ def _stable_model_cache():
 
 
 @pytest.fixture(autouse=True)
+def _never_the_owners_home(request, tmp_path_factory, monkeypatch):
+    """Point MCPBRAIN_HOME at an empty folder for every test.
+
+    Code that reads config.app_dir() itself (prepare's tidy mode, for one)
+    otherwise reads the real install's config.json, so a setting the owner
+    changes in the console (Tidy: Ask) failed four drain tests. Tests that
+    need a home still set their own; this only replaces the real one. The
+    eval baselines under tests/eval read the real store on purpose (read-only).
+    """
+    if request.node.path.parent.name == "eval":
+        yield
+        return
+    monkeypatch.setenv("MCPBRAIN_HOME", str(tmp_path_factory.mktemp("home")))
+    yield
+
+
+@pytest.fixture(autouse=True)
 def _clear_orgs_cache():
     """Clear the lru_cache on taxonomy_from_config before each test.
 

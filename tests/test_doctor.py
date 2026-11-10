@@ -481,3 +481,16 @@ def test_no_google_unavailable_line_when_null():
         daemon_status={"watchdog_exits": 0, "watchdog_limit_reached": False,
                        "google_unavailable": None})
     assert "unreachable since" not in msg
+
+
+def test_sync_queue_warns_only_once_the_oldest_item_has_waited_an_hour():
+    from datetime import datetime, timezone
+    now = datetime(2026, 11, 10, 4, 0, tzinfo=timezone.utc)
+    assert doctor.sync_queue_line(0, None, now=now).startswith("✅")
+    young = doctor.sync_queue_line(8, "2026-11-10T03:58:30.1+00:00", now=now)
+    assert young.startswith("✅") and "8 pending, oldest 1 min old" in young
+    old = doctor.sync_queue_line(8, "2026-11-10T01:30:00+00:00", now=now)
+    assert old.startswith("⚠️") and "oldest 2 h old" in old
+    naive = doctor.sync_queue_line(3, "2026-11-08T04:00:00", now=now)
+    assert naive.startswith("⚠️") and "oldest 2 days old" in naive
+    assert doctor.sync_queue_line(2, "garbage", now=now).startswith("⚠️")
