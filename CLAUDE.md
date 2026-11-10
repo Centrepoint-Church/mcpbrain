@@ -550,8 +550,21 @@ Found by auditing why chunks exceeded the embed window and why one owner stayed 
 
 ## Shipping caveats
 
-- **Current state (2026-11-09): the four version files (+ `uv.lock`) are at
-  `0.7.146`, RELEASED** — source `012f321f`, gh-pages `7f60a6dd`, plugin `6b0886e`;
+- **Current state (2026-11-10): the four version files (+ `uv.lock`) are at
+  `0.7.147`, RELEASED** — source `b42b1a77`, gh-pages `d42c044c`, plugin `46b58c0`;
+  index serves only `mcpbrain-0.7.147-py3-none-any.whl`. Three fixes on 0.7.146:
+  (1) consolidation never graduates a note holding personal identifiers
+  (`personal_data.find`: personal mailboxes, AU phones, dates of birth, booking
+  refs), and records-health flags memory files that hold them instead of the
+  borrowed 180-line MEMORY.md count (nothing truncates that file); (2) every part
+  of a split thread gets its own unit id (they shared one and overwrote each
+  other, so only part k of k was queued) and prepare_units skips threads with a
+  queued unit (a rewrite under a worker made drain mark the wrong part's chunks);
+  (3) `_strip_preamble` drops the model's task commentary from summaries. The
+  Pages deploy timed out in GitHub's queue once ("Deployment failed, try again
+  later") and succeeded on `gh run rerun --failed`. Fleet resolve matched the
+  0.7.146 set except transitive `filelock` 4.2.10.
+- **Previous (2026-11-09): `0.7.146`, RELEASED** — source `012f321f`, gh-pages `7f60a6dd`, plugin `6b0886e`;
   index serves only `mcpbrain-0.7.146-py3-none-any.whl`. **0.7.146 ships the console
   redesign** (Overview, Settings, Graph, Setup; spec
   `docs/superpowers/specs/2026-11-06-console-redesign-design.md`, plans
