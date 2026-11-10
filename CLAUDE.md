@@ -551,8 +551,15 @@ Found by auditing why chunks exceeded the embed window and why one owner stayed 
 ## Shipping caveats
 
 - **Current state (2026-11-10): the four version files (+ `uv.lock`) are at
-  `0.7.147`, RELEASED** — source `b42b1a77`, gh-pages `d42c044c`, plugin `46b58c0`;
-  index serves only `mcpbrain-0.7.147-py3-none-any.whl`. Three fixes on 0.7.146:
+  `0.7.148`, RELEASED** — source `614d0af6`, gh-pages `1d53a35c`, plugin `75b4220`;
+  index serves only `mcpbrain-0.7.148-py3-none-any.whl`. One change on 0.7.147:
+  the consolidator replies with a JSON card (note, title, description,
+  `standing`) and only a `standing` note graduates to memory/*.md, under the
+  model's title; a plain-text reply is kept as a note and never graduates;
+  ask-first proposals carry the verdict (proposals queued earlier never
+  graduate). Fleet dependency set unchanged from 0.7.147.
+- **Previous (2026-11-10): `0.7.147`, RELEASED** — source `b42b1a77`, gh-pages
+  `d42c044c`, plugin `46b58c0`. Three fixes on 0.7.146:
   (1) consolidation never graduates a note holding personal identifiers
   (`personal_data.find`: personal mailboxes, AU phones, dates of birth, booking
   refs), and records-health flags memory files that hold them instead of the
