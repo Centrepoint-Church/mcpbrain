@@ -70,9 +70,8 @@ def test_daemon_schtasks_runs_shim_via_wscript():
     assert "cmd /c" not in tr and "set MCPBRAIN_HOME=" not in tr
 
 
-def test_cadence_and_beacon_shims_carry_home():
-    for fn in (agents.prune_schtasks_args, agents.health_schtasks_args,
-               agents.fleet_beacon_schtasks_args):
+def test_cadence_shims_carry_home():
+    for fn in (agents.prune_schtasks_args, agents.health_schtasks_args):
         a = fn(mcpbrain_bin=r"C:\T\mcpbrain.exe", home=r"C:\Users\jo\mcpbrain")
         assert _flag_value(a, "/tr").lower().startswith("wscript")
     # The shim content for a cadence carries MCPBRAIN_HOME + the right subcommand.

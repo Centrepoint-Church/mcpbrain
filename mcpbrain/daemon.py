@@ -472,6 +472,11 @@ _CADENCE_PASSES: tuple[CadencePass, ...] = (
     # is the one least likely to have anyone watching the disk.
     CadencePass("log_cap", "_log_cap_interval_s", "_last_log_cap",
                 "_run_log_cap", needs_configured=False, needs_backfill_clear=False),
+    # The fleet health beacon (version + connection states) for `mcpbrain
+    # fleet-report`. Written by the daemon so every install sends one; the old
+    # separate launchd job was only installed when fleet.folder_id was set.
+    CadencePass("fleet_beacon", "_fleet_beacon_interval_s", "_last_fleet_beacon",
+                "_run_fleet_beacon", needs_backfill_clear=False),
     CadencePass("communities", "_communities_interval_s", "_last_communities",
                 "_run_communities"),
     CadencePass("lint", "_lint_interval_s", "_last_lint", "_run_lint"),
@@ -1348,6 +1353,10 @@ class Daemon:
         # cheap — a stat() per file unless one is actually over the cap.
         self._log_cap_interval_s: float | None = 3600.0
         self._last_log_cap = None
+        # Hourly fleet beacon, ON by default like log_cap: an install nobody can
+        # see is the one whose problems go unnoticed.
+        self._fleet_beacon_interval_s: float | None = 3600.0
+        self._last_fleet_beacon = None
         self._pause = threading.Event()   # set == paused
         self._stop = threading.Event()    # set == stop the loop
         self._wake = threading.Event()    # set == run a cycle now
@@ -3571,6 +3580,25 @@ class Daemon:
             return None
         return {"freed_bytes": freed} if freed else None
 
+    def _run_fleet_beacon(self) -> dict | None:
+        """Upload this install's health beacon to the fleet folder (hourly).
+
+        fleet.write_beacon resolves the folder (config, else tenant), skips
+        when there is none, and swallows Drive errors. With no Drive service
+        yet and Google services retrying, the pass stays due.
+        """
+        if not self._is_due("_fleet_beacon_interval_s", "_last_fleet_beacon"):
+            return None
+        svc = (self.ensure_services() or {}).get("drive_service")
+        if svc is None:
+            if not self._google_services_pending():
+                self._last_fleet_beacon = self._clock()
+            return {"fleet_beacon": "no_drive"}
+        self._last_fleet_beacon = self._clock()
+        from mcpbrain import fleet
+        fleet.write_beacon(str(app_dir()), svc)
+        return {"fleet_beacon": "written"}
+
     def _run_verify(self) -> dict | None:
         """Cadence-gated connection verification. Called by the dispatch table
         and directly by maybe_verify_connections."""
@@ -5677,11 +5705,10 @@ def backup_failures(home) -> int:
 def write_daemon_heartbeat(home) -> None:
     """Persist the daemon's last-cycle timestamp to ``daemon_heartbeat.json``.
 
-    The fleet beacon is written by a SEPARATE process (the hourly
-    ``mcpbrain fleet-report --beacon`` job), so without this it could only report
-    cached probe state — a dead daemon would still look healthy. This file is the
-    daemon's own liveness signal: the beacon reads it so the fleet report can
-    distinguish "daemon alive" from "beacon job alive" from "offboarded".
+    The fleet beacon reads it so the report can tell a cycling daemon from one
+    that is wedged but still answering (the beacon pass runs on the maintenance
+    thread, not the cycle thread), and older installs whose beacon still comes
+    from a separate `fleet-report --beacon` job from a dead daemon.
     """
     from datetime import datetime, timezone
     try:

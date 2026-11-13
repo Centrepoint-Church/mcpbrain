@@ -496,3 +496,40 @@ def test_list_all_passes_num_retries():
     fleet._list_all(_FakeDriveService(), q="x", fields="x")
 
     assert calls == [fleet._NUM_RETRIES]
+
+
+def _tenant_with_folder(tmp_path, monkeypatch, folder_id):
+    from mcpbrain import tenant
+    prof = tmp_path / "tenant.json"
+    prof.write_text(json.dumps({"tenant_id": "t", "display_name": "T",
+                                "oauth_project_id": "p", "marketplace_owner": "o",
+                                "marketplace_repo": "r", "marketplace_name": "n",
+                                "fleet_folder_id": folder_id}))
+    monkeypatch.setenv("MCPBRAIN_TENANT", str(prof))
+    tenant._clear_cache()
+
+
+def test_write_beacon_falls_back_to_the_tenant_fleet_folder(tmp_path, monkeypatch):
+    """No install sets fleet.folder_id at setup, so without this fallback no
+    beacon was written after 2026-06-18 and nobody could see fleet versions."""
+    monkeypatch.setenv("MCPBRAIN_HOME", str(tmp_path))
+    from mcpbrain import config, probes
+    config.write_config(str(tmp_path), {"owner_email": "dana@northgatetrust.org"})
+    _tenant_with_folder(tmp_path, monkeypatch, "TENANT_FLEET")
+    monkeypatch.setattr(probes, "all_connections", lambda home, store=None: {})
+    store = {"listed": []}
+    fleet.write_beacon(str(tmp_path), _FakeDrive(store))
+    assert store["created"][0]["body"]["parents"] == ["TENANT_FLEET"]
+
+
+def test_write_beacon_skips_when_no_folder_resolves(tmp_path, monkeypatch):
+    monkeypatch.setenv("MCPBRAIN_HOME", str(tmp_path))
+    from mcpbrain import config
+    config.write_config(str(tmp_path), {"owner_email": "dana@northgatetrust.org"})
+    _tenant_with_folder(tmp_path, monkeypatch, "")
+
+    class _Boom:
+        def files(self):
+            raise AssertionError("no folder: Drive must not be touched")
+
+    fleet.write_beacon(str(tmp_path), _Boom())

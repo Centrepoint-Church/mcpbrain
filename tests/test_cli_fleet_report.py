@@ -1,7 +1,40 @@
 """`mcpbrain fleet-report` dispatch + behaviour."""
+import json
+
 import pytest
 
 from mcpbrain import cli
+
+
+@pytest.fixture(autouse=True)
+def _no_tenant_fleet_folder(tmp_path, monkeypatch):
+    """Tests here control the fleet folder through config; the build's own
+    tenant profile must not supply one behind their back."""
+    from mcpbrain import tenant
+    prof = tmp_path / "tenant.json"
+    prof.write_text(json.dumps({"tenant_id": "t", "display_name": "T",
+                                "oauth_project_id": "p", "marketplace_owner": "o",
+                                "marketplace_repo": "r", "marketplace_name": "n",
+                                "fleet_folder_id": ""}))
+    monkeypatch.setenv("MCPBRAIN_TENANT", str(prof))
+    tenant._clear_cache()
+    yield
+    tenant._clear_cache()
+
+
+def test_fleet_report_uses_the_tenant_fleet_folder(tmp_path, monkeypatch, capsys):
+    monkeypatch.setenv("MCPBRAIN_HOME", str(tmp_path))
+    from mcpbrain import config, fleet, tenant
+    config.write_config(str(tmp_path), {})
+    (tmp_path / "tenant.json").write_text(json.dumps({
+        "tenant_id": "t", "display_name": "T", "oauth_project_id": "p",
+        "marketplace_owner": "o", "marketplace_repo": "r", "marketplace_name": "n",
+        "fleet_folder_id": "TENANT_FLEET"}))
+    tenant._clear_cache()
+    monkeypatch.setattr("mcpbrain.fleet_cli._build_drive_service", lambda: "SVC")
+    monkeypatch.setattr(fleet, "write_report", lambda home, svc: None)
+    cli.main(["fleet-report"])
+    assert "TENANT_FLEET" in capsys.readouterr().out
 
 
 def test_fleet_report_not_configured_exits_1(tmp_path, monkeypatch, capsys):
@@ -11,7 +44,7 @@ def test_fleet_report_not_configured_exits_1(tmp_path, monkeypatch, capsys):
     with pytest.raises(SystemExit) as ei:
         cli.main(["fleet-report"])
     assert ei.value.code == 1
-    assert "fleet.folder_id not set" in capsys.readouterr().out
+    assert "no fleet folder" in capsys.readouterr().out
 
 
 def test_fleet_report_writes_report_and_prints_url(tmp_path, monkeypatch, capsys):

@@ -26,8 +26,9 @@ def main(argv=None) -> None:
                     help="write this install's health beacon (used by the hourly cadence)")
     args = ap.parse_args(argv)
 
+    from mcpbrain.fleet_storage import fleet_folder_id
     home = str(config.app_dir())
-    folder_id = (config.read_config(home).get("fleet") or {}).get("folder_id")
+    folder_id = fleet_folder_id(home)       # config, else this build's tenant
     if not folder_id:
         # --beacon runs on an hourly timer. If fleet was never configured (or was
         # cleared), that is a benign no-op, not an error — exit 0 so an orphaned
@@ -35,7 +36,8 @@ def main(argv=None) -> None:
         # path (no --beacon) still tells the human why there's nothing to show.
         if args.beacon:
             return
-        print("fleet.folder_id not set — run mcpbrain setup to configure.")
+        print("no fleet folder: set fleet.folder_id, or use a build whose tenant "
+              "profile names one.")
         raise SystemExit(1)
 
     svc = _build_drive_service()

@@ -198,9 +198,10 @@ def write_beacon(home, drive_service) -> None:
     """
     try:
         from mcpbrain import __version__, config, probes
-        folder_id = (config.read_config(home).get("fleet") or {}).get("folder_id")
+        from mcpbrain.fleet_storage import fleet_folder_id
+        folder_id = fleet_folder_id(home)   # config, else this build's tenant
         if not folder_id:
-            return  # fleet not configured -> silently skip
+            return  # no fleet for this build -> silently skip
         email = config.owner_email(home)
         if not email:
             return
