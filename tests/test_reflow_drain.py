@@ -563,18 +563,26 @@ class E:
 d._get_embedder = lambda: E()
 mode = {mode!r}
 args = [a for a in sys.argv[1:] if a not in ("-I", {script!r})]
+def chatter():
+    # Output written by the REAL CLI's run into the dead terminal. It must be
+    # inside d._run_cli (where the CLI guards stdout), not before it: a bare
+    # print here dies on EPIPE on Linux before the store check ever runs.
+    for _ in range(200):
+        print("progress line that must not crash a dead terminal")
 if "--yes" in args:
     print("DRAIN-RUNNING", flush=True)
     time.sleep(0.8)                      # the terminal goes away here
     if mode == "integrity":
-        d._checks = lambda store, home: {{"integrity_check": ["bad index"],
-                                          "foreign_key_check": 0, "rebuilt_store": True}}
+        def bad_checks(store, home):
+            chatter()
+            return {{"integrity_check": ["bad index"], "foreign_key_check": 0,
+                     "rebuilt_store": True}}
+        d._checks = bad_checks
     elif mode == "malformed":
         def boom(*a, **k):
+            chatter()
             raise sqlite3.DatabaseError("database disk image is malformed")
         d.drain = boom
-    for _ in range(200):
-        print("progress line that must not crash a dead terminal")
 d._run_cli(args)
 """
 
