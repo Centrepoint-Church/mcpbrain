@@ -66,6 +66,10 @@ jobs:
         # wizard HTML and the example OAuth client are inside it, so a missing
         # [tool.setuptools.package-data] block is a hard CI failure rather than
         # a silent broken install (the editable .venv install hides this).
+        # The REAL OAuth client is tenant data (gitignored since 2026-09-09,
+        # copied in by `bin/tenant.py use`; bin/release.py refuses to build
+        # without it), so a wheel built from this public checkout must NOT
+        # contain one. Requiring it here kept CI red from 2026-09-08.
         run: |
           uv build --wheel --out-dir dist
           uv run python - <<'PY'
@@ -82,8 +86,11 @@ jobs:
           print("HTML:", html)
           print("EXAMPLE:", example)
           print("CLIENT:", client)
-          if not (html and example and client):
+          if not (html and example):
               print("package data missing from wheel", file=sys.stderr)
+              sys.exit(1)
+          if client:
+              print("a public build must not contain the tenant OAuth client", file=sys.stderr)
               sys.exit(1)
           PY
 

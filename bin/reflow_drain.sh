@@ -58,6 +58,11 @@ say() {
     /bin/echo "$*" 2>/dev/null || true
 }
 
+# File size in bytes: BSD stat (macOS) or GNU stat (Linux, where CI runs).
+file_bytes() {
+    stat -f%z "$1" 2>/dev/null || stat -c%s "$1"
+}
+
 drain_running() {
     # The interpreter running THIS script with --yes -- never an editor
     # that merely has the file open.
@@ -170,9 +175,9 @@ fi
 say "no daemon process running."
 
 # 3. snapshot
-store_bytes=$(stat -f%z "$STORE")
+store_bytes=$(file_bytes "$STORE")
 if [ -f "$STORE-wal" ]; then
-    store_bytes=$((store_bytes + $(stat -f%z "$STORE-wal")))
+    store_bytes=$((store_bytes + $(file_bytes "$STORE-wal")))
 fi
 free_bytes=$(( $(df -k "$APP_DIR" | awk 'NR==2 {print $4}') * 1024 ))
 need=$(( store_bytes * 2 ))
@@ -189,7 +194,7 @@ if ! sqlite3 -readonly "$STORE" "VACUUM INTO '$snap_path'" || [ ! -s "$snap_path
     exit 1
 fi
 SNAP="$snap_path"
-say "snapshot: $SNAP ($(( $(stat -f%z "$SNAP") / 1048576 )) MB)"
+say "snapshot: $SNAP ($(( $(file_bytes "$SNAP") / 1048576 )) MB)"
 
 # 4. the drain. Signals now only get NOTED: the drain handles them itself and
 # its exit code (a store-check failure above all) must survive them.
