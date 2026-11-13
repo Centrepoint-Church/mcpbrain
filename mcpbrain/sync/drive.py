@@ -1042,9 +1042,15 @@ def handle_drive_item(service, store, item, *, folder_cache=None,
 def handle_shared_drive_item(service, store, item, *, fleet_storage, pin,
                              drive_id: str, contextual_retrieval: bool = False,
                              folder_cache: dict | None = None, report=None,
-                             bulk_section=None, skip_folders=frozenset()) -> None:
+                             bulk_section=None, skip_folders=frozenset()):
     """Work one queued Shared Drive item. Raises on failure so the loop
     backs it off.
+
+    ingest_cache.ImportDeferred (an in-flight enrichment unit names the file,
+    or the reflow is halted) is not the file's failure: the row waits
+    reflow_handler.DEFER_DELAY_S and returns queue.DEFER, attempts untouched.
+    Counted as a failure it climbed the 24 h backoff (live, 2026-11-12) and
+    showed in doctor as a failing item.
 
     The queue row (from discover_shared_drive) carries only ref_id/version/
     event/modified_at, not the full file metadata _cache_first_extract_one
@@ -1086,11 +1092,21 @@ def handle_shared_drive_item(service, store, item, *, fleet_storage, pin,
         fields="id,name,mimeType,modifiedTime,version,parents,md5Checksum,size,owners,"
                "appProperties"
     ).execute(num_retries=_NUM_RETRIES)
-    processed, miss = _cache_first_extract_one(
-        service, store, fleet_storage, drive_id, fmeta, pin,
-        contextual_retrieval=contextual_retrieval, bulk_section=bulk_section,
-        folder_cache=folder_cache if folder_cache is not None else {},
-        report=report, skip_folders=skip_folders)
+    try:
+        processed, miss = _cache_first_extract_one(
+            service, store, fleet_storage, drive_id, fmeta, pin,
+            contextual_retrieval=contextual_retrieval, bulk_section=bulk_section,
+            folder_cache=folder_cache if folder_cache is not None else {},
+            report=report, skip_folders=skip_folders)
+    except ingest_cache.ImportDeferred as exc:
+        from datetime import datetime, timedelta, timezone
+        from mcpbrain.sync import queue
+        from mcpbrain.sync.reflow_handler import DEFER_DELAY_S
+        until = (datetime.now(timezone.utc).replace(tzinfo=None)
+                 + timedelta(seconds=DEFER_DELAY_S)).isoformat()
+        store.defer_sync_item(item.get("source", f"drive:{drive_id}"), fid, until)
+        log.info("drive: %s waits %ds: %s", fid, DEFER_DELAY_S, exc)
+        return queue.DEFER
     if miss is not None:
         file_id, content_hash = miss
         store.record_pending_publish(drive_id, file_id, content_hash)

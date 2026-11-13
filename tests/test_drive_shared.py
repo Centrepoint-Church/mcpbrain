@@ -325,3 +325,29 @@ def test_handle_shared_drive_item_still_propagates_orphan_error(tmp_path, monkey
         handle_shared_drive_item(svc, s, {"ref_id": "FID", "version": "", "event": "upsert",
                                           "modified_at": "2026-05-01T10:00:00Z"},
                                  fleet_storage=fs, pin=PIN, drive_id="D1")
+
+
+def test_a_deferred_import_waits_without_counting_a_failed_attempt(tmp_path, monkeypatch):
+    """An in-flight enrichment unit naming the file is not the file's fault:
+    the row must wait a short, fixed delay, not climb the failure backoff
+    (live 2026-11-12: three PDFs reached attempt 5 and a 24 h wait this way)."""
+    from datetime import datetime, timedelta, timezone
+    from mcpbrain.sync.queue import work_queue
+    from mcpbrain.sync.reflow_handler import DEFER_DELAY_S
+    s, fs = _store(tmp_path), LocalDirFleetStorage(tmp_path / "drv")
+    fm = _gdoc_change("FID")["file"]
+    svc = FakeDriveService(files_by_id={"FID": fm}, exports={"FID": b"body"})
+    monkeypatch.setattr(ingest_cache, "try_import", lambda *a, **k: (_ for _ in ()).throw(
+        ingest_cache.ImportDeferred("unit in flight")))
+    s.enqueue_items([{"ref_id": "FID", "version": "1", "event": "upsert",
+                      "modified_at": "2026-05-01T10:00:00Z"}], source="drive:D1")
+    before = datetime.now(timezone.utc).replace(tzinfo=None)
+    out = work_queue(s, handlers={"drive": lambda it: handle_shared_drive_item(
+        svc, s, it, fleet_storage=fs, pin=PIN, drive_id="D1")}, limit=10)
+    assert out == {"processed": 0, "failed": 0}
+    with s._connect() as db:
+        row = dict(db.execute("SELECT attempts, last_error, next_attempt_at "
+                              "FROM sync_queue WHERE ref_id='FID'").fetchone())
+    assert row["attempts"] == 0 and not row["last_error"]
+    wait = datetime.fromisoformat(row["next_attempt_at"]) - before
+    assert timedelta(seconds=DEFER_DELAY_S - 60) <= wait <= timedelta(seconds=DEFER_DELAY_S + 60)
