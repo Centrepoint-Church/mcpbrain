@@ -907,7 +907,7 @@ def integrity_line(home, *, check=None) -> str:
         more = f" (+{len(problems) - _INTEGRITY_SHOWN} more of {len(problems)})"
     return (f"❌ {'Integrity':<16} {len(problems)} problem(s): {shown}{more} — "
             f"content may still be intact; check per-table counts before restoring, "
-            f"and see CLAUDE.md's store-corruption section")
+            f"and see the store-corruption incident in docs/HISTORY.md")
 
 
 _REFLOW_SEED_BLOCKED = ("no_recent_backup", "disabled", "error")

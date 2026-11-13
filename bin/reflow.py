@@ -10,7 +10,7 @@ daemon log and the failing item's last_error before resuming.
 `status` NEVER writes and never creates anything: it opens the store
 READ-ONLY and does not call store.init(). The store this points at is
 normally the LIVE, daemon-owned store -- this repo had a real corruption
-incident (2026-09-10, see CLAUDE.md) from an attended script writing to the
+incident (2026-09-10, see docs/HISTORY.md) from an attended script writing to the
 store concurrently with the daemon. `resume --yes` performs exactly one
 write (clearing the halt cursor) and also never calls init().
 """

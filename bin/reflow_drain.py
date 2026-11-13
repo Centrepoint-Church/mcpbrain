@@ -25,7 +25,7 @@ cycle -- except a changed SHARED Drive file, which needs that drive's fleet
 storage and pin: its row is deferred (no attempt spent) for the daemon.
 
 Why every gate below exists: 2026-09-10, two concurrent writers physically
-corrupted this store (CLAUDE.md, "STORE CORRUPTION INCIDENT"). So this:
+corrupted this store (docs/HISTORY.md, "STORE CORRUPTION INCIDENT"). So this:
   * refuses while any daemon is alive (launchd job loaded, or a
     `mcpbrain daemon` process) and re-checks every RECHECK_EVERY owners,
     stopping cleanly (exit 4) if one appears;

@@ -78,7 +78,7 @@ def test_dashboard_stats_passes_through_reflow_block(tmp_path):
 
 # -- bin/reflow.py: `status` must never write, and must never create the ----
 # -- store or its tables -- see the 2026-09-10 sync_cursors corruption ------
-# -- incident this guards against (CLAUDE.md). ------------------------------
+# -- incident this guards against (docs/HISTORY.md). ------------------------------
 
 def test_status_never_writes_to_the_store(tmp_path):
     s = Store(tmp_path / "brain.sqlite3", dim=4)

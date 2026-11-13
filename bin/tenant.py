@@ -38,7 +38,7 @@ if str(_REPO) not in sys.path:
 #
 # tenant_people.json is the same idea applied to PERSON names rather than org
 # identifiers: a real person's surname leaked into this PUBLIC repo's tests/ for
-# months (see CLAUDE.md for the incident) because the tenant-literal guard only ever checked org/
+# months (see docs/HISTORY.md for the incident) because the tenant-literal guard only ever checked org/
 # infrastructure identifiers, never staff names — and a guard that enumerated real
 # names to check for their own absence would just reintroduce the leak it exists to
 # prevent. So the forbidden-names list itself lives in the private tenant repo, is
