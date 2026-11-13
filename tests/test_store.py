@@ -488,9 +488,8 @@ def test_unenriched_chunks_never_returns_a_digest_chunk(tmp_path):
     body = the synthesized "People: .../Actions: .../Topics: ..." text — hands
     the model its own PRIOR SUMMARY presented as if it were another email in the
     thread. That risks re-deriving near-duplicate entities that the anti-
-    hallucination grounding check (_name_grounded) cannot catch, because the
-    digest text trivially contains the exact names being "grounded" against
-    itself.
+    hallucination check could catch, because the digest text trivially contains
+    the exact names being checked against itself.
     """
     s = _store(tmp_path)
     s.upsert_chunk("gmail-m1-body-0", "real message content", "h1",

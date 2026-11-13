@@ -85,73 +85,6 @@ def _give_up_or_bump(store, doc_ids, summary) -> tuple[bool, int | None]:
         return False, None
 
 
-def _name_grounded(name: str, source_lower: str) -> bool:
-    """True if an extracted name is plausibly grounded in the source text.
-
-    Delegates to chunking.name_in_text, which prepare's context scoping also
-    uses in the opposite direction.
-    """
-    from mcpbrain.chunking import name_in_text
-    return name_in_text(name, source_lower)
-
-
-def _grounding_filter(extraction: dict) -> tuple[dict, int]:
-    """Remove entities/relations with no lexical anchor in the source text (Q2).
-
-    Deterministic, no LLM (mcpbrain is subscription-only; a per-triple LLM check
-    would be the stronger but far costlier option — see #9). An entity is kept if
-    its name is grounded (see _name_grounded); a relation is kept if BOTH endpoint
-    names are grounded. Returns (filtered_extraction, dropped_count); input is not
-    mutated.
-    """
-    source = " ".join(
-        (m.get("text") or m.get("body") or "")
-        for m in (extraction.get("messages") or [])
-    ).lower().strip()
-    if not source:
-        # .strip() is load-bearing, not tidying. Pushed payloads carry message
-        # METADATA only (message_id/sender/date/subject) — bodies stopped being
-        # echoed back by the model in 0.7.72 — so every message contributes "".
-        # For a single-message thread " ".join([""]) == "" and this guard fires
-        # correctly; for TWO messages it is " ", which is truthy, so the guard
-        # was skipped and every name was then judged ungrounded against a lone
-        # space. Measured on real pushed payloads: entities 5->0, 6->0, i.e. the
-        # whole extraction discarded for any multi-message thread. Stripping
-        # makes the no-op uniform.
-        #
-        # This keeps the flag SAFE, not useful: with no body text there is
-        # nothing to ground against, so schema_grounding is inert either way.
-        # Making it do real work needs drain to re-hydrate the source text from
-        # the store (it has `store` and doc_ids_for_messages right here) before
-        # calling this — that is the actual fix, and it is not this one.
-        return extraction, 0
-
-    out = dict(extraction)
-    dropped = 0
-
-    ents = out.get("entities")
-    if isinstance(ents, list):
-        kept = [e for e in ents
-                if isinstance(e, dict) and _name_grounded(e.get("name") or "", source)]
-        dropped += len(ents) - len(kept)
-        out["entities"] = kept
-
-    rels = out.get("relations")
-    if isinstance(rels, list):
-        kept = []
-        for r in rels:
-            if not isinstance(r, dict):
-                kept.append(r)
-                continue
-            if (_name_grounded(r.get("source_name") or "", source)
-                    and _name_grounded(r.get("target_name") or "", source)):
-                kept.append(r)
-            else:
-                dropped += 1
-        out["relations"] = kept
-
-    return out, dropped
-
 # Per-key drainers for optional inbox blocks. Each drainer(store, inbox_obj) called
 # when the key is present; failures are isolated (log + continue). Registered by
 # block modules at import time.
@@ -618,14 +551,6 @@ def drain(store, *, home=None, apply=None, embedder=None, budget=None,
                                f"'unknown'. If this is a real organisation, add it "
                                f"to the orgs list in config.json.",
                         severity="info")
-                # Q2 grounding check: drop entities/relations not found in source text.
-                if config.schema_grounding_enabled(str(home_dir)):
-                    extraction, grounding_dropped = _grounding_filter(extraction)
-                    if grounding_dropped:
-                        log.debug("drain: grounding filter dropped %d item(s) on thread %s",
-                                  grounding_dropped, thread_id)
-                        summary["dropped_items"] = summary.get("dropped_items", 0) + grounding_dropped
-
                 # Recover the chunks this extraction covers, part-precise when a
                 # seam-split part's part_doc_ids are present, else by message id
                 # (NOT by a thread-wide query). Marking only the chunks actually

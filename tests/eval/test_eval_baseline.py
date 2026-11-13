@@ -64,7 +64,7 @@ def test_recall_and_mrr_above_floor(fixture_store):
 # see gold_eval._doc_key) because mcpbrain re-chunks independently.
 #
 # PRODUCTION PATH (0.7.72): importance_recall ON (three-axis ranker) and cold chunks
-# are NO LONGER excluded from recall (recall_excludes_cold default OFF). Cold-exclusion
+# are NO LONGER excluded from recall. Cold-exclusion
 # was decoupled from tiered_memory after a salience backfill grew the cold set to ~40%
 # of the corpus and HALVED gold recall@10 (0.750→0.350): cold-marked but genuinely
 # relevant docs fell out of recall entirely. The salience gate is an enrichment-cost
@@ -86,7 +86,7 @@ def test_gold_recall_floor():
     """Gold set: recall@10 / MRR over COVERABLE cases must clear the floor.
 
     Measures the true production path (0.7.72): cold chunks INCLUDED
-    (recall_excludes_cold default OFF) + three-axis ranker (importance_recall ON).
+    (never excluded) + three-axis ranker (importance_recall ON).
     Skips honestly when there is no real store (CI / fresh install) or when too few
     gold cases are coverable against the current corpus (mid-backfill).
     """

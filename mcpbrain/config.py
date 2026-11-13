@@ -126,7 +126,7 @@ def anarlog_db_path(home) -> str | None:
     that is the user's decision to make explicitly, not something the mere
     presence of another app on disk should decide for them; this repo's own
     precedent is that new sources/features default OFF pending explicit
-    config (see salience_gate_enabled, embed_skip_tabular, etc.).
+    config (see salience_gate_enabled, etc.).
 
     Set `"anarlog": {"enabled": true}` in `<home>/config.json` to opt in. With
     `anarlog.enabled` absent or false, this returns None WITHOUT touching
@@ -172,56 +172,6 @@ def salience_gate_enabled(home) -> bool:
     chunks to re-queue them.
     """
     return bool(read_config(home).get("salience_gate", True))
-
-
-def embed_skip_tabular_enabled(home) -> bool:
-    """Whether content_subtype=='table' chunks skip the dense-vector embedder.
-
-    When True, index_pending never calls embed_passages for table chunks --
-    they still get full FTS indexing (write_embedding(rowid, None) writes
-    the FTS row regardless), only the dense vector is skipped. Raw
-    markdown/table embeddings underperform schema-enriched row sentences for
-    retrieval (RAG-chunking research, 2026-08), and this corpus's own
-    salience gate already treats tabular content as low-signal for
-    graph-extraction -- this extends that same judgment to dense embedding.
-
-    Default: FALSE, and **the recommendation is to leave it off permanently as
-    written** -- not "off pending validation". Investigated end-to-end
-    2026-08-26; do not re-litigate without reading this.
-
-    1. It is the WRONG LEVER for the goal it is usually reached for. Keeping
-       tabular content out of ENTITY EXTRACTION is already done, completely, by
-       the salience gate: on the author's live store all 62,878 table chunks are
-       `enrich_state='cold'` and `should_enrich()` returns False for
-       content_subtype=='table' from any source. This flag does not touch
-       enrichment. It removes the dense VECTOR -- exactly the half that is
-       wanted -- from 36.1% of the corpus, leaving those chunks contributing
-       nothing to the graph AND barely reachable by search.
-    2. Its original gate ("validated on the gold-eval harness") is UNMEETABLE.
-       The gold set has 0 tabular cases out of 35 expected chunks (19 gmail,
-       16 gdrive prose), so the harness reports "no change" (0.850 -> 0.850)
-       whatever this flag does. A null result there is not evidence.
-    3. Measured harm, manually. Query "Music Academy actual versus budget":
-       the MUSIC SCHOOL/BUDGET sheet ranks #2 with its dense vector and is
-       ABSENT from the top 10 without it, replaced by a 2021 board minute
-       mentioning "Music Books". Specific line-item lookup -- the query class
-       tables exist to answer -- is where the loss lands. Literal-token queries
-       survive keyword-only (10/10 sampled) and paraphrase queries never reach
-       tables in either condition, which is why cruder tests came back clean.
-
-    The RESEARCH BEHIND IT IS STILL SOUND: raw pipe-delimited markdown embeds
-    poorly next to schema-enriched row sentences. The useful version of this
-    work is to CHANGE HOW tabular chunks are embedded ("Music Academy, actual
-    YTD $12k, budget $25.2k") rather than to stop embedding them. That is a
-    feature, not a flag flip, and it is the thing worth building.
-
-    Resolved through `fleet_flag`, not a bare read_config: the whole point of
-    shipping OFF is that it gets flipped ON once the gold harness clears it,
-    and going through the org overlay means that flip is an org-config.json
-    edit ({"flags": {"embed_skip_tabular": true}}) rather than another
-    release -- with the same local-False kill-switch every fleet flag has.
-    """
-    return bool(fleet_flag(home, "embed_skip_tabular", False))
 
 
 def enrich_org_default_enabled(home) -> bool:
@@ -326,40 +276,6 @@ def salience_require_drive_mention(home) -> bool:
     return bool(read_config(home).get("salience_require_drive_mention", False))
 
 
-def schema_grounding_enabled(home) -> bool:
-    """Whether extraction grounding check runs after sanitize (Q2).
-
-    When True, drain drops each extracted entity whose name has NO lexical anchor
-    in the source text — neither the full name as a substring NOR any distinctive
-    token (alphabetic, length >= 4). A relation is dropped unless both endpoint
-    names are grounded. The token path keeps correctly-NORMALISED names (e.g.
-    'Marcus Reyes' extracted from 'Dr Marcus') while rejecting names invented out
-    of nowhere. Deterministic — no LLM call (a per-triple LLM check would be
-    stronger but is deferred; see #9). Relation TYPES are constrained by
-    RELATION_TYPES in contract.py regardless of this flag.
-
-    Default: False. **Currently INERT — do not enable expecting it to work**
-    (investigated 2026-08-26).
-
-    _grounding_filter builds its source from extraction["messages"][].text/body,
-    but pushed payloads carry message METADATA only (message_id/sender/date/
-    labels/subject) — bodies stopped being echoed back by the model in 0.7.72
-    and nothing in drain re-hydrates them. There is nothing to ground against,
-    so the filter is a no-op.
-
-    Worse before 2026-08-26: for a MULTI-message thread " ".join(["", ""]) is
-    " ", which is truthy, so the empty-source guard was skipped and every name
-    was judged against a single space — measured on real pushed payloads,
-    entities 5->0 and relations 18->2, discarding whole extractions. drain.py
-    now .strip()s, making the no-op uniform and the flag SAFE but still useless.
-
-    To make it work, drain must re-hydrate source text from the store before
-    calling the filter — it already holds `store` and doc_ids_for_messages at
-    that exact call site. Enable via config 'schema_grounding': true.
-    """
-    return bool(read_config(home).get("schema_grounding", False))
-
-
 def importance_recall_enabled(home) -> bool:
     """Whether B3 three-axis recall (recency + importance) is active.
 
@@ -437,34 +353,12 @@ def tiered_memory_enabled(home) -> bool:
     Default: TRUE (shipped on in 0.7.65).
 
     NOTE: cold-tier EXCLUSION from recall used to be coupled to this flag. It was
-    decoupled in 0.7.72 into `recall_excludes_cold` (default OFF) after a salience
-    backfill grew the cold set and halved gold recall (0.75→0.35): the salience
-    gate is an enrichment-cost optimization, not a retrieval filter. Cold chunks
-    stay searchable by default; this flag now controls only the core-tier prepend.
+    decoupled in 0.7.72 after a salience backfill grew the cold set and halved
+    gold recall (0.75→0.35), and the opt-in to exclude cold was later removed:
+    the salience gate is an enrichment-cost optimisation, not a retrieval
+    filter. This flag controls only the core-tier prepend.
     """
     return bool(read_config(home).get("tiered_memory", True))
-
-
-def recall_excludes_cold(home) -> bool:
-    """Whether default recall EXCLUDES cold-tier chunks.
-
-    Default: FALSE — cold chunks stay searchable. The salience gate cold-marks
-    chunks to skip LLM graph-EXTRACTION (a cost optimization); it must not double
-    as a retrieval filter. When the salience backfill grew the cold set to ~40% of
-    the corpus, excluding cold from recall halved gold recall@10 (0.75→0.35) because
-    genuinely-relevant docs were cold-marked. Keeping cold in recall honors the
-    gate's original 'stays embedded/searchable' guarantee.
-
-    **DO NOT ENABLE.** It sits beside tiered_memory (default ON) and reads like
-    its natural companion; it is not. Cold-marking is an ENRICHMENT-cost
-    optimisation and must never double as a retrieval filter — on the author's
-    live store all 62,878 table chunks are cold precisely so they stay
-    SEARCHABLE while skipping extraction. Turning this on hides them.
-
-    Opt back in ONLY after a validated, narrower cold definition, and only with
-    a fresh gold measurement, via 'recall_excludes_cold': true.
-    """
-    return bool(read_config(home).get("recall_excludes_cold", False))
 
 
 def decay_enabled(home) -> bool:
@@ -500,17 +394,6 @@ def procedural_memory_enabled(home) -> bool:
     'procedural_memory': false in config.json to disable.
     """
     return bool(read_config(home).get("procedural_memory", True))
-
-
-def incremental_communities_enabled(home) -> bool:
-    """Whether B6 incremental community extension is used instead of full recompute.
-
-    When True, the community cadence calls extend_communities() which only
-    processes new entities (heuristic assignment) unless >15% of nodes are new,
-    in which case it falls back to a full Leiden recompute.
-    Default: False — safe rollout. Enable via config 'incremental_communities': true.
-    """
-    return bool(read_config(home).get("incremental_communities", False))
 
 
 def graduation_min_sources(home) -> int:
@@ -824,9 +707,8 @@ def tool_exec_in_daemon(home) -> bool:
     """Whether Store-touching MCP tools execute in the DAEMON rather than in the
     MCP server process.
 
-    Default **ON**, deliberately: ``schema_grounding`` and ``write_time_dedup``
-    have both sat OFF since they shipped because nothing ever exercised them, so
-    this is a KILL SWITCH (set ``"tool_exec_in_daemon": false`` locally, or
+    Default **ON**, deliberately: opt-in flags tend to sit OFF forever because
+    nothing exercises them, so this is a KILL SWITCH (set ``"tool_exec_in_daemon": false`` locally, or
     ``{"flags": {"tool_exec_in_daemon": false}}`` in the fleet's org-config.json)
     rather than an opt-in. The consequence is that the latency gate on the routed
     path is a hard pre-release gate -- there is no opt-in soak period.

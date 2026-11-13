@@ -124,10 +124,9 @@ class UnsupportedArchive(ValueError):
 def snapshot(store_path, out_path, *, home=None) -> Path:
     """Produce a single-file snapshot of the derived store at store_path.
 
-    `home`, if given, is forwarded to `_verify_artifact` so it can check
-    `embed_skip_tabular` instead of falling back to its conservative,
-    can't-check-the-flag exclusion. Optional and defaults to None so every
-    existing caller that doesn't have a home handy keeps working unchanged.
+    `home`, if given, is forwarded to `_verify_artifact` so it can narrow its
+    table-chunk exclusion (see there). Optional; None keeps the conservative
+    exclusion.
 
     Uses VACUUM INTO, which builds the output from one consistent read
     transaction. That choice is load-bearing in three ways:
@@ -214,40 +213,26 @@ def _verify_artifact(out_path, *, home=None) -> None:
     already be broken. A probe that raised there would block the very safety
     copy it exists to protect.
 
-    Table chunks are the only deliberately vector-less shape in the
-    codebase: with `embed_skip_tabular` on, index_pending calls
-    `store.write_embedding(rowid, None)` for them (FTS row written,
-    embedded=1 stamped, no vec_chunks insert), and
-    `bin/cleanup_tabular_vectors.py` deletes existing oversize table vectors
+    Table chunks are the only legitimately vector-less shape:
+    `bin/cleanup_tabular_vectors.py` deleted oversize table vectors
     outright while deliberately leaving embedded=1 so nothing re-queues
     them. Sampling the lowest rowids with no exclusion would eventually hit
     one of those and raise — re-creating the "backup upload failing" outage
     this spec set out to fix, and blocking the sweep that repairs the
     tabular chunks in the first place.
 
-    Excluding ALL table chunks unconditionally would be safe but overbroad:
-    reading `embed_skip_tabular` from `home` (when given) narrows the
-    exclusion to only the chunks that could plausibly be in a legitimate
-    vector-less state --
-      * every table chunk, if the flag is ON (the ongoing designed state), or
-      * only chunks still below CHUNKER_VERSION, if the flag is OFF (the
-        transient post-cleanup window before the version-bump sweep
-        re-renders and re-embeds them for real).
-    A table chunk already AT CHUNKER_VERSION with the flag OFF should have
-    gotten a real vector from index_pending same as any other chunk, so a
-    missing one there is genuine corruption and is not excluded.
-
-    `home=None` (the default, used by every caller that doesn't have one
-    handy, e.g. bin/repair.py's pre-apply safety snapshot when it can't
-    cheaply derive one) falls back to the fully unconditional exclusion —
-    the conservative, always-safe choice when the flag can't be checked.
+    Excluding ALL table chunks unconditionally would be safe but overbroad.
+    With `home` given, only table chunks still below CHUNKER_VERSION are
+    excluded (the window before the version-bump sweep re-renders and
+    re-embeds them); a table chunk AT CHUNKER_VERSION should have a real
+    vector like any other chunk, so a missing one there is corruption.
+    `home=None` keeps the fully unconditional exclusion.
     """
     exclude_current_version_tables = True
     current_version = None
     if home is not None:
-        from mcpbrain import config
         from mcpbrain.chunking import CHUNKER_VERSION
-        exclude_current_version_tables = config.embed_skip_tabular_enabled(home)
+        exclude_current_version_tables = False
         current_version = CHUNKER_VERSION
 
     db = _open_db(out_path, read_only=False)
@@ -649,7 +634,7 @@ def make_encrypted_snapshot(store_path, out_path, key: bytes, *,
     free-space check refuses outright rather than filling the disk part-way.
 
     `config_path` doubles as the source of `home` for `_verify_artifact`'s
-    `embed_skip_tabular` check (its parent directory) -- daemon.maybe_backup
+    table-chunk exclusion (its parent directory) -- daemon.maybe_backup
     already passes `config_path=str(Path(home)/"config.json")`, so no new
     parameter is needed to thread it through.
     """

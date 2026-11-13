@@ -85,10 +85,8 @@ _NAME_TOKEN_MIN = 4
 def name_tokens(name: str) -> list[str]:
     """Distinctive (>= 4 char) lowercase alphanumeric tokens of a name.
 
-    Shared by drain._name_grounded ("is this extracted name present in the
-    source?") and prepare's context scoping ("which known people does this unit
-    mention?"). Same heuristic run in opposite directions — one owner so they
-    cannot drift.
+    Used by prepare's context scoping ("which known people does this unit
+    mention?") via name_in_text and directly.
     """
     return [t for t in re.split(r"[^a-z0-9]+", (name or "").strip().lower())
             if len(t) >= _NAME_TOKEN_MIN]

@@ -91,7 +91,9 @@ def test_index_pending_prefix_gmail_contains_sender(tmp_path):
     assert "alice@example.org" in passage
 
 
-def test_index_pending_skips_embedder_for_table_chunks(tmp_path, monkeypatch):
+def test_index_pending_embeds_table_chunks_even_with_the_retired_skip_key(tmp_path, monkeypatch):
+    """embed_skip_tabular was removed (it cost tables their vectors and its
+    gate was unmeetable); a stale key left in a config.json must do nothing."""
     home = tmp_path / "home"
     home.mkdir()
     (home / "config.json").write_text('{"embed_skip_tabular": true}')
@@ -112,8 +114,6 @@ def test_index_pending_skips_embedder_for_table_chunks(tmp_path, monkeypatch):
     embedder = _FakeEmbedder()
     index_pending(store, embedder, home=str(home))
 
-    # Only the prose chunk's text ever reached the embedder.
     all_texts = [t for call in embedder.calls for t in call]
-    assert "prose text" in " ".join(all_texts) or any(
-        "prose text" in t for t in all_texts)
-    assert not any("table row text" in t for t in all_texts)
+    assert any("prose text" in t for t in all_texts)
+    assert any("table row text" in t for t in all_texts)

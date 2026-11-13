@@ -197,20 +197,6 @@ def test_run_analysis_filters_low_confidence(store, home_proc, monkeypatch):
 # Incremental communities
 # ---------------------------------------------------------------------------
 
-def test_extend_communities_no_data(store, tmp_path, monkeypatch):
-    """extend_communities on an empty store returns without crashing."""
-    from mcpbrain import communities
-
-    # Make sure incremental_communities is "enabled" flag-wise
-    home = str(tmp_path / "ic-home")
-    import os; os.makedirs(home)
-    (Path(home) / "config.json").write_text(json.dumps({"incremental_communities": True}))
-
-    result = communities.extend_communities(store, home)
-    # Should return something (dict or None), never raise
-    assert result is None or isinstance(result, dict)
-
-
 # ---------------------------------------------------------------------------
 # voice_auto_apply config flag (1d)
 # ---------------------------------------------------------------------------
@@ -303,23 +289,3 @@ def test_daemon_run_voice_analyse_skips_apply_when_flag_off(store, home_proc, mo
 
     daemon_mod.Daemon._run_voice_analyse(_FakeDaemon())
     assert not apply_called, "apply_suggestions called despite voice_auto_apply being off"
-
-
-def test_extend_communities_delegates_to_full_run_on_empty_graph(store, tmp_path, monkeypatch):
-    """extend_communities falls back to full run() when there are no prior communities."""
-    from mcpbrain import communities
-
-    home = str(tmp_path / "ic-home2")
-    import os; os.makedirs(home)
-    (Path(home) / "config.json").write_text(json.dumps({"incremental_communities": True}))
-
-    full_run_called = []
-
-    def fake_run(store, home=None):
-        full_run_called.append(True)
-        return {"communities": 0}
-
-    monkeypatch.setattr(communities, "run", fake_run)
-    communities.extend_communities(store, home)
-    # An empty graph should trigger full run or return gracefully
-    # Either outcome is acceptable (no error)

@@ -339,10 +339,7 @@ def _scoped_known_people(core: list[dict], index: dict, unit_text: str,
                 # one-token name is unaffected: all() over one element == any().
                 #
                 # This is deliberately STRICTER than chunking.name_in_text,
-                # which drain._name_grounded runs in the opposite direction
-                # (is an EXTRACTED name grounded in short source text?) where a
-                # false negative silently drops a real relation. Do not push
-                # this back into the shared primitive.
+                # which aliases use below. Do not push this into that primitive.
                 rank = 2
             elif any(name_in_text(a, hay) for a in _parse_aliases(p.get("aliases"))):
                 rank = 3

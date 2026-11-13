@@ -6,7 +6,7 @@ first (single-writer invariant) and confirm a recent verified backup. Nothing in
 the daemon's cadences calls this — same posture as bin/consolidate.py.
 
 Cold-marking is REVERSIBLE and is not deletion: a cold chunk stays embedded, in
-FTS, and in recall (recall_excludes_cold is off). Undo with
+FTS, and in recall (cold is never excluded). Undo with
 store.set_enrich_state(doc_ids, "").
 """
 import argparse

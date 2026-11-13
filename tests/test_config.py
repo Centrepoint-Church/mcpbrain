@@ -30,17 +30,6 @@ def test_spool_thread_cap_default_and_override(tmp_path):
     assert config.spool_thread_cap(home) == 1              # floored at 1
 
 
-def test_recall_excludes_cold_defaults_off(tmp_path):
-    # The salience gate is an enrichment-cost optimization, not a retrieval filter:
-    # cold chunks stay searchable by default. Excluding them from recall halved gold
-    # recall (0.75->0.35) once the salience backfill grew the cold set, so this is
-    # decoupled from tiered_memory and defaults OFF.
-    home = str(tmp_path)
-    assert config.recall_excludes_cold(home) is False          # default: cold stays in recall
-    write_config(home, {"recall_excludes_cold": True})
-    assert config.recall_excludes_cold(home) is True           # explicit opt-in
-
-
 def test_write_is_0600_and_roundtrips(tmp_path):
     write_config(str(tmp_path), {"gemini_key": "k", "backup": {"shared_drive_id": "d"}})
     p = tmp_path / "config.json"
@@ -115,10 +104,6 @@ def test_write_config_without_fchmod(tmp_path, monkeypatch):
     config.write_config(str(tmp_path), {"owner_full_name": "Nakia Busby"})
     got = config.read_config(str(tmp_path))
     assert got["owner_full_name"] == "Nakia Busby"
-
-
-def test_embed_skip_tabular_defaults_off(tmp_path):
-    assert config.embed_skip_tabular_enabled(str(tmp_path)) is False
 
 
 def test_importance_weights_defaults_and_override(tmp_path):

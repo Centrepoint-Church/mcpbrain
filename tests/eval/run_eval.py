@@ -258,7 +258,7 @@ def production_search_kwargs(home=None) -> dict:
 
     daemon.search applies the three-axis ranker weights from
     config.importance_weights and never excludes cold chunks
-    (recall_excludes_cold default OFF). gold_eval called with NO search_kwargs
+    (cold chunks are never excluded from recall). gold_eval called with NO search_kwargs
     measures the relevance-only RRF baseline (all weights 0) — which is NOT what
     any user experiences and materially understates MRR (~0.28 baseline vs ~0.56
     production on the live store). --gold and the migration gate must pass these

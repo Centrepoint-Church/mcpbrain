@@ -3962,8 +3962,7 @@ class Store:
         """Write a chunk's embedding and FTS row, stamping embedded=1.
 
         vector=None means "skip the dense vector, still write FTS and stamp
-        embedded=1" -- used for content_subtype=='table' chunks when
-        embed_skip_tabular is on. Every RETRIEVAL path that gates on
+        embedded=1". Every RETRIEVAL path that gates on
         embedded=1 handles that state correctly on its own: a join against
         vec_chunks simply returns nothing for that rowid, which is exactly
         the desired "never surfaces via dense search" behavior, while

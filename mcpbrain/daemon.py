@@ -2347,13 +2347,9 @@ class Daemon:
                     "decay_weight":      w["decay_weight"],
                     "recency_alpha":     w["recency_alpha"],
                 })
-            # Cold chunks stay searchable by default: the salience gate is an
-            # enrichment-cost optimization (skip graph-extraction), NOT a retrieval
-            # filter. Excluding cold from recall halved gold recall (0.75→0.35) once
-            # the salience backfill grew the cold set, so exclusion is now decoupled
-            # from tiered_memory and behind its own opt-in flag (default OFF).
-            if config.recall_excludes_cold(home):
-                search_kwargs["exclude_cold"] = True
+            # Cold chunks stay searchable: the salience gate is an enrichment-
+            # cost optimisation, NOT a retrieval filter. Excluding cold from
+            # recall halved gold recall (0.75→0.35); the opt-in was removed.
             # Q6: route() wraps hybrid_search with routing/CRAG/rerank when flags on
             if any([config.retrieval_routing_enabled(home),
                     config.retrieval_crag_enabled(home),
@@ -3678,14 +3674,8 @@ class Daemon:
             self._last_communities = now            # checked; graph idle → skip
             return {"communities": "skipped_no_change"}
         try:
-            home = str(app_dir())
-            # B6: use incremental extension when enabled; fall back to full run
-            if config.incremental_communities_enabled(home):
-                from mcpbrain.communities import extend_communities
-                summary = extend_communities(self._store, home)
-            else:
-                from mcpbrain.communities import run
-                summary = run(self._store)
+            from mcpbrain.communities import run
+            summary = run(self._store)
         except Exception as exc:  # noqa: BLE001 — communities must never crash the loop
             log.warning(
                 "community detection failed (will retry next due): %s", exc,

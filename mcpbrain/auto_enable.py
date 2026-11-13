@@ -19,7 +19,7 @@ Gated flags (chosen because their blocker is *data*, not algorithm or review):
 
 NOT gated here (their blocker is not data): Q6 rerank/routing/crag (algorithm —
 needs a cross-encoder), procedural_memory (needs human review of suggestions),
-schema_grounding / write_time_dedup / importance_llm (need a one-off validation).
+write_time_dedup / importance_llm (need a one-off validation).
 """
 from __future__ import annotations
 

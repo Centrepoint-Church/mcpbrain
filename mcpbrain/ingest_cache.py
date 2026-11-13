@@ -515,13 +515,10 @@ def _import_artifact(store, drive_id: str, art: CacheArtifact, pin,
     extraction = (art.enrich or {}).get("extraction") if apply_extraction else None
     if extraction:
         try:
-            from mcpbrain import contract, graph_write, config as _config
+            from mcpbrain import contract, graph_write
             clean, _ = contract.sanitize_batch({"extractions": [extraction]})
             cand = (clean.get("extractions") or [extraction])[0]
             if not contract.validate_extraction(cand):      # [] == valid
-                if _config.schema_grounding_enabled(str(_config.app_dir())):
-                    from mcpbrain.drain import _grounding_filter
-                    cand, _ = _grounding_filter(cand)
                 doc_ids = [f"gdrive-{art.file_id}-{int(c.idx)}" for c in art.chunks]
                 graph_write.apply(store, cand, doc_ids=doc_ids)   # self-resolves owner/home
         except Exception as exc:  # noqa: BLE001 — apply failure must not fail the import

@@ -75,8 +75,7 @@ def _backup(db_path: Path) -> Path:
     # consistent by construction and cannot be blocked by a held reader.
     dest = db_path.with_suffix(db_path.suffix + f".bak-{int(time.time())}")
     # db_path's parent IS home (brain.sqlite3 lives directly under it) --
-    # passed through so _verify_artifact can check embed_skip_tabular instead
-    # of falling back to its unconditional table-chunk exclusion.
+    # passed through so _verify_artifact can narrow its table-chunk exclusion.
     return snapshot(db_path, dest, home=str(db_path.parent))
 
 

@@ -1653,7 +1653,7 @@ def test_verify_artifact_no_ops_when_the_chunks_table_does_not_exist(tmp_path):
 
 def test_verify_artifact_ignores_deliberately_vector_less_table_chunks(tmp_path):
     """embedded=1 with no vec_chunks row is the DESIGNED state for table
-    chunks -- write_embedding(rowid, None) under embed_skip_tabular, and
+    chunks -- write_embedding(rowid, None), and
     bin/cleanup_tabular_vectors.py deleting existing oversize table vectors
     while leaving embedded=1 so nothing re-queues them.
 
@@ -1711,14 +1711,13 @@ def test_verify_artifact_still_raises_for_a_non_table_chunk_missing_its_vector(t
         _verify_artifact(store.path)
 
 
-def test_verify_artifact_with_home_and_flag_off_catches_corruption_on_a_fresh_table_chunk(tmp_path):
-    """Without a `home` to check embed_skip_tabular against, the exclusion
+def test_verify_artifact_with_home_catches_corruption_on_a_fresh_table_chunk(tmp_path):
+    """Without a `home`, the exclusion
     must stay unconditional (the two tests above, run with no `home`, prove
-    that path still works). WITH `home` and the flag OFF, a table chunk
+    that path still works). WITH `home`, a table chunk
     already re-rendered to CHUNKER_VERSION should have gotten a real vector
     from index_pending same as any other chunk -- missing one there is
     genuine corruption, not the designed state, and must still raise."""
-    import json
 
 
     from mcpbrain.backup import _verify_artifact
@@ -1726,7 +1725,6 @@ def test_verify_artifact_with_home_and_flag_off_catches_corruption_on_a_fresh_ta
 
     home = tmp_path / "home"
     home.mkdir()
-    (home / "config.json").write_text(json.dumps({"embed_skip_tabular": False}))
 
     store = Store(tmp_path / "live.sqlite3", dim=4)
     store.init()
@@ -1739,19 +1737,17 @@ def test_verify_artifact_with_home_and_flag_off_catches_corruption_on_a_fresh_ta
         _verify_artifact(store.path, home=str(home))
 
 
-def test_verify_artifact_with_home_and_flag_off_still_spares_a_pre_rerender_table_chunk(tmp_path):
-    """Same flag-off home, but the table chunk is still below CHUNKER_VERSION
+def test_verify_artifact_with_home_still_spares_a_pre_rerender_table_chunk(tmp_path):
+    """Same home, but the table chunk is still below CHUNKER_VERSION
     -- i.e. it could legitimately be sitting in the transient post-cleanup
     window (bin/cleanup_tabular_vectors.py deleted its vector, the version-
     bump sweep hasn't re-rendered it yet). Must not raise."""
-    import json
 
     from mcpbrain.backup import _verify_artifact
     from mcpbrain.chunking import CHUNKER_VERSION
 
     home = tmp_path / "home"
     home.mkdir()
-    (home / "config.json").write_text(json.dumps({"embed_skip_tabular": False}))
 
     store = Store(tmp_path / "live.sqlite3", dim=4)
     store.init()
