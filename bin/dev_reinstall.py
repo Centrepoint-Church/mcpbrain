@@ -61,8 +61,8 @@ def tree_digest(root: Path) -> dict[str, str]:
 
 def wheel_excludes(pyproject: Path) -> tuple[str, ...]:
     """Path prefixes (relative to mcpbrain/) that pyproject keeps out of the wheel,
-    from [tool.setuptools.packages.find] exclude, e.g. "mcpbrain.maintenance*"
-    -> "maintenance"."""
+    from [tool.setuptools.packages.find] exclude, e.g. "mcpbrain.devtools*"
+    -> "devtools"."""
     import tomllib
     find = (tomllib.loads(pyproject.read_text()).get("tool", {}).get("setuptools", {})
             .get("packages", {}).get("find", {}))

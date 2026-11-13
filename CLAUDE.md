@@ -99,8 +99,8 @@ mcpbrain ships to other users as a **Claude Code plugin + a pip-installable pack
   first `<body`. No bs4. Validate a cleaner change on real mail first.
 - Heal with one-shot markers, never by bumping `CHUNKER_VERSION` /
   `SPLIT_VERSION` / `EXTRACTION_VERSIONS` (that re-fetches the corpus).
-- Notes split with `chunking.split_lossless`; `bin/rechunk_notes.py` only touches
-  ids shaped `note-<32 hex>` (fixed-id notes like the identity seed break if split).
+- Notes split with `chunking.split_lossless`. Never re-split a fixed-id note
+  (`note-core-identity-seed`, `note-consolidated-*`): its writer addresses it by id.
 - `chunks.metadata` is JSON TEXT; build every query/index expression with
   `store._meta_extract` (always `json_extract`). `patch_chunk_metadata` resets
   `fts_context_version`.

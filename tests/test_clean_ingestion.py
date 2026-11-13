@@ -1,11 +1,11 @@
-"""bin/clean_ingestion.py — attended, reversible ingestion clean-up (Task 10)."""
+"""mcpbrain.ingestion_cleanup (`mcpbrain clean-ingestion`) — attended, reversible ingestion clean-up (Task 10)."""
 import json
 import shutil
 import sqlite3
 
 import pytest
 
-from bin import clean_ingestion as ci
+from mcpbrain import ingestion_cleanup as ci
 from mcpbrain.store import Store
 
 OWNER = "dana@example.org"

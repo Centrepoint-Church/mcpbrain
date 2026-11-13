@@ -307,8 +307,7 @@ _PREFIX_HEADROOM_CHARS = 200
 # chunk_text is not a lossless splitter and is not meant to be: _split_paragraph
 # duplicates the last `overlap` words across a boundary and paragraph whitespace
 # is stripped/collapsed, both correct for its embedding callers, which never
-# rejoin. A caller that DOES rejoin (drain.drain_captures' note path,
-# bin/rechunk_notes.py) must verify `CHUNK_JOIN.join(chunk_text(t)) == t` before
+# rejoin. A caller that DOES rejoin (drain.drain_captures' note path) must verify `CHUNK_JOIN.join(chunk_text(t)) == t` before
 # treating the split as a faithful representation of `t`.
 CHUNK_JOIN = "\n\n"
 
@@ -341,7 +340,7 @@ def split_lossless(text: str, max_chars: int = NOTE_MAX_CHARS) -> list[str]:
 
     Notes need both properties at once: the whole body embedded, and the exact
     original recoverable, because store.note_chunks() serves the reassembled
-    text AS the note and bin/rechunk_notes.py deletes the only whole-body row.
+    text AS the note, with no whole-body row behind it.
     Carrying each break's separator on the preceding piece and rejoining with
     "" gives losslessness by construction rather than by verification.
 

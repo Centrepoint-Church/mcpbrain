@@ -92,10 +92,8 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 SYNTH = "sdd-probe-latency"  # every identifier this script writes starts here
 
-# Mirrored verbatim in bin/probe_wal_contention.py -- both scripts tag every row
-# they write with the same `sdd-probe-` prefix, so one cleanup covers both. Kept
-# duplicated rather than shared because these are two standalone entry points
-# with no common module; if you change the prefix, change it in both.
+# Every row this script writes is tagged with the `sdd-probe-` prefix, so one
+# cleanup removes it all.
 CLEANUP_SQL = (
     "DELETE FROM draft_records WHERE email_id LIKE 'sdd-probe-%';\n"
     "DELETE FROM meeting_packs WHERE event_id LIKE 'sdd-probe-%';"

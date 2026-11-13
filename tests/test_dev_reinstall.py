@@ -43,5 +43,5 @@ def test_identical_trees_report_nothing(tmp_path):
 
 def test_wheel_excludes_reads_pyproject(tmp_path):
     p = tmp_path / "pyproject.toml"
-    p.write_text('[tool.setuptools.packages.find]\nexclude = ["mcpbrain.maintenance*", "other*"]\n')
-    assert dr.wheel_excludes(p) == ("maintenance",)
+    p.write_text('[tool.setuptools.packages.find]\nexclude = ["mcpbrain.devtools*", "other*"]\n')
+    assert dr.wheel_excludes(p) == ("devtools",)

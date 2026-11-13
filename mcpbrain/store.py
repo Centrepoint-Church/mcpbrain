@@ -3334,7 +3334,7 @@ class Store:
                                match_thread: bool = True, actions: bool = True,
                                links: bool = True) -> dict:
         """invalidate_sources_for_docs' action/link step on an OPEN write
-        connection, so a caller (bin/clean_ingestion.py) can run it inside its
+        connection, so a caller (the ingestion clean-up) can run it inside its
         own transaction and log the old values there. `ids` are the exact
         source ids; IN lists are sliced. actions=False / links=False skip that
         half."""

@@ -929,7 +929,6 @@ Attended use (this machine, or to inspect / undo):
    `--undo`) then marks it done; a partial `--steps` run leaves the state as it
    was, so the daemon still runs the rest. A full `--yes` after the daemon already
    ran is a no-op unless `--rerun`.
-   (`python bin/clean_ingestion.py` from a checkout is the same tool.)
 4. `launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/com.mcpbrain.plist`,
    then `mcpbrain doctor` and the gold gate on the live store.
 5. To reverse one class: bootout, `mcpbrain clean-ingestion --undo <step> --yes`

@@ -16,9 +16,3 @@ def test_cli_dispatches_with_args(monkeypatch):
         cli.main(["clean-ingestion", "--home", "/x", "--yes", "--undo", "dedup_embed"])
     assert ei.value.code == 0
     assert seen["argv"] == ["--home", "/x", "--yes", "--undo", "dedup_embed"]
-
-
-def test_bin_wrapper_is_the_package_module():
-    from bin import clean_ingestion as ci
-    assert ci.main is ingestion_cleanup.main
-    assert ci.STEPS == ingestion_cleanup.STEPS

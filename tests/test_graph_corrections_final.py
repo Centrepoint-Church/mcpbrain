@@ -195,15 +195,6 @@ def test_c2_org_curate_skeleton_writes_unlocked_field_beside_locked(tmp_path):
     assert e["org"] == "Northgate Trust" and e["email_addr"] == "d@lantern.example"
 
 
-def test_c2_graph_cleanup_fold_leaves_locked_org(tmp_path):
-    from mcpbrain.maintenance import graph_cleanup
-    s = _store(tmp_path)
-    _locked_dana(s, org="northgate trust inc")
-    _ent(s, "marcus-reyes", "Marcus Reyes", org="northgate trust inc")
-    graph_cleanup.cleanup_graph(s, taxonomy=_TAX)
-    assert s.get_entity("dana-okafor")["org"] == "northgate trust inc"
-
-
 def test_c2_rewrite_org_field_mixed_locked_and_unlocked(tmp_path):
     s = _store(tmp_path)
     _locked_dana(s)

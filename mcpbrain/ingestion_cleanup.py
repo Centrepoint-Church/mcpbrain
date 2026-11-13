@@ -8,7 +8,7 @@ whichever runs first wins and the clean-up never runs twice by itself:
   install, once, inside the daemon's own process under its bulk lock, gated
   on a backup restore point < 24 h old and the fleet kill switch
   `ingestion_cleanup_enabled`;
-* the attended CLI (`mcpbrain clean-ingestion`, or `bin/clean_ingestion.py`).
+* the attended CLI (`mcpbrain clean-ingestion`).
   Dry run by default (the store is opened READ-ONLY and nothing is written);
   `--yes` applies. Stop the daemon first:
 

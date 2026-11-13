@@ -98,7 +98,6 @@ build-backend = "setuptools.build_meta"
 # package list so a clean build from source is deterministic.
 [tool.setuptools.packages.find]
 include = ["mcpbrain*"]
-exclude = ["mcpbrain.maintenance*"]
 
 # Non-.py files that must ship inside the wheel. packages.find ships only .py
 # modules, so without this block a clean (non-editable) install is missing the

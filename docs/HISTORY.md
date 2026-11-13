@@ -8,6 +8,31 @@ date order; each carries its own date.
 
 ---
 
+## Retired 2026-11-13 (recover any of these from git history)
+
+- `mcpbrain/maintenance/` (graph_cleanup, salience_backfill) and the daemon's
+  `_graph_cleanup_once` / `_graph_recompute_once`. The package was excluded from
+  the wheel, so on every install the import failed and the one-shot was marked
+  done without running: dead code everywhere. `bin/resalience.py` covers the
+  salience sweep.
+- `bin/stamp_audited_prose.py`, `bin/sweep_merge_residue.py`,
+  `bin/rechunk_notes.py`: one-offs whose results were verified (see their
+  entries below). New notes chunk losslessly at capture.
+- `bin/probe_backup_snapshot.py`, `bin/probe_wal_contention.py`: investigation
+  probes for closed questions.
+- `bin/clean_ingestion.py`: a wrapper; `mcpbrain clean-ingestion` is the tool.
+- The setup-installed fleet beacon job: the daemon writes the beacon now.
+- Config switches `schema_grounding`, `embed_skip_tabular`,
+  `recall_excludes_cold`, `incremental_communities` (findings below).
+
+**Not retired, on purpose:** the daemon one-shot migrations (ingestion clean-up,
+oversize heal, reflow). They run once per install on upgrade, and until
+2026-11-13 no install sent a working beacon, so there is no evidence every
+install has run them. Retire each once `mcpbrain fleet-report` shows every
+install past the release that added it.
+
+---
+
 ## This is a distributed PLUGIN, not just a local app
 
 mcpbrain ships to other users as a **Claude Code plugin + a pip-installable package**.

@@ -74,23 +74,3 @@ def test_records_claude_template_present():
     # declaration a clean install has no template to seed the working space.
     tmpl = _pkg_dir() / "records_templates" / "CLAUDE.md"
     assert tmpl.is_file(), f"records CLAUDE.md template missing at {tmpl}"
-
-
-def test_maintenance_subpackage_excluded_from_wheel():
-    # mcpbrain/maintenance/ holds maintainer-only local backfill/cleanup
-    # tooling (graph_cleanup, salience_backfill). It is reachable only from
-    # tests, never from the shipped daemon, so pyproject's packages.find must
-    # exclude it. Guard that exclusion is declared (offline, builds nothing —
-    # pairs with the CI wheel-inspection step).
-    import tomllib
-
-    repo_root = Path(__file__).resolve().parents[1]
-    # The subpackage exists in the source tree (importable from a checkout)...
-    assert (repo_root / "mcpbrain" / "maintenance" / "__init__.py").is_file()
-    # ...but pyproject's packages.find excludes it from the published wheel.
-    with open(repo_root / "pyproject.toml", "rb") as f:
-        cfg = tomllib.load(f)
-    exclude = cfg["tool"]["setuptools"]["packages"]["find"].get("exclude", [])
-    assert "mcpbrain.maintenance*" in exclude, (
-        f"mcpbrain.maintenance* must be in packages.find exclude; got: {exclude}"
-    )
