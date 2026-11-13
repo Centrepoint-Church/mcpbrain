@@ -236,6 +236,28 @@ class ControlServer:
                         st = {}
                     return h_text(self, 200, system_ops.support_report(
                         server.home, st, diagnostics=server.diagnostics))
+                if self.path.split("?")[0] in ("/api/sync-queue", "/api/trace"):
+                    # Overview: "Not in yet" and "Find an item" (item_trace).
+                    if server.store is None:
+                        return h_json(self, 503, {"error": "dashboard not available"})
+                    from mcpbrain import item_trace
+                    q = urllib.parse.parse_qs(urllib.parse.urlparse(self.path).query)
+                    try:
+                        if self.path.startswith("/api/trace"):
+                            return h_json(self, 200, item_trace.trace(
+                                server.store, str(server.home), q.get("q", [""])[0]))
+                        try:
+                            page = int(q.get("page", ["1"])[0])
+                            size = int(q.get("page_size", [str(item_trace.PAGE_SIZE)])[0])
+                        except (TypeError, ValueError):
+                            return h_json(self, 400, {"error": "page and page_size must be integers"})
+                        if page < 1 or size < 1:
+                            return h_json(self, 400, {"error": "page and page_size must be at least 1"})
+                        return h_json(self, 200, item_trace.sync_queue(
+                            server.store, str(server.home), page=page, page_size=size))
+                    except Exception as exc:
+                        log.exception("%s failed", self.path)
+                        return h_json(self, 500, {"error": str(exc)})
                 if self.path.split("?")[0] in _CHUNK_LIST_ROUTES:
                     if server.store is None:
                         return h_json(self, 503, {"error": "dashboard not available"})

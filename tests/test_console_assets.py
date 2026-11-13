@@ -195,6 +195,7 @@ def test_scripts_parse(tmp_path):
     "/api/pause", "/api/resume", "/api/backup/run", "/api/chunks/cold",
     "/api/chunks/waiting", "/api/chunks/reinclude", "/api/chunks/prioritise",
     "/api/chunks/reflow-gave-up", "/api/chunks/reflow-retry", "/api/settings",
+    "/api/sync-queue", "/api/trace?q=",
 ])
 def test_page_acts_through_each_endpoint(endpoint):
     assert endpoint in DASH

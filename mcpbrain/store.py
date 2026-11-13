@@ -6889,6 +6889,70 @@ class Store:
                         "enriched": bool(r["enriched"])})
         return out, int(total)
 
+    # Metadata keys with an expression index (init()); item_trace looks an
+    # item up by these, never by an unindexed key.
+    TRACE_KEYS = ("file_id", "thread_id", "message_id", "event_id", "session_id",
+                  "note_id")
+
+    def chunks_by_meta_key(self, key: str, value: str, *, limit: int = 2000) -> list[dict]:
+        """Chunks whose metadata.<key> equals `value`, in rowid order. Rows:
+        {doc_id, metadata (dict), enrich_state, enriched, priority}. `key` must
+        be one of TRACE_KEYS so the lookup is index-backed."""
+        if key not in self.TRACE_KEYS:
+            raise ValueError(f"not an indexed metadata key: {key!r}")
+        with self._connect() as db:
+            rows = db.execute(
+                "SELECT doc_id, metadata, enrich_state, enriched, priority FROM chunks "
+                f"WHERE {_meta_extract('$.' + key)} = ? ORDER BY rowid LIMIT ?",
+                (value, int(limit))).fetchall()
+        return self._state_rows(rows)
+
+    def chunk_rows(self, doc_ids) -> list[dict]:
+        """Rows shaped like chunks_by_meta_key for the given doc_ids."""
+        ids = [d for d in (doc_ids or []) if d]
+        if not ids:
+            return []
+        ph = ",".join("?" * len(ids))
+        with self._connect() as db:
+            rows = db.execute(
+                "SELECT doc_id, metadata, enrich_state, enriched, priority FROM chunks "
+                f"WHERE doc_id IN ({ph}) ORDER BY rowid", ids).fetchall()
+        return self._state_rows(rows)
+
+    @staticmethod
+    def _state_rows(rows) -> list[dict]:
+        out = []
+        for r in rows:
+            try:
+                meta = json.loads(r["metadata"] or "{}")
+            except (TypeError, ValueError):
+                meta = {}
+            out.append({"doc_id": r["doc_id"],
+                        "metadata": meta if isinstance(meta, dict) else {},
+                        "enrich_state": r["enrich_state"] or "",
+                        "enriched": bool(r["enriched"]),
+                        "priority": int(r["priority"] or 0)})
+        return out
+
+    def sync_queue_rows(self, *, ref_ids=None, limit: int = 500) -> list[dict]:
+        """Sync queue rows, oldest discovery first; only `ref_ids` when given.
+        Each row: source, ref_id, event, modified_at, discovered_at, attempts,
+        next_attempt_at, last_error."""
+        cols = ("source, ref_id, event, modified_at, discovered_at, attempts, "
+                "next_attempt_at, last_error")
+        with self._connect() as db:
+            if ref_ids is not None:
+                ids = [r for r in ref_ids if r]
+                if not ids:
+                    return []
+                ph = ",".join("?" * len(ids))
+                rows = db.execute(f"SELECT {cols} FROM sync_queue WHERE ref_id IN ({ph}) "
+                                  "ORDER BY discovered_at LIMIT ?", (*ids, int(limit)))
+            else:
+                rows = db.execute(f"SELECT {cols} FROM sync_queue "
+                                  "ORDER BY discovered_at LIMIT ?", (int(limit),))
+            return [dict(r) for r in rows.fetchall()]
+
     def reset_enriched(self, doc_ids) -> int:
         """Set enriched=0, enriched_version=0 on the given chunks so the daemon
         re-extracts them. Returns rows affected."""

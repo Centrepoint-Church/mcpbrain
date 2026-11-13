@@ -564,3 +564,10 @@ details.adv[open] > summary { margin-bottom: var(--space-md); }
   .ulist__tools .input { width: 100%; }
   .ulist__table .acts { justify-content: flex-start; flex-wrap: wrap; }
 }
+
+/* Overview: Find an item */
+#trace-form { flex-wrap: nowrap; }
+#trace-form .input { flex: 1 1 auto; min-width: 0; }
+.trace-list { list-style: none; margin: var(--space-sm) 0 0; padding: 0; }
+.trace-list > li { padding: var(--space-sm) 0; border-top: var(--rule-hair) solid var(--color-rule); }
+.trace-list > li > ul { margin: var(--space-2xs) 0 0; padding-left: 1.2em; }

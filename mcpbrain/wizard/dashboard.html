@@ -57,7 +57,11 @@
         <div>
           <span>Captured</span>
           <span class="measured" id="r-total"><span class="skel">0</span></span>
-          <div class="acts"><a class="linkbtn" href="#sources">See sources</a></div>
+          <span class="muted small" id="r-notin"></span>
+          <div class="acts">
+            <a class="linkbtn" href="#sources">See sources</a>
+            <button class="linkbtn" type="button" id="queue-open" hidden>See what’s not in yet</button>
+          </div>
         </div>
         <div>
           <span>Worth enriching</span>
@@ -118,6 +122,42 @@
       </div>
       <button class="btn" type="button" id="chunks-act" disabled>Act on selected</button>
       <span class="said" id="chunks-said" role="status" hidden></span>
+    </div>
+  </section>
+
+  <section class="panel" id="queue" aria-labelledby="queue-h" hidden>
+    <div class="panel__head">
+      <h2 id="queue-h">Not in yet</h2>
+      <div class="end"><button class="btn btn--sm" type="button" id="queue-close">Close</button></div>
+    </div>
+    <div class="panel__body"><p class="muted small">Found in your sources but not written to mcpbrain yet, oldest first. Most clear within a cycle or two.</p></div>
+    <div class="scroll-x">
+      <table class="table">
+        <thead><tr><th scope="col">Item</th><th scope="col">Source</th><th scope="col">Where it is</th></tr></thead>
+        <tbody id="queue-body"></tbody>
+      </table>
+    </div>
+    <div class="note">
+      <div class="pager">
+        <button class="btn btn--sm" type="button" id="queue-prev">Previous</button>
+        <span id="queue-page"></span>
+        <button class="btn btn--sm" type="button" id="queue-next">Next</button>
+      </div>
+    </div>
+  </section>
+
+  <section class="panel" id="trace" aria-labelledby="trace-h">
+    <div class="panel__head"><h2 id="trace-h">Find an item</h2></div>
+    <div class="panel__body">
+      <form id="trace-form" class="acts" role="search">
+        <label class="visually-hidden" for="trace-q">Words from an email or file, or an id</label>
+        <input class="input" id="trace-q" type="search" maxlength="200" autocomplete="off"
+               placeholder="Words from an email or file, or an id">
+        <button class="btn" type="submit">Find</button>
+      </form>
+      <p class="muted small">Shows where an item is: not in yet, in the graph, kept out and why, or waiting for enrichment.</p>
+      <p class="said" id="trace-said" role="status" hidden></p>
+      <ul class="trace-list" id="trace-out"></ul>
     </div>
   </section>
 
@@ -764,8 +804,19 @@ const REASON = {bulk: "It's bulk mail.", other: "It's kept out by an earlier rul
 function reasonText(r){ return r ? worded(REASON, r, "It's here for another reason.") : ""; }
 // The Source column: where an item came from.
 const SOURCE_WORDS = {gmail: "Gmail", drive: "Drive", calendar: "Calendar", anarlog: "Meetings",
-  note: "Note", other: "another source"};
+  note: "Note", reflow: "Re-chunking", other: "another source"};
 function sourceText(s){ return worded(SOURCE_WORDS, s, "another source"); }
+// A sync queue row's state (item_trace.queue_state), as a sentence; `at` is the
+// next try's clock time.
+const QUEUE_STATE = {due: () => "Next in line.",
+  waiting: (at) => "On hold, not failed" + (at ? ", until " + at : "") + ". Usually an enrichment batch is still working on the version it would replace.",
+  retrying: (at) => "It failed and is retried" + (at ? " at " + at : "") + "."};
+function queueStateText(q){
+  const f = QUEUE_STATE[q.state];
+  const at = q.next_at ? C.time(q.next_at) : "";
+  return (typeof f === "function" ? f(at) : "Waiting to come in.")
+    + (q.event === "remove" ? " It was deleted at the source, so it is being removed." : "");
+}
 /* word-maps:end */
 let chunkKind = null, chunkPage = 1;
 // The cold list offers Include only on items that can be added and are not
@@ -837,6 +888,83 @@ $("chunks-act").addEventListener("click", (ev) => {
     const n = typeof out.changed === "number" ? out.changed : ids.length;
     return cfg.done(n, out);
   });
+});
+
+// ---- not in yet (the sync queue) and find an item --------------------------
+
+let queuePage = 1;
+async function openQueue(page){
+  queuePage = page || 1;
+  $("queue").hidden = false;
+  fill($("queue-body"), el("tr", {}, el("td", {colspan: 3}, el("span", {class: "skel skel--line"}))));
+  if (page == null) $("queue").scrollIntoView({block: "start"});
+  try {
+    const out = await api(`/api/sync-queue?page=${queuePage}&page_size=${PAGE_SIZE}`);
+    const items = out.items || [];
+    const pages = Math.max(1, Math.ceil((out.total || 0) / PAGE_SIZE));
+    setText("queue-page", "Page " + fmt(queuePage) + " of " + fmt(pages) + ", " + plural(out.total || 0, "item"));
+    $("queue-prev").disabled = queuePage <= 1;
+    $("queue-next").disabled = queuePage >= pages;
+    fill($("queue-body"), items.length ? items.map(i => el("tr", {},
+      el("td", {}, el("strong", {text: i.title || "Not in mcpbrain yet"}),
+        el("div", {class: "muted small measured", text: i.ref_id})),
+      el("td", {text: cap(sourceText(i.source))}),
+      el("td", {}, queueStateText(i),
+        i.state === "retrying" && i.error ? el("div", {class: "muted small", text: "Last error: " + i.error.slice(0, 300)}) : null)))
+      : el("tr", {}, el("td", {colspan: 3, class: "muted", text: "Nothing is waiting to come in."})));
+  } catch (e) {
+    setText("queue-page", "");
+    fill($("queue-body"), el("tr", {}, el("td", {colspan: 3}, el("span", {class: "said said--bad", text: "Could not load the list. " + errText(e)}))));
+  }
+}
+$("queue-open").addEventListener("click", () => openQueue());
+$("queue-close").addEventListener("click", () => { $("queue").hidden = true; });
+$("queue-prev").addEventListener("click", () => openQueue(queuePage - 1));
+$("queue-next").addEventListener("click", () => openQueue(queuePage + 1));
+
+async function loadQueueCount(){
+  try {
+    const out = await api("/api/sync-queue?page_size=1");
+    const n = out.total || 0, c = out.counts || {};
+    setText("r-notin", n ? fmt(n) + " not in yet" + (c.retrying ? ", " + fmt(c.retrying) + " retrying after a failure" : "") : "");
+    $("queue-open").hidden = !n;
+  } catch (e) { /* the figure is optional; the list says why when opened */ }
+}
+
+// One item's journey, as sentences in pipeline order.
+function traceLines(t){
+  const out = [];
+  for (const q of t.queue || []) out.push((t.pieces ? "A newer version is not in yet. " : "Not in mcpbrain yet. ") + queueStateText(q));
+  if (t.pieces) {
+    const parts = [];
+    if (t.in_graph) parts.push(fmt(t.in_graph) + " in the graph");
+    if (t.kept_out) parts.push(fmt(t.kept_out) + " kept out");
+    if (t.waiting) parts.push(fmt(t.waiting) + " waiting for enrichment");
+    out.push(plural(t.pieces, "piece") + (parts.length ? ": " + parts.join(", ") + "." : "."));
+    for (const r of t.kept_out_reasons || []) out.push("Kept out because " + reasonText(r).replace(/^It's/, "it's"));
+  }
+  if (t.in_batch) out.push("An enrichment batch is working on it now.");
+  if (t.gave_up) out.push("Re-chunking gave up on " + plural(t.gave_up, "piece") + ", so they fell back to fresh enrichment.");
+  if (t.pieces && t.in_graph === t.pieces && !(t.queue || []).length) out.push("Everything about it is in the graph.");
+  return out;
+}
+$("trace-form").addEventListener("submit", async (ev) => {
+  ev.preventDefault();
+  const q = $("trace-q").value.trim();
+  if (!q) return;
+  said($("trace-said"), "Looking…");
+  fill($("trace-out"));
+  try {
+    const out = await api("/api/trace?q=" + encodeURIComponent(q));
+    const items = out.items || [];
+    said($("trace-said"), items.length ? "" : "Nothing in mcpbrain matches that. Try other words, or paste the id from the item’s link.");
+    fill($("trace-out"), items.map(t => el("li", {},
+      el("strong", {text: t.title || t.id}),
+      el("span", {class: "muted small", text: " " + cap(sourceText(t.source)) + (t.date ? " · " + String(t.date).slice(0, 16) : "")}),
+      el("ul", {}, traceLines(t).map(line => el("li", {text: line}))))));
+  } catch (e) {
+    said($("trace-said"), "Could not look it up. " + errText(e), "bad");
+  }
 });
 
 // ---- knowledge graph -----------------------------------------------------
@@ -970,6 +1098,7 @@ async function loadStats(force){
   renderChip(data.health.state, data.health.reasons);
   val("asof", C.time(data.as_of));
   renderReading();
+  loadQueueCount();
   renderStatusLine();
   renderGraph();
   renderSources(force);

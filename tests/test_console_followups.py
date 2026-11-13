@@ -156,12 +156,14 @@ def test_dashboard_word_maps_fall_back_to_words(tmp_path):
 const U = "zz_new_code";
 console.log(JSON.stringify({kind: kindLabel(U), type: typeLabel(U), skip1: skipText(U + ": Budget.xlsx", 1),
   skip3: skipText(U, 3), skip0: skipText(U, 1), reason: reasonText(U), source: sourceText(U),
+  queue: queueStateText({state: U}), queueDue: queueStateText({state: "due"}),
   known: [kindLabel("tidy"), typeLabel("fact_added")[0], reasonText("bulk"), sourceText("drive"),
           skipText("extraction_empty", 2)]}));""")
     assert o["kind"] == "an automatic change"
     assert o["type"] == ["an automatic change", "automatic changes"]
     assert o["reason"] == "It's here for another reason."
     assert o["source"] == "another source"
+    assert o["queue"] == "Waiting to come in." and o["queueDue"] == "Next in line."
     for k in ("skip1", "skip3", "skip0"):
         assert "skipped for another reason" in o[k].lower(), o[k]
     assert "Budget.xlsx" in o["skip1"]
