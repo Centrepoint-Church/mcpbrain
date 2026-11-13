@@ -8,6 +8,29 @@ date order; each carries its own date.
 
 ---
 
+## 0.7.150 released (2026-11-13)
+
+Source `40d8c339`, gh-pages `56422852`, plugin `5282445`; the index serves only
+`mcpbrain-0.7.150-py3-none-any.whl`, `install.ps1` 200. CI green on the release
+commit (first green since 2026-09-08). Full suite **5714 passed** under exactly
+the fleet's resolved set (mcp/mcp-types 2.3.0, fastembed 0.9.1, nameparser 1.4.0,
+pymupdf 1.28.2; re-resolved after publishing: identical). Wheel contents asserted
+(14 checks: item_trace, /api/trace, the console panel, `_run_fleet_beacon`, the
+beacon's tenant fallback, the deferred-import DEFER, the removed flags and
+maintenance package absent, tenant files present, no gold set or
+tenant_people). Installed from the published index; `/api/status` 0.7.150,
+`stalled: None`; doctor integrity ok, 0 need action; this install's beacon
+written to the fleet folder (first since 2026-06-18).
+
+**What it ships:** a deferred shared-drive import waits 10 min instead of
+counting a failure; the four dead switches and the maintenance package removed;
+the daemon writes the fleet beacon hourly (setup's beacon job retired);
+"Not in yet" and "Find an item" on the Overview; `bin/release.py` refuses a
+commit CI has not passed. **Fleet effects:** every install starts sending its
+owner email, version and connection states to the fleet folder hourly.
+
+---
+
 ## Retired 2026-11-13 (recover any of these from git history)
 
 - `mcpbrain/maintenance/` (graph_cleanup, salience_backfill) and the daemon's
