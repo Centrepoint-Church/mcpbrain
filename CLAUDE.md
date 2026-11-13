@@ -137,6 +137,10 @@ their docstring: read it before changing them.
 
 - Scope test runs to the edited files and their direct dependents; the owner runs
   the full suite.
+- CI (Linux) must be green before a release: `gh run list --workflow ci -L 1`. It
+  sat red from 2026-09-08 to 2026-11-13 (344 runs) and nobody noticed; macOS-only
+  shell (`stat -f`) and tenant files absent from a public checkout were the causes.
+  `docker` (OrbStack) reproduces a Linux-only failure locally.
 - A test that only meets a fake proves little. Several real defects passed against
   fakes (`Store` constructor, the claim backstop); prefer a real `Store` on tmp.
 - Seed dangling rows with a raw `sqlite3` connection (the store enables FKs at
