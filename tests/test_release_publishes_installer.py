@@ -58,6 +58,7 @@ def test_main_exits_nonzero_when_installer_is_missing(tmp_path, monkeypatch):
         stderr = ""
 
     monkeypatch.setattr(release.subprocess, "run", lambda *a, **k: _FakeCompleted())
+    monkeypatch.setattr(release, "ci_problems", lambda repo: [])
 
     rc = release.main(["--dist", str(dist), "--repo", str(repo)])
 
@@ -87,6 +88,7 @@ def test_main_exits_zero_when_installer_is_published(tmp_path, monkeypatch):
     monkeypatch.setattr(release.subprocess, "run", lambda *a, **k: _FakeCompleted())
     monkeypatch.setattr("mcpbrain.tenant.check_offline", lambda repo: [])
     monkeypatch.setattr(release, "verify_wheel", lambda wheel, repo: [])
+    monkeypatch.setattr(release, "ci_problems", lambda repo: [])
 
     rc = release.main(["--dist", str(dist), "--repo", str(repo)])
 

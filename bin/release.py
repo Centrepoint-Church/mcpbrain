@@ -73,17 +73,60 @@ def copy_installer(repo: Path, dist: Path) -> Path | None:
     return dest
 
 
+def ci_problems(repo: Path) -> list[str]:
+    """Why the latest `ci` run on main does not vouch for HEAD; [] when it does.
+
+    Fails closed: if `gh` cannot answer, that is a problem, not a pass. CI sat
+    red from 2026-09-08 to 2026-11-13 (344 runs, releases 0.7.125-0.7.149)
+    because nothing looked; this makes the release look.
+    """
+    head = subprocess.run(["git", "-C", str(repo), "rev-parse", "HEAD"],
+                          capture_output=True, text=True).stdout.strip()
+    r = subprocess.run(["gh", "run", "list", "--workflow", "ci", "--branch", "main",
+                        "--limit", "1", "--json", "headSha,status,conclusion"],
+                       capture_output=True, text=True, cwd=str(repo))
+    if r.returncode != 0:
+        return [f"could not read CI status with gh: {(r.stderr or '').strip()[:200]}"]
+    try:
+        runs = json.loads(r.stdout or "[]")
+    except ValueError:
+        return ["could not parse `gh run list` output"]
+    if not runs:
+        return ["no ci run found on main"]
+    run = runs[0]
+    if run.get("headSha") != head:
+        return [f"the latest ci run is not for HEAD ({head[:8]}); push and let CI finish"]
+    if run.get("status") != "completed":
+        return [f"ci is still running on {head[:8]}; wait for it"]
+    if run.get("conclusion") != "success":
+        return [f"ci on {head[:8]} ended in {run.get('conclusion')!r}; fix it first"]
+    return []
+
+
 def main(argv=None) -> int:
     ap = argparse.ArgumentParser()
     ap.add_argument("--dist", required=True,
                     help="path to the gh-pages worktree (see docs/RELEASE-RUNBOOK.md 1b)")
     ap.add_argument("--repo", default=".", help="path to the mcpbrain source repo")
+    ap.add_argument("--no-ci-gate", action="store_true",
+                    help="release even though CI has not passed on HEAD (say why in "
+                         "the release commit)")
     ns = ap.parse_args(argv)
     # Wipe stale build intermediates first. setuptools reuses build/lib, so a file
     # deleted from the source can otherwise reship in the wheel (it happened once:
     # a removed module rode along in a release build). Clean build/ + *.egg-info so
     # the wheel reflects exactly the current source tree.
     repo = Path(ns.repo)
+    ci = ci_problems(repo)
+    if ci and not ns.no_ci_gate:
+        print("release aborted — CI has not passed on this commit:", file=sys.stderr)
+        for p in ci:
+            print(f"  ✗ {p}", file=sys.stderr)
+        print("Override with --no-ci-gate only with a reason.", file=sys.stderr)
+        return 2
+    if ci:
+        print("WARNING: releasing without a green CI run (--no-ci-gate): "
+              + "; ".join(ci), file=sys.stderr)
     from mcpbrain import tenant
     problems = tenant.check_offline(repo)
     if problems:

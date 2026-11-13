@@ -68,6 +68,11 @@ machine whose default Python is < 3.12 (uv provisions 3.12 when pinned).
 
 From the source repo (`~/GitHub/mcpbrain`), on `main`, with a clean tree:
 
+- **CI must be green on the commit you release.** `bin/release.py` checks: it
+  refuses unless the latest `ci` run on `main` is for HEAD and passed (needs `gh`).
+  So push the version bump and wait for CI before building. `--no-ci-gate`
+  overrides it; say why in the release commit. (CI sat red 2026-09-08 to
+  2026-11-13, across 0.7.125-0.7.149, unnoticed.)
 - **Verify the tenant profile.** `python bin/tenant.py check` must pass.
   `bin/release.py` runs the offline half itself and refuses to build on failure, and
   asserts the built wheel carries `tenant.json` and `google_oauth_client.json` —
