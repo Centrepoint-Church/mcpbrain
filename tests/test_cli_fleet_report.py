@@ -87,7 +87,7 @@ def test_fleet_report_beacon_unconfigured_exits_clean_no_error(tmp_path, monkeyp
 def test_fleet_report_says_nothing_written_when_report_is_empty(tmp_path, monkeypatch, capsys):
     """An empty fleet folder must not print "Fleet report written"."""
     monkeypatch.setenv("MCPBRAIN_HOME", str(tmp_path))
-    from mcpbrain import config, fleet
+    from mcpbrain import config
     config.write_config(str(tmp_path), {"fleet": {"folder_id": "FLEET1"}})
 
     from tests.test_fleet import _DriveMulti
