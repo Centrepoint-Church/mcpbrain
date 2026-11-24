@@ -243,6 +243,75 @@ def _next_notification(
 
 
 # ---------------------------------------------------------------------------
+# Poll loop (testable with a fake icon; no GUI imports)
+# ---------------------------------------------------------------------------
+
+def _main_thread_dispatcher(platform: str):
+    """Return ``on_main(fn)``: run ``fn`` on the GUI thread.
+
+    pystray runs the setup callback (our poll loop) on a background thread,
+    and its macOS backend mutates the NSStatusItem directly from whichever
+    thread sets ``icon.icon`` / ``icon.title`` / ``visible`` or calls
+    ``update_menu``/``notify``. macOS 27.2 asserts that AppKit status-item
+    work happens on the main thread and kills the process (SIGTRAP in
+    ``-[NSStatusItem setMenu:]`` -> ``assertBarrierOnQueue``), which left the
+    tray crash-looping under launchd. On darwin every mutation is posted to the
+    main run loop with ``AppHelper.callAfter``. Other backends (win32, GTK,
+    appindicator, xorg) marshal internally, so they run inline as before.
+    """
+    if platform == "darwin":
+        try:
+            from PyObjCTools import AppHelper
+            return AppHelper.callAfter
+        except Exception:  # noqa: BLE001 - pyobjc missing: nothing better to do
+            pass
+    return lambda fn, *a, **kw: fn(*a, **kw)
+
+
+def _poll_loop(controller: TrayController, icon, *, on_main, make_image,
+               sleep, interval: float) -> None:
+    """Poll the daemon and mirror its state onto the tray icon until Quit.
+
+    Runs on pystray's setup thread. Only the daemon poll and the decisions run
+    here; every touch of ``icon`` goes through ``on_main`` (see
+    ``_main_thread_dispatcher``). Values are bound as arguments, not read from
+    the enclosing scope, so a callback that runs later shows what this pass
+    decided.
+    """
+    def _set(attr: str, value) -> None:
+        setattr(icon, attr, value)
+
+    def _notify(message: str) -> None:
+        try:
+            icon.notify(message, "mcpbrain")
+        except Exception:  # noqa: BLE001 - a notification is best-effort
+            pass
+
+    on_main(_set, "visible", True)
+    last_attention = ""
+    last_review = 0
+    last_state: str | None = None
+    while not controller.should_exit():
+        controller.refresh()
+        state = controller.icon_state()
+        if state != last_state:
+            on_main(_set, "icon", make_image(state))
+            last_state = state
+        on_main(_set, "title", f"mcpbrain — {controller.status_text()}")
+        on_main(icon.update_menu)
+        msg, last_attention, last_review = _next_notification(
+            [a["detail"] for a in controller.attention()],
+            last_attention,
+            controller.review_count(),
+            last_review,
+        )
+        if msg:
+            on_main(_notify, msg)
+        sleep(interval)
+    on_main(icon.stop)
+
+
+# ---------------------------------------------------------------------------
 # Render layer (lazy pystray import — manual smoke only, not unit-tested)
 # ---------------------------------------------------------------------------
 
@@ -252,9 +321,9 @@ def run_tray(controller: TrayController) -> None:  # pragma: no cover
     Lazy-imports pystray (and PIL for the icon image) so importing mcpbrain.tray
     does not require a display backend. Blocks until the user picks Quit.
 
-    The setup callback polls controller.refresh() every couple of seconds,
-    refreshing the title and re-evaluating the menu so the status line and the
-    Pause/Resume label track the daemon. The loop exits and stops the icon once
+    The setup callback runs ``_poll_loop``: it polls controller.refresh() every
+    few seconds and posts the icon, title and menu updates to the main thread,
+    so the status line tracks the daemon. The loop exits and stops the icon once
     controller.should_exit() is True (the user picked Quit).
     """
     import time
@@ -286,32 +355,12 @@ def run_tray(controller: TrayController) -> None:  # pragma: no cover
             items.append(pystray.MenuItem(label, action, enabled=enabled))
         return items
 
+    on_main = _main_thread_dispatcher(sys.platform)
+
     def _setup(icon: "pystray.Icon") -> None:
-        icon.visible = True
-        last_attention = ""
-        last_review = 0
-        last_state: str | None = None
-        while not controller.should_exit():
-            controller.refresh()
-            state = controller.icon_state()
-            if state != last_state:
-                icon.icon = _make_icon_image(state)
-                last_state = state
-            icon.title = f"mcpbrain — {controller.status_text()}"
-            icon.update_menu()
-            msg, last_attention, last_review = _next_notification(
-                [a["detail"] for a in controller.attention()],
-                last_attention,
-                controller.review_count(),
-                last_review,
-            )
-            if msg:
-                try:
-                    icon.notify(msg, "mcpbrain")
-                except Exception:
-                    pass
-            time.sleep(_POLL_SECONDS)
-        icon.stop()
+        _poll_loop(controller, icon, on_main=on_main,
+                   make_image=_make_icon_image, sleep=time.sleep,
+                   interval=_POLL_SECONDS)
 
     icon = pystray.Icon(
         "mcpbrain",
