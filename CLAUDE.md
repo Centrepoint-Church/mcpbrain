@@ -155,8 +155,9 @@ their docstring: read it before changing them.
 
 ## Current state
 
-- **Released: 0.7.151** (2026-11-24) — source `aeb4c06a`, gh-pages `dcb405c6`,
-  plugin `cd76fe9`: the tray main-thread fix for macOS 27.2. Later commits on
+- **Released: 0.7.152** (2026-11-24) — source `61f402dd`, gh-pages `7dc3a7ea`,
+  plugin `c9f7b40`: fleet-report fix, quieter control API (0.7.151, same day:
+  the tray main-thread fix for macOS 27.2). Later commits on
   `main` are not released. Every install sends an hourly beacon;
   `mcpbrain fleet-report` shows fleet versions. Retire the daemon one-shot
   migrations once every install reports >= 0.7.144.

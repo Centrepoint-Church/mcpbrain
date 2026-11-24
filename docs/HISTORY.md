@@ -8,6 +8,36 @@ date order; each carries its own date.
 
 ---
 
+## 0.7.152 released (2026-11-24) — fleet-report, control-API log noise, dev_reinstall
+
+Source `61f402dd` (fixes `ca3dbf12`), gh-pages `7dc3a7ea`, plugin `c9f7b40`. CI
+green on the release commit; full suite **5729 passed** under the lock and
+under the fleet's resolved set (re-resolved through the published index:
+identical). Published wheel byte-identical to the build. Installed from the
+index: `/api/status` 0.7.152, doctor integrity ok, 0 need action; the tray had
+no crash report for over an hour after the 0.7.151 fix went on.
+
+- **fleet-report never wrote a report on a normal install.** `write_report`
+  read the folder from config `fleet.folder_id` only; the beacon (fixed in
+  0.7.150) falls back to the tenant profile, and setup never sets the config
+  key. The report printed "fleet.folder_id not set" and wrote nothing, then the
+  CLI printed "Fleet report written" anyway. Its CLI tests stubbed
+  `write_report`, so neither half was exercised. Now both use
+  `fleet_storage.fleet_folder_id`; `write_report` returns the beacon count and
+  the CLI exits 1 unless it wrote. First real report: 2 installs, one on
+  0.7.151 and one on 0.7.150 (its last beacon 2026-11-23 08:46 UTC).
+- **Control API tracebacks on client disconnect.** 369 tracebacks (~4 MB) in
+  `com.mcpbrain.err` were clients hanging up mid-reply. `_ControlHTTPServer`
+  drops BrokenPipe/ConnectionReset/ConnectionAborted; other handler errors
+  still print. The log's `OSError 49` entries (Google calls while the network is
+  down) and old nameparser `ImportError`s were left alone.
+- **`bin/dev_reinstall.py --help` ran the reinstall** (daemon booted out). It
+  now parses arguments before touching launchd; unknown flags exit 2.
+- Not changed: the tray's `MallocStackLogging` stderr line is printed by macOS
+  once per process start (1,412 of them = tray restarts, mostly the crash loop).
+
+---
+
 ## 0.7.151 released (2026-11-24) — tray crash loop on macOS 27.2
 
 **Incident.** From 2026-11-23 12:13 the tray crash-looped under launchd (60
