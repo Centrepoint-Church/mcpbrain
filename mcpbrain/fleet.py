@@ -347,17 +347,23 @@ def _list_beacon_files(drive_service, folder_id: str) -> list[dict]:
     return list(newest.values())
 
 
-def write_report(home, drive_service) -> None:
+def write_report(home, drive_service) -> int:
     """Aggregate all beacons into ``status.html`` and upload it to the fleet folder.
 
-    Skips malformed beacon JSON (logs a warning). Prints "No beacons found" and
-    writes nothing when the folder has no parseable beacons.
+    The folder resolves like the beacon's (``fleet_storage.fleet_folder_id``:
+    config ``fleet.folder_id``, else this build's tenant profile). It used to
+    read config only, so on an install that never set ``fleet.folder_id`` (most
+    of them) the report wrote nothing while every beacon still went to the
+    tenant folder. Returns the number of beacons in the uploaded report; 0 means
+    nothing was written. Skips malformed beacon JSON (logs a warning). Prints
+    "No beacons found" and writes nothing when the folder has none.
     """
-    from mcpbrain import config
-    folder_id = (config.read_config(home).get("fleet") or {}).get("folder_id")
+    from mcpbrain.fleet_storage import fleet_folder_id
+    folder_id = fleet_folder_id(home)
     if not folder_id:
-        print("fleet.folder_id not set — run mcpbrain setup to configure.")
-        return
+        print("no fleet folder: set fleet.folder_id, or use a build whose tenant "
+              "profile names one.")
+        return 0
     files = _list_beacon_files(drive_service, folder_id)
     beacons = []
     for f in files:
@@ -373,7 +379,8 @@ def write_report(home, drive_service) -> None:
             log.warning("skipping malformed beacon %s: %s", f.get("name"), exc)
     if not beacons:
         print("No beacons found")
-        return
+        return 0
     html = generate_report(beacons)
     _upload_text(drive_service, folder_id, "status.html", html, "text/html")
     log.info("fleet report written: %d beacon(s)", len(beacons))
+    return len(beacons)

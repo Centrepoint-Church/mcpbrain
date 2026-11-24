@@ -3,6 +3,7 @@ import logging
 import os
 import re
 import secrets
+import sys
 import tempfile
 import threading
 import urllib.parse
@@ -78,6 +79,26 @@ def h_text(h, code, text):
 
 class RestoreHoldRefused(RuntimeError):
     """Daemon.call_tool refused a store-writing tool during the restore hold."""
+
+# A client that hangs up before reading the reply (a tab closed mid-poll, a
+# timed-out tray/MCP request) makes the handler's write raise. socketserver's
+# default handle_error prints a full traceback to stderr for each, which filled
+# the daemon's launchd error log (369 tracebacks, ~4 MB) and buried real errors.
+_CLIENT_GONE = (BrokenPipeError, ConnectionResetError, ConnectionAbortedError)
+
+
+class _ControlHTTPServer(ThreadingHTTPServer):
+    """ThreadingHTTPServer that drops client-disconnect errors silently.
+
+    Every other exception still goes to the stock handler (traceback to
+    stderr), so a real handler bug stays visible.
+    """
+
+    def handle_error(self, request, client_address):
+        if isinstance(sys.exc_info()[1], _CLIENT_GONE):
+            return
+        super().handle_error(request, client_address)
+
 
 class ControlServer:
     def __init__(self, daemon, home, store=None):
@@ -509,7 +530,7 @@ class ControlServer:
                         return h_json(self, 404, {"error": "not found"})
                     return h_json(self, 200, graph_view.suppress_entity(server.store, eid))
                 self.send_response(404); self.end_headers()
-        self._httpd = ThreadingHTTPServer(("127.0.0.1", 0), H)
+        self._httpd = _ControlHTTPServer(("127.0.0.1", 0), H)
         self.port = self._httpd.server_address[1]
         self.home.mkdir(parents=True, exist_ok=True)
         for name, val in (("control_token", self.token), ("control_port", str(self.port))):

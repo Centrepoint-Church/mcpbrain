@@ -23,6 +23,7 @@ Running MCP servers keep the code they started with until their client
 """
 from __future__ import annotations
 
+import argparse
 import hashlib
 import os
 import shutil
@@ -104,7 +105,15 @@ def _step(msg: str) -> None:
     print(f"• {msg}", flush=True)
 
 
-def main() -> int:
+def main(argv: list[str] | None = None) -> int:
+    # It takes no options. Parse anyway, BEFORE touching launchd: a bare
+    # `--help` used to run the whole reinstall (daemon booted out and all).
+    # argparse prints help / rejects unknown flags and exits here.
+    argparse.ArgumentParser(
+        prog="bin/dev_reinstall.py",
+        description=__doc__.split("\n\n", 1)[0],
+        epilog="Takes no options. See the module docstring for what it checks.",
+    ).parse_args(argv)
     if sys.platform != "darwin":
         sys.exit("dev_reinstall is macOS-only (it drives launchd)")
     uid = os.getuid()

@@ -45,3 +45,29 @@ def test_wheel_excludes_reads_pyproject(tmp_path):
     p = tmp_path / "pyproject.toml"
     p.write_text('[tool.setuptools.packages.find]\nexclude = ["mcpbrain.devtools*", "other*"]\n')
     assert dr.wheel_excludes(p) == ("devtools",)
+
+
+def _no_side_effects(monkeypatch):
+    def boom(*a, **kw):
+        raise AssertionError("must not run anything before parsing arguments")
+    monkeypatch.setattr(dr.subprocess, "run", boom)
+    monkeypatch.setattr(dr.subprocess, "check_call", boom, raising=False)
+    monkeypatch.setattr(dr.subprocess, "check_output", boom, raising=False)
+
+
+def test_help_prints_and_exits_without_reinstalling(monkeypatch, capsys):
+    import pytest
+    _no_side_effects(monkeypatch)
+    with pytest.raises(SystemExit) as ei:
+        dr.main(["--help"])
+    assert ei.value.code == 0
+    assert "Reinstall this working tree" in capsys.readouterr().out
+
+
+def test_unknown_flag_is_rejected_without_reinstalling(monkeypatch, capsys):
+    import pytest
+    _no_side_effects(monkeypatch)
+    with pytest.raises(SystemExit) as ei:
+        dr.main(["--dry-run"])
+    assert ei.value.code == 2
+    assert "unrecognized arguments" in capsys.readouterr().err

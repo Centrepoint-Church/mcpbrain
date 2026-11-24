@@ -32,7 +32,7 @@ def test_fleet_report_uses_the_tenant_fleet_folder(tmp_path, monkeypatch, capsys
         "fleet_folder_id": "TENANT_FLEET"}))
     tenant._clear_cache()
     monkeypatch.setattr("mcpbrain.fleet_cli._build_drive_service", lambda: "SVC")
-    monkeypatch.setattr(fleet, "write_report", lambda home, svc: None)
+    monkeypatch.setattr(fleet, "write_report", lambda home, svc: 3)
     cli.main(["fleet-report"])
     assert "TENANT_FLEET" in capsys.readouterr().out
 
@@ -52,7 +52,7 @@ def test_fleet_report_writes_report_and_prints_url(tmp_path, monkeypatch, capsys
     from mcpbrain import config, fleet
     config.write_config(str(tmp_path), {"fleet": {"folder_id": "FLEET1"}})
     monkeypatch.setattr("mcpbrain.fleet_cli._build_drive_service", lambda: "SVC")
-    monkeypatch.setattr(fleet, "write_report", lambda home, svc: None)
+    monkeypatch.setattr(fleet, "write_report", lambda home, svc: 3)
     cli.main(["fleet-report"])
     out = capsys.readouterr().out
     assert "FLEET1" in out and "drive.google.com" in out
@@ -82,3 +82,19 @@ def test_fleet_report_beacon_unconfigured_exits_clean_no_error(tmp_path, monkeyp
     # Returns normally (no SystemExit), and never tries to build a Drive service.
     cli.main(["fleet-report", "--beacon"])
     assert built["n"] == 0
+
+
+def test_fleet_report_says_nothing_written_when_report_is_empty(tmp_path, monkeypatch, capsys):
+    """An empty fleet folder must not print "Fleet report written"."""
+    monkeypatch.setenv("MCPBRAIN_HOME", str(tmp_path))
+    from mcpbrain import config, fleet
+    config.write_config(str(tmp_path), {"fleet": {"folder_id": "FLEET1"}})
+
+    from tests.test_fleet import _DriveMulti
+    monkeypatch.setattr("mcpbrain.fleet_cli._build_drive_service",
+                        lambda: _DriveMulti({"listed": []}))
+    with pytest.raises(SystemExit) as ei:
+        cli.main(["fleet-report"])
+    out = capsys.readouterr().out
+    assert ei.value.code == 1
+    assert "No beacons found" in out and "written" not in out

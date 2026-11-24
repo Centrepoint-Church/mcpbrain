@@ -44,6 +44,9 @@ def main(argv=None) -> None:
     if args.beacon:
         fleet.write_beacon(home, svc)
         return
-    fleet.write_report(home, svc)
-    print(f"Fleet report written. View status.html in the fleet folder: "
-          f"https://drive.google.com/drive/folders/{folder_id}")
+    n = fleet.write_report(home, svc)
+    if not n:
+        # write_report already said why (no beacons, or no folder).
+        raise SystemExit(1)
+    print(f"Fleet report written ({n} install(s)). View status.html in the fleet "
+          f"folder: https://drive.google.com/drive/folders/{folder_id}")

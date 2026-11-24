@@ -533,3 +533,29 @@ def test_write_beacon_skips_when_no_folder_resolves(tmp_path, monkeypatch):
             raise AssertionError("no folder: Drive must not be touched")
 
     fleet.write_beacon(str(tmp_path), _Boom())
+
+
+def test_write_report_falls_back_to_the_tenant_fleet_folder(tmp_path, monkeypatch):
+    """The report must read the folder the beacons go to. It read config only,
+    so on an install without fleet.folder_id it wrote nothing (while the CLI
+    said "Fleet report written")."""
+    monkeypatch.setenv("MCPBRAIN_HOME", str(tmp_path))
+    from mcpbrain import config
+    config.write_config(str(tmp_path), {})
+    _tenant_with_folder(tmp_path, monkeypatch, "TENANT_FLEET")
+    store = {"listed": [{"id": "A", "name": "dana@northgatetrust.org.json"}],
+             "media_by_id": {"A": json.dumps(_beacon("dana@northgatetrust.org")).encode()}}
+    assert fleet.write_report(str(tmp_path), _DriveMulti(store)) == 1
+    rec = store["created"][0]
+    assert rec["body"]["name"] == "status.html"
+    assert rec["body"]["parents"] == ["TENANT_FLEET"]
+
+
+def test_write_report_returns_zero_when_nothing_written(tmp_path, monkeypatch):
+    monkeypatch.setenv("MCPBRAIN_HOME", str(tmp_path))
+    from mcpbrain import config
+    config.write_config(str(tmp_path), {})
+    _tenant_with_folder(tmp_path, monkeypatch, "")
+    assert fleet.write_report(str(tmp_path), _DriveMulti({"listed": []})) == 0
+    _tenant_with_folder(tmp_path, monkeypatch, "TENANT_FLEET")
+    assert fleet.write_report(str(tmp_path), _DriveMulti({"listed": []})) == 0
