@@ -8,6 +8,41 @@ date order; each carries its own date.
 
 ---
 
+## 0.7.151 released (2026-11-24) — tray crash loop on macOS 27.2
+
+**Incident.** From 2026-11-23 12:13 the tray crash-looped under launchd (60
+`python3.12-*.ips` reports in ~20 h, SIGTRAP, launchd last exit -5); the daemon
+was unaffected (one run, 4+ days up). Every report: thread 5 (pystray's setup
+thread) → `-[NSStatusItem setMenu:]` → `-[BSServiceMainRunLoopQueue
+assertBarrierOnQueue]`. pystray's macOS backend mutates the status item from
+whichever thread sets `icon`/`title`/`visible` or calls `update_menu`/`notify`,
+and our poll loop did that every 3 s from the setup thread; macOS 27.2.1
+(26B131) now enforces main-thread status-item work. **Fix** (`aa703823`): the
+loop moved to `tray._poll_loop`; every icon mutation goes through
+`_main_thread_dispatcher` (`AppHelper.callAfter` on darwin, inline elsewhere).
+A standalone pystray repro of the old pattern dies with SIGTRAP (exit 133); the
+fixed pattern survived 743 menu updates on the fleet's pyobjc 13.0.
+
+**Release.** Source `aeb4c06a`, gh-pages `fb1db011` (+ `dcb405c6`, below),
+plugin `cd76fe9`. CI green on the release commit. Full suite **5719 passed**
+under the lock and again under exactly the fleet's resolved set (mcp/mcp-types
+2.3.0, fastembed 0.9.1, nameparser 1.4.0, pyobjc 13.0, pystray 0.19.5;
+re-resolved through the published index afterwards: identical). Published
+wheel byte-identical to the build and carries `_main_thread_dispatcher`.
+Installed from the published index: `/api/status` 0.7.151, `stalled: None`,
+doctor integrity ok, 0 need action; tray up with no crash report in the 33 min
+after the fix went on (8 in the half hour before).
+
+**Pages 503 on missing paths.** After the publish, `uv tool install --index
+mcpbrain=…` (the exact command `update.py` runs fleet-wide) failed: uv asks the
+named index for every dependency, and Pages answered **503** instead of 404 for
+any path not already cached at the edge (cold MISS → 503; cached 404 → fine;
+githubstatus "operational"). A static `404.html` on `gh-pages` (`dcb405c6`)
+made cold misses answer 404 again and the index install succeeded. Without it
+an auto-update can fail silently. Keep `404.html` on the branch.
+
+---
+
 ## 0.7.150 released (2026-11-13)
 
 Source `40d8c339`, gh-pages `56422852`, plugin `5282445`; the index serves only

@@ -42,6 +42,10 @@ mcpbrain ships to other users as a **Claude Code plugin + a pip-installable pack
   bundles no server. Guarded by `tests/test_plugin_manifest.py`.
 - Users install the plugin from the **app catalogue**, never
   `claude plugin marketplace add` (cannot work for a private marketplace).
+- `gh-pages` must keep its static `404.html`: without it Pages answered 503 for
+  uncached missing paths, which fails every `uv --index` install and auto-update.
+- The tray's poll loop runs off the main thread: every pystray icon mutation goes
+  through `tray._main_thread_dispatcher` (macOS 27.2 kills off-main AppKit work).
 - Do not move the index URL casually: each install updates from the URL baked into
   its own wheel, so a move must ship via the old index and keep it alive.
 - **Windows hardware QA gate is OPEN** — do not onboard Windows users.
@@ -151,10 +155,11 @@ their docstring: read it before changing them.
 
 ## Current state
 
-- **Released: 0.7.150** (2026-11-13) — source `40d8c339`, gh-pages `56422852`,
-  plugin `5282445`. Later commits on `main` are not released. Every install now
-  sends an hourly beacon; `mcpbrain fleet-report` shows fleet versions. Retire the
-  daemon one-shot migrations once every install reports >= 0.7.144.
+- **Released: 0.7.151** (2026-11-24) — source `aeb4c06a`, gh-pages `dcb405c6`,
+  plugin `cd76fe9`: the tray main-thread fix for macOS 27.2. Later commits on
+  `main` are not released. Every install sends an hourly beacon;
+  `mcpbrain fleet-report` shows fleet versions. Retire the daemon one-shot
+  migrations once every install reports >= 0.7.144.
 - **Open:** Windows hardware QA; the owner acceptance checklist for the console
   redesign; owner-only checks for graph corrections (pending-correction approval,
   `@` picker, elicitation accept path); unclosed `<style>`/`<title>` keeps text;

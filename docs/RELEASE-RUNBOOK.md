@@ -126,6 +126,11 @@ the NEW url, keep the old index alive until every machine reports the new versio
 then retire it. The 2026-09-09 move skipped all of that because there was exactly
 one install.
 
+**Keep `404.html` at the `gh-pages` root.** uv asks the named index for every
+dependency; without a static 404 page, Pages answered 503 (not 404) for uncached
+missing paths on 2026-11-24 and every `--index` install failed, auto-update
+included. `ls ~/GitHub/mcpbrain-pages/404.html` before you push.
+
 `update.py` picks the highest PEP 440 version, so multiple wheels are *functionally*
 fine — but keep the index to the current wheel for clarity.
 
